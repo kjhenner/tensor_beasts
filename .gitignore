@@ -1,0 +1,58 @@
+# .gitignore
+
+# Python files
+*.py[cod]
+*.pyd
+*.pyo
+*.pyz
+__pycache__/
+
+# Tests and coverage
+.tox/
+.coverage
+.coverage.*
+.pytest_cache
+pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.coverage
+.hypothesis/
+htmlcov/
+
+# Jupyter notebook
+.ipynb_checkpoints
+
+# Flit
+*.egg-info/
+dist/
+build/
+flit/
+flit-*.toml
+.pydistutils.cfg
+
+# Cython
+*.so
+*.so.*
+# C files
+*.c
+*.cpp
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Environment variables
+.env
+
+# Pycharm
+.idea/
+
+# VS Code
+.vscode/
