@@ -1,7 +1,12 @@
+from functools import lru_cache
+
 import numpy as np
 from sympy.physics.quantum.identitysearch import scipy
 
-from tensor_beasts.util_numpy import directional_kernel_set, pad_matrix, safe_sub, safe_add, get_edge_mask
+from tensor_beasts.util_numpy import (
+    directional_kernel_set, pad_matrix, safe_sub, safe_add, get_edge_mask,
+    get_direction_matrix
+)
 from tensor_beasts.util_torch import safe_mult
 
 
@@ -14,25 +19,58 @@ DIRECTION_NAMES = {
 }
 
 
-def move(entity_energy, divide_threshold, food_energy, rand_array, large_kernel=False):
-    direction_kernels = directional_kernel_set(11) if large_kernel else directional_kernel_set(5)
-    small_kernels = directional_kernel_set(5)
+@lru_cache
+def generate_diffusion_kernel():
+    kernel = np.array([
+        [0, 0, 1, 0, 0],
+        [0, 1, 2, 1, 0],
+        [1, 2, 3, 2, 1],
+        [0, 1, 2, 1, 0],
+        [0, 0, 1, 0, 0],
+    ])
+    return kernel / np.sum(kernel)
 
-    directions = np.argmax(
-        [food_energy] +
-        [scipy.ndimage.correlate(food_energy, direction_kernels[d], mode='constant', cval=0) + (rand_array % d) for d in range(1, 5)],
-        axis=0
-    )
-    directions_orig = {d: (entity_energy > 0) * (directions == d).astype(np.uint8) for d in range(0, 5)}
+
+def diffuse_scent(entity_energy, entity_scent):
+    entity_scent[:] = scipy.ndimage.correlate(entity_scent.astype(np.float32), generate_diffusion_kernel().astype(np.float32), mode='constant', cval=0).astype(np.uint8)
+    safe_sub(entity_scent, 2)
+    entity_scent[:] = scipy.ndimage.correlate(entity_scent.astype(np.float32), generate_diffusion_kernel().astype(np.float32), mode='constant', cval=0).astype(np.uint8)
+    safe_sub(entity_scent, 1)
+    safe_add(entity_scent[:], entity_energy[:])
+
+
+def move(entity_energy, divide_threshold, target_energy, rand_array, intent_kernel_size=1, clearance_kernel_size=5):
+    if intent_kernel_size == 1:
+        # directions = np.argmax(
+        #     # [target_energy] + [safe_add(pad_matrix(target_energy.copy(), d), rand_array[d, d]) for d in [2, 1, 4, 3]],
+        #     # [target_energy] + [safe_add(pad_matrix(target_energy.copy(), d), rng.integers(0, 64, target_energy.shape, dtype=np.uint8)) for d in [2, 1, 4, 3]],
+        #     [target_energy] + [rng.integers(0, 255, target_energy.shape, dtype=np.uint8) for d in [2, 1, 4, 3]],
+        #     axis=0
+        # )
+        original = target_energy.copy()
+        directions = get_direction_matrix(target_energy)
+        assert np.all(original == target_energy)
+    else:
+        direction_kernels = directional_kernel_set(intent_kernel_size)
+        directions = np.argmax(
+            [target_energy] +
+            [scipy.ndimage.correlate(target_energy.astype(np.float32) + (rand_array + d) % 2, direction_kernels[d].astype(np.float32) / 4, mode='constant', cval=0) for d in range(1, 5)],
+            axis=0
+        )
+
+    for d in range(0, 5):
+        print(f"Direction {DIRECTION_NAMES[d]}:")
+        print(np.sum(directions == d))
 
     # Create boolean direction matrices
     # This is 1 where an entity is present and intends to move in that direction
     direction_masks = {d: ((directions == d) * (entity_energy > 0)).astype(np.uint8) for d in range(1, 5)}
     direction_masks_orig = {d: ((directions == d) * (entity_energy > 0)).astype(np.uint8) for d in range(0, 5)}
 
+    clearance_kernels = directional_kernel_set(clearance_kernel_size)
     # Check clearance for each direction
     for d in range(1, 5):
-        direction_masks[d] *= ~(scipy.ndimage.correlate((entity_energy > 0).astype(np.uint8), small_kernels[d], mode='constant', cval=1)).astype(bool)
+        direction_masks[d] *= ~(scipy.ndimage.correlate((entity_energy > 0).astype(np.uint8), clearance_kernels[d], mode='constant', cval=1)).astype(bool)
 
     new_positions = np.sum(np.array([
         pad_matrix(
@@ -58,7 +96,7 @@ def move(entity_energy, divide_threshold, food_energy, rand_array, large_kernel=
     entity_energy[:] = new_positions + remaining_input
 
     return {
-        "directions": direction_masks_orig
+        "directions": directions,
     }
 
 

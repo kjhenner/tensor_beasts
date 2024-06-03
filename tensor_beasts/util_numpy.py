@@ -77,3 +77,71 @@ def get_edge_mask(shape: tuple):
     mask[:, 0] = 1
     mask[:, -1] = 1
     return mask
+
+
+def get_direction_matrix_bak(matrix):
+    # Step 1: Roll matrices and handle edges
+    up = np.roll(matrix, shift=-1, axis=0)
+    down = np.roll(matrix, shift=1, axis=0)
+    left = np.roll(matrix, shift=-1, axis=1)
+    right = np.roll(matrix, shift=1, axis=1)
+
+    # Setting the boundaries to -inf to avoid wrapping around behavior
+    up[-1, :] = 0
+    down[0, :] = 0
+    left[:, -1] = 0
+    right[:, 0] = 0
+
+    # Step 2: Stack matrices to work with all directions together
+    stacked = np.stack([matrix, up, down, left, right], axis=-1)
+
+    # Step 3: Determine the indices of the max values along the stacked direction axis
+    max_indices = np.argmax(stacked, axis=-1)
+
+    # Mapping index to corresponding direction:
+    # 0 -> same cell, 1 -> up, 2 -> down, 3 -> left, 4 -> right
+    index_to_direction = np.array([0, 1, 2, 3, 4])
+
+    # Step 4: Apply mapping to get the final direction matrix
+    direction_matrix = index_to_direction[max_indices]
+
+    return direction_matrix
+
+
+def get_direction_matrix(matrix):
+    rows, cols = matrix.shape
+
+    # Step 1: Roll matrices and handle edges
+    # up = np.roll(matrix, shift=-1, axis=0)
+    # down = np.roll(matrix, shift=1, axis=0)
+    # left = np.roll(matrix, shift=-1, axis=1)
+    # right = np.roll(matrix, shift=1, axis=1)
+    down = np.roll(matrix, shift=-1, axis=0)
+    up = np.roll(matrix, shift=1, axis=0)
+    right = np.roll(matrix, shift=-1, axis=1)
+    left = np.roll(matrix, shift=1, axis=1)
+
+    # Setting the boundaries to -inf to avoid wrapping around behavior
+    up[-1, :] = 0
+    down[0, :] = 0
+    left[:, -1] = 0
+    right[:, 0] = 0
+
+    # Stack matrices to work with all directions together
+    stacked = np.stack([matrix, up, down, left, right], axis=-1)
+
+    # Step 2: Compute the maximum values across the stacked axis
+    max_values = np.max(stacked, axis=-1)
+
+    # Create masks for each direction
+    masks = (stacked == max_values[..., None])
+
+    # Step 3: Randomly resolve ties:
+    # Generate random tie-breaker decisions
+    random_choices = np.random.random(masks.shape)
+    # Use random choices to introduce random tie-breakers
+    random_max_masks = masks * random_choices
+    # Find the direction with the maximum random choice for those tied maxima
+    direction_indices = np.argmax(random_max_masks, axis=-1)
+
+    return direction_indices
