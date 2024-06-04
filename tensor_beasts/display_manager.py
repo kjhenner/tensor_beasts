@@ -1,4 +1,7 @@
+from typing import Dict
+
 import pygame
+import torch
 from pygame import DOUBLEBUF, OPENGL
 import numpy as np
 from OpenGL.GL import (
@@ -10,17 +13,17 @@ from OpenGL.GL import (
 
 
 class DisplayManager:
-    def __init__(self, screen_width, screen_height, screens):
+    def __init__(self, screen_width, screen_height, screens: Dict[str, torch.Tensor]):
         self.width = screen_width
         self.height = screen_height
-        self.zoom_level = 1.0
+        self.zoom_level = 1
         self.clock = pygame.time.Clock()
         self.current_screen = 0
         self.screens = screens
         self.screen_names = list(screens.keys())
         self.display = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL)
 
-        self.display_array = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        self.display_array = torch.zeros((self.height, self.width, 3), dtype=torch.uint8)
 
         pygame.init()
         glEnable(GL_TEXTURE_2D)
@@ -38,12 +41,12 @@ class DisplayManager:
         if self.zoom_level > 1:
             zoom_divisor = int(self.width // self.zoom_level)
             screen = screen[:zoom_divisor, :zoom_divisor]
-            display = screen.repeat(self.zoom_level, axis=0).repeat(self.zoom_level, axis=1)
+            display = screen.repeat_interleave(self.zoom_level, 0).repeat_interleave(self.zoom_level, 1)
         else:
             display = screen
 
         glBindTexture(GL_TEXTURE_2D, self.texture)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, display)
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, display.cpu().numpy())
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -61,7 +64,7 @@ class DisplayManager:
 
     def set_screen(self, screen_name, screen):
         if len(screen.shape) < 3:
-            screen = np.stack((screen, screen, screen), axis=-1)
+            screen = torch.stack((screen, screen, screen), dim=-1)
         self.screens[screen_name] = screen
 
     def next_screen(self):
@@ -72,4 +75,4 @@ class DisplayManager:
 
     def zoom_out(self):
         if self.zoom_level > 1:
-            self.zoom_level /= 2
+            self.zoom_level //= 2

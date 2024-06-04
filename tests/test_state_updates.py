@@ -1,6 +1,6 @@
 import numpy as np
 import pytest
-from tensor_beasts.state_updates import move, eat, germinate, grow
+from tensor_beasts.state_updates_numpy import move, eat, germinate, grow
 
 
 @pytest.fixture

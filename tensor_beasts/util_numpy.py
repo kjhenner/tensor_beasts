@@ -13,15 +13,39 @@ def directional_kernel_set(size: int):
     }
 
 
-def safe_add(a, b):
+def safe_add(a, b, inplace=True):
+    if not inplace:
+        a = a.copy()
     a += b
     a[a < b] = 255
     return a
 
 
-def safe_sub(a, b):
+def safe_sub(a, b, inplace=True):
+    if not inplace:
+        a = a.copy()
     a -= b
     a[a > 255 - b] = 0
+    return a
+
+
+def safe_mult(a, b, inplace=True):
+    if not inplace:
+        a = a.copy()  # Create a copy to avoid modifying the original array if inplace is False
+
+    result = np.multiply(a.astype(np.uint16), b.astype(np.uint16))
+
+    overflow_mask = result > 255
+    result = np.where(overflow_mask, 255, result)
+
+    a[:] = result.astype(np.uint8)
+    return a
+
+
+def safe_mult(a, b, inplace=True):
+    a_copy = a.copy()
+    a_copy *= b
+    a_copy[a_copy < a] = 255
     return a
 
 
@@ -79,43 +103,7 @@ def get_edge_mask(shape: tuple):
     return mask
 
 
-def get_direction_matrix_bak(matrix):
-    # Step 1: Roll matrices and handle edges
-    up = np.roll(matrix, shift=-1, axis=0)
-    down = np.roll(matrix, shift=1, axis=0)
-    left = np.roll(matrix, shift=-1, axis=1)
-    right = np.roll(matrix, shift=1, axis=1)
-
-    # Setting the boundaries to -inf to avoid wrapping around behavior
-    up[-1, :] = 0
-    down[0, :] = 0
-    left[:, -1] = 0
-    right[:, 0] = 0
-
-    # Step 2: Stack matrices to work with all directions together
-    stacked = np.stack([matrix, up, down, left, right], axis=-1)
-
-    # Step 3: Determine the indices of the max values along the stacked direction axis
-    max_indices = np.argmax(stacked, axis=-1)
-
-    # Mapping index to corresponding direction:
-    # 0 -> same cell, 1 -> up, 2 -> down, 3 -> left, 4 -> right
-    index_to_direction = np.array([0, 1, 2, 3, 4])
-
-    # Step 4: Apply mapping to get the final direction matrix
-    direction_matrix = index_to_direction[max_indices]
-
-    return direction_matrix
-
-
-def get_direction_matrix(matrix):
-    rows, cols = matrix.shape
-
-    # Step 1: Roll matrices and handle edges
-    # up = np.roll(matrix, shift=-1, axis=0)
-    # down = np.roll(matrix, shift=1, axis=0)
-    # left = np.roll(matrix, shift=-1, axis=1)
-    # right = np.roll(matrix, shift=1, axis=1)
+def get_direction_matrix(matrix, random_choices=None):
     down = np.roll(matrix, shift=-1, axis=0)
     up = np.roll(matrix, shift=1, axis=0)
     right = np.roll(matrix, shift=-1, axis=1)
@@ -138,7 +126,8 @@ def get_direction_matrix(matrix):
 
     # Step 3: Randomly resolve ties:
     # Generate random tie-breaker decisions
-    random_choices = np.random.random(masks.shape)
+    if random_choices is None:
+        random_choices = np.random.random(masks.shape)
     # Use random choices to introduce random tie-breakers
     random_max_masks = masks * random_choices
     # Find the direction with the maximum random choice for those tied maxima

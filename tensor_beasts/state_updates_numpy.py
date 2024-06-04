@@ -8,6 +8,7 @@ from tensor_beasts.util_numpy import (
     get_direction_matrix
 )
 from tensor_beasts.util_torch import safe_mult
+from tensor_beasts.comparator import compare
 
 
 DIRECTION_NAMES = {
@@ -39,38 +40,35 @@ def diffuse_scent(entity_energy, entity_scent):
     safe_add(entity_scent[:], entity_energy[:])
 
 
-def move(entity_energy, divide_threshold, target_energy, rand_array, intent_kernel_size=1, clearance_kernel_size=5):
-    if intent_kernel_size == 1:
-        # directions = np.argmax(
-        #     # [target_energy] + [safe_add(pad_matrix(target_energy.copy(), d), rand_array[d, d]) for d in [2, 1, 4, 3]],
-        #     # [target_energy] + [safe_add(pad_matrix(target_energy.copy(), d), rng.integers(0, 64, target_energy.shape, dtype=np.uint8)) for d in [2, 1, 4, 3]],
-        #     [target_energy] + [rng.integers(0, 255, target_energy.shape, dtype=np.uint8) for d in [2, 1, 4, 3]],
-        #     axis=0
-        # )
-        original = target_energy.copy()
-        directions = get_direction_matrix(target_energy)
-        assert np.all(original == target_energy)
-    else:
-        direction_kernels = directional_kernel_set(intent_kernel_size)
-        directions = np.argmax(
-            [target_energy] +
-            [scipy.ndimage.correlate(target_energy.astype(np.float32) + (rand_array + d) % 2, direction_kernels[d].astype(np.float32) / 4, mode='constant', cval=0) for d in range(1, 5)],
-            axis=0
-        )
+def move(
+    entity_energy,
+    divide_threshold,
+    target_energy,
+    opposite_energy=None,
+    clearance_kernel_size=5,
+    random_choices=None
+):
+    if opposite_energy is not None:
+        target_energy = safe_sub(target_energy, opposite_energy, inplace=False)
 
-    for d in range(0, 5):
-        print(f"Direction {DIRECTION_NAMES[d]}:")
-        print(np.sum(directions == d))
+    directions = get_direction_matrix(target_energy, random_choices=random_choices)
 
-    # Create boolean direction matrices
     # This is 1 where an entity is present and intends to move in that direction
     direction_masks = {d: ((directions == d) * (entity_energy > 0)).astype(np.uint8) for d in range(1, 5)}
-    direction_masks_orig = {d: ((directions == d) * (entity_energy > 0)).astype(np.uint8) for d in range(0, 5)}
 
     clearance_kernels = directional_kernel_set(clearance_kernel_size)
     # Check clearance for each direction
     for d in range(1, 5):
-        direction_masks[d] *= ~(scipy.ndimage.correlate((entity_energy > 0).astype(np.uint8), clearance_kernels[d], mode='constant', cval=1)).astype(bool)
+        # Compare clearance kernels
+        compare(f"direction_mask_{DIRECTION_NAMES[d]}", direction_masks[d])
+        compare(f"clearance_kernel_{DIRECTION_NAMES[d]}", clearance_kernels[d])
+        compare(f"nonzero_{DIRECTION_NAMES[d]}", (entity_energy > 0))
+        corr = scipy.ndimage.correlate((entity_energy > 0).astype(np.uint8), clearance_kernels[d], mode='constant', cval=1)
+        compare(f"clearance_correlation_{DIRECTION_NAMES[d]}", corr)
+        direction_masks[d] *= ~(scipy.ndimage.correlate(
+            (entity_energy > 0).astype(np.uint8), clearance_kernels[d], mode='constant', cval=1)
+        ).astype(bool)
+        compare(f"move_clearance_{DIRECTION_NAMES[d]}", direction_masks[d])
 
     new_positions = np.sum(np.array([
         pad_matrix(

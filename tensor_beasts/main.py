@@ -6,7 +6,7 @@ from collections import defaultdict
 import scipy.ndimage
 
 from tensor_beasts.display_manager import DisplayManager
-from tensor_beasts.state_updates import grow, germinate, move, eat, diffuse_scent
+from tensor_beasts.state_updates_numpy import grow, germinate, move, eat, diffuse_scent
 from tensor_beasts.util_numpy import directional_kernel_set, pad_matrix, safe_sub, safe_add
 
 
@@ -25,6 +25,7 @@ def main():
     herbivore_scent_idx = 6
     predator_energy_idx = 7
     predator_momentum_idx = 8
+    predator_scent_idx = 9
 
 
     width = 512
@@ -45,16 +46,20 @@ def main():
 
     screens = {
         'rgb': np.zeros((width, height, 3), dtype=np.uint8),
-        'scent': np.zeros((width, height, 3), dtype=np.uint8)
+        'plant_scent': np.zeros((width, height, 3), dtype=np.uint8),
+        'herbivore_scent': np.zeros((width, height, 3), dtype=np.uint8)
     }
 
     display_manager = DisplayManager(width, height, screens)
 
     # Initialize a 1024x1024x8 tensor with zeros
-    world_tensor = np.zeros((width, height, 8), dtype=np.uint8)
+    world_tensor = np.zeros((width, height, 10), dtype=np.uint8)
     plant_energy = world_tensor[:, :, plant_energy_idx]
     plant_scent = world_tensor[:, :, plant_scent_idx]
     herbivore_energy = world_tensor[:, :, herbivore_energy_idx]
+    herbivore_scent = world_tensor[:, :, herbivore_scent_idx]
+    predator_scent = world_tensor[:, :, predator_scent_idx]
+    predator_energy = world_tensor[:, :, predator_energy_idx]
 
     # Set the plant channel to 1 at random locations
     plant_energy[:] = (rng.integers(0, plant_init_odds, (width, height), dtype=np.uint8) == 0)
@@ -63,9 +68,9 @@ def main():
         rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
     ) * 255
 
-    # world_tensor[:, :, predator_energy_idx] = (
-    #     rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
-    # ) * 255
+    world_tensor[:, :, predator_energy_idx] = (
+        rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
+    ) * 255
 
     plant_crowding_kernel = np.array([
         [0, 1, 1, 1, 0],
@@ -93,23 +98,27 @@ def main():
                     herbivore_energy[:] = (
                       rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
                     ) * 255
+
         rand_array = rand_arrays[step % rand_size]
 
         plant_mask = numpy.array(plant_energy[:], dtype=bool)
         plant_crowding = scipy.ndimage.convolve(plant_mask, plant_crowding_kernel, mode='constant')
 
         grow(plant_energy, plant_growth_odds, plant_crowding, plant_crowding_odds, rand_array)
+        # grow(plant_energy, plant_growth_odds, plant_scent, plant_crowding_odds, rand_array)
         world_tensor[:, :, seed_idx] |= plant_crowding > (rand_array % plant_seed_odds)
 
         germinate(world_tensor[:, :, seed_idx], plant_energy, plant_germination_odds, rand_array)
 
         diffuse_scent(plant_energy, plant_scent)
+        diffuse_scent(herbivore_energy, herbivore_scent)
+        diffuse_scent(predator_energy, predator_scent)
 
-        move_data = move(herbivore_energy, 250, plant_scent, rand_array)
-        safe_sub(herbivore_energy, 1)
+        move(herbivore_energy, 250, plant_scent, safe_add(herbivore_scent, predator_scent))
+        safe_sub(herbivore_energy, 2)
 
-        # move(world_tensor[:, :, predator_energy_idx], 250, herbivore_energy, rand_array, True)
-        # safe_sub(world_tensor[:, :, predator_energy_idx], 1)
+        move(predator_energy, 250, herbivore_scent, predator_scent)
+        safe_sub(predator_energy, 1)
 
         eat(herbivore_energy, plant_energy, herbivore_eat_max)
         eat(world_tensor[:, :, predator_energy_idx], herbivore_energy, predator_eat_max)
@@ -118,7 +127,8 @@ def main():
         # seed_rgb = world_tensor[:, :, (seed_idx, 0, seed_idx)] * 255  # Extract RGB channels
 
         display_manager.set_screen('rgb', plant_rgb)
-        display_manager.set_screen('scent', plant_scent)
+        display_manager.set_screen('plant_scent', plant_scent)
+        display_manager.set_screen('herbivore_scent', herbivore_scent)
         display_manager.update()
 
         runtime_stats['current_screen'] = display_manager.screen_names[display_manager.current_screen]
