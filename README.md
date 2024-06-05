@@ -37,3 +37,11 @@ options:
   --size SIZE      The size of the world. (default: 768)
   --device DEVICE  The device to use. (default: mps)
 ```
+
+Once it's running, there are a few commands you can use:
+
+- `n` to toggle the active screen.
+- `+` to zoom in.
+- `-` to zoom out.
+- `h` to re-seed with herbivores.
+- `p` to re-seed with predators.
