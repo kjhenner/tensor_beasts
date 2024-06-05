@@ -2,6 +2,36 @@ import torch
 import torch.nn.functional as F
 from functools import lru_cache
 
+import time
+import statistics
+
+# Initialize a dictionary to store function execution times
+execution_times = {}
+
+
+def timing(func):
+    def wrapper(*args, **kwargs):
+        global execution_times
+        start_time = time.time()          # Record start time
+        result = func(*args, **kwargs)    # Call the original function
+        end_time = time.time()            # Record end time
+        elapsed_time = end_time - start_time  # Calculate elapsed time
+
+        # Record the execution time in the dictionary
+        if func.__name__ not in execution_times:
+            execution_times[func.__name__] = []
+        execution_times[func.__name__].append(elapsed_time)
+
+        return result
+
+    return wrapper
+
+
+def get_mean_execution_times():
+    return {
+        "function_timing": {k: statistics.mean(v) for k, v in execution_times.items()}
+    }
+
 
 @lru_cache
 def directional_kernel_set(size: int):
@@ -129,7 +159,7 @@ def get_direction_matrix(matrix, random_choices=None):
     return direction_indices
 
 
-def torch_correlate(input: torch.Tensor, kernel, mode='constant', cval=0):
+def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     """
     Mimic scipy.ndimage.correlate using PyTorch's conv2d.
 
@@ -168,3 +198,36 @@ def torch_correlate(input: torch.Tensor, kernel, mode='constant', cval=0):
     # Remove the extra dimensions added earlier
     result = result.squeeze()
     return result.type(input_dtype)
+
+
+def torch_correlate_3d(input_tensor, weights):
+    """
+    Apply a batched 2D convolution to a (H, W, C) tensor using (H, W) weights and return (H, W, C) tensor.
+    Each channel in the input tensor is treated as a separate batch for 2D convolution.
+
+    Parameters:
+    - input_tensor: torch.Tensor of shape (H, W, C)
+    - weights: torch.Tensor of shape (K, K)
+
+    Returns:
+    - output_tensor: torch.Tensor of shape (H, W, C)
+    """
+    # Ensure input_tensor is of shape (H, W, C)
+    assert len(input_tensor.shape) == 3, "input_tensor must be of shape (H, W, C)"
+
+    # Ensure weights is of shape (K, K)
+    assert len(weights.shape) == 2, "weights must be 2D"
+
+    # Convert input_tensor to shape (C, 1, H, W) to treat channels as separate batches
+    input_4d = input_tensor.permute(2, 0, 1).unsqueeze(1)
+
+    # Convert weights to shape (1, 1, K, K) to apply the same kernel on all channels
+    weight_4d = weights.unsqueeze(0).unsqueeze(0)
+
+    # Apply 2D convolution for each channel separately using conv2d with groups=C
+    conv_output = F.conv2d(input_4d, weight_4d, stride=1, padding='same', groups=1)
+
+    # Convert output back to (H, W, C) by inverting the initial permutation
+    output_tensor = conv_output.squeeze(1).permute(1, 2, 0)
+
+    return output_tensor

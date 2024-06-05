@@ -1,6 +1,9 @@
 import pytest
 import torch
-from tensor_beasts.util_torch import directional_kernel_set, safe_add, safe_sub, generate_direction_kernel, pad_matrix
+from tensor_beasts.util_torch import (
+    directional_kernel_set, safe_add, safe_sub, generate_direction_kernel, pad_matrix,
+    torch_correlate_3d
+)
 
 
 def test_directional_kernel_set_cache():
@@ -114,3 +117,66 @@ def test_generate_direction_kernel(size, direction, expected):
 def test_pad_matrix(mat, direction, expected):
     result = pad_matrix(mat, direction)
     assert torch.equal(result, expected)
+
+
+def test_torch_correlate_3d():
+    # Example input of shape (H, W, C)
+    input_tensor = torch.tensor(
+        [
+            [[1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5]],
+            [[0, 0, 0, 0, 0],
+             [0, 0, 0, 0, 0],
+             [0, 0, 10, 0, 0],
+             [0, 0, 0, 0, 0],
+             [0, 0, 0, 0, 0]],
+            [[1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5],
+             [1, 2, 3, 4, 5]],
+        ]
+    ).float().permute(1, 2, 0)
+
+    # Example 2D kernel of shape (2, 2)
+    weights = torch.tensor(
+        [
+            [0, 1, 0],
+            [1, 1, 1],
+            [0, 1, 0]
+        ]
+    ).float()
+
+    # Expected output for manual calculation
+    expected_output = torch.tensor(
+        [
+            [[4, 8, 12, 16, 14],
+             [5, 10, 15, 20, 19],
+             [5, 10, 15, 20, 19],
+             [5, 10, 15, 20, 19],
+             [4, 8, 12, 16, 14]],
+            [[0, 0, 0, 0, 0],
+             [0, 0, 10, 0, 0],
+             [0, 10, 10, 10, 0],
+             [0, 0, 10, 0, 0],
+             [0, 0, 0, 0, 0]],
+            [[4, 8, 12, 16, 14],
+             [5, 10, 15, 20, 19],
+             [5, 10, 15, 20, 19],
+             [5, 10, 15, 20, 19],
+             [4, 8, 12, 16, 14]],
+        ]
+    ).float()
+
+    # Compute output
+    output = torch_correlate_3d(input_tensor, weights)
+
+    # Check if the output shape is correct
+    assert output.shape == input_tensor.shape, "Output tensor has incorrect shape."
+
+    # Check if the output is correct
+    assert torch.allclose(output.permute(2, 0, 1), expected_output), \
+        f"Output tensor is incorrect. Expected \n{expected_output}\n, but got \n{output.permute(2, 0, 1)}\n"

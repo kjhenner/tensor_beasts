@@ -10,6 +10,8 @@ from tensor_beasts.util_numpy import (
 from tensor_beasts.util_torch import safe_mult
 from tensor_beasts.comparator import compare
 
+from tensor_beasts.util_torch import timing
+
 
 DIRECTION_NAMES = {
     0: 'hold',
@@ -32,6 +34,7 @@ def generate_diffusion_kernel():
     return kernel / np.sum(kernel)
 
 
+@timing
 def diffuse_scent(entity_energy, entity_scent):
     entity_scent[:] = scipy.ndimage.correlate(entity_scent.astype(np.float32), generate_diffusion_kernel().astype(np.float32), mode='constant', cval=0).astype(np.uint8)
     safe_sub(entity_scent, 2)
@@ -40,6 +43,7 @@ def diffuse_scent(entity_energy, entity_scent):
     safe_add(entity_scent[:], entity_energy[:])
 
 
+@timing
 def move(
     entity_energy,
     divide_threshold,
@@ -98,12 +102,14 @@ def move(
     }
 
 
+@timing
 def eat(herbivore_energy, plant_energy, eat_max):
     eat_tensor = (herbivore_energy > 0).astype(np.uint8) * np.min([plant_energy, np.ones(plant_energy.shape, dtype=np.uint8) + eat_max], axis=0)
     safe_sub(plant_energy, eat_tensor)
     safe_add(herbivore_energy, eat_tensor // 2)
 
 
+@timing
 def germinate(seeds, plant_energy, germination_odds, rand_array):
     germination_rand = rand_array % germination_odds
     seed_germination = (
@@ -113,6 +119,7 @@ def germinate(seeds, plant_energy, germination_odds, rand_array):
     safe_sub(seeds, seed_germination)
 
 
+@timing
 def grow(plant_energy, plant_growth_odds, crowding, crowding_odds, rand_array):
     growth_rand = rand_array % plant_growth_odds
     growth = plant_energy <= growth_rand

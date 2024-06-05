@@ -1,19 +1,10 @@
 from functools import lru_cache
 
-import numpy as np
 import torch
-from tensor_beasts.util_torch import torch_correlate as correlate
-from scipy.ndimage import correlate as correlate_numpy
+from tensor_beasts.util_torch import torch_correlate_2d as correlate_2d, torch_correlate_3d as correlate_3d, timing
 
 from tensor_beasts.util_torch import (
     directional_kernel_set, pad_matrix, safe_sub, safe_add, get_direction_matrix
-)
-
-from tensor_beasts.comparator import compare
-
-from tensor_beasts.util_numpy import (
-    directional_kernel_set as directional_kernel_set_numpy, safe_sub as safe_sub_numpy, safe_add as safe_add_numpy,
-    get_direction_matrix as get_direction_matrix_numpy
 )
 
 
@@ -27,7 +18,7 @@ DIRECTION_NAMES = {
 
 
 @lru_cache
-def generate_diffusion_kernel():
+def generate_diffusion_kernel_bk():
     kernel = torch.tensor([
         [0, 0, 1, 0, 0],
         [0, 1, 2, 1, 0],
@@ -38,18 +29,29 @@ def generate_diffusion_kernel():
     return kernel / torch.sum(kernel)
 
 
+def generate_diffusion_kernel():
+    kernel = torch.tensor([
+        [0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 1, 1, 1, 0, 0],
+        [0, 1, 1, 1, 1, 1, 0],
+        [1, 1, 1, 1, 1, 1, 1],
+        [0, 1, 1, 1, 1, 1, 0],
+        [0, 0, 1, 1, 1, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0],
+    ], dtype=torch.float32)
+    return kernel / torch.sum(kernel)
+
+
+@timing
 def diffuse_scent(entity_energy, entity_scent):
-    entity_scent[:] = torch.tensor(
-        correlate(entity_scent.type(torch.float32), generate_diffusion_kernel().type(torch.float32), mode='constant', cval=0)
-    ).type(torch.uint8)
-    safe_sub(entity_scent, 2)
-    entity_scent[:] = torch.tensor(
-        correlate(entity_scent.type(torch.float32), generate_diffusion_kernel().type(torch.float32), mode='constant', cval=0)
-    ).type(torch.uint8)
+    entity_scent[:] = correlate_3d(entity_scent.type(torch.float32), generate_diffusion_kernel().type(torch.float32)).type(torch.uint8)
+    safe_sub(entity_scent, 1)
+    entity_scent[:] = correlate_3d(entity_scent.type(torch.float32), generate_diffusion_kernel().type(torch.float32)).type(torch.uint8)
     safe_sub(entity_scent, 1)
     safe_add(entity_scent[:], entity_energy[:])
 
 
+@timing
 def move(
     entity_energy: torch.Tensor,
     divide_threshold: int,
@@ -72,7 +74,7 @@ def move(
     clearance_kernels = directional_kernel_set(clearance_kernel_size)
     for d in range(1, 5):
         direction_masks[d] *= ~(torch.tensor(
-            correlate((entity_energy > 0).type(torch.float32), clearance_kernels[d].type(torch.float32), mode='constant', cval=1)
+            correlate_2d((entity_energy > 0).type(torch.float32), clearance_kernels[d].type(torch.float32), mode='constant', cval=1)
         ).type(torch.bool))
 
     new_positions = torch.sum(torch.stack([
@@ -102,6 +104,7 @@ def move(
     }
 
 
+@timing
 def eat(herbivore_energy, plant_energy, eat_max):
     eat_tensor = (herbivore_energy > 0).type(torch.uint8) * torch.min(
         torch.stack([plant_energy, torch.ones(plant_energy.shape, dtype=torch.uint8) * eat_max], dim=0),
@@ -111,6 +114,7 @@ def eat(herbivore_energy, plant_energy, eat_max):
     safe_add(herbivore_energy, eat_tensor // 2)
 
 
+@timing
 def germinate(seeds, plant_energy, germination_odds, rand_tensor):
     germination_rand = rand_tensor % germination_odds
     seed_germination = (
@@ -120,6 +124,7 @@ def germinate(seeds, plant_energy, germination_odds, rand_tensor):
     safe_sub(seeds, seed_germination)
 
 
+@timing
 def grow(plant_energy, plant_growth_odds, crowding, crowding_odds, rand_tensor):
     growth_rand = rand_tensor % plant_growth_odds
     growth = plant_energy <= growth_rand
