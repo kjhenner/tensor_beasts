@@ -3,7 +3,6 @@ from typing import Dict
 import pygame
 import torch
 from pygame import DOUBLEBUF, OPENGL
-import numpy as np
 from OpenGL.GL import (
     glBindTexture, glClear, glTexCoord2f, glVertex2f, glBegin, glEnd,
     glTexImage2D, glTexParameteri, glTexSubImage2D, glEnable, glGenTextures,

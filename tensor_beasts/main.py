@@ -1,90 +1,95 @@
 import json
-import numpy
+import torch
+import argparse
 import pygame
-import numpy as np
-from collections import defaultdict
-import scipy.ndimage
 
 from tensor_beasts.display_manager import DisplayManager
-from tensor_beasts.state_updates_numpy import grow, germinate, move, eat, diffuse_scent
-from tensor_beasts.util_numpy import directional_kernel_set, pad_matrix, safe_sub, safe_add
+from tensor_beasts.state_updates import grow, germinate, move, eat, diffuse_scent
+from tensor_beasts.util import safe_sub, safe_add, torch_correlate_2d as correlate_2d, get_mean_execution_times
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the tensor beasts simulation")
+    parser.add_argument(
+        "--size",
+        type=int,
+        help="The size of the world. (default: 768)",
+        required=False,
+        default=768
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        help="The device to use. (default: mps)",
+        required=False,
+        default="mps"
+    )
+    return parser.parse_args()
 
 
+def main(args: argparse.Namespace):
+    torch.set_default_device(torch.device(args.device))
 
+    width, height = (args.size,) * 2
 
-def main():
-    rng = np.random.default_rng()
+    world_tensor = torch.zeros((width, height, 10), dtype=torch.uint8)
 
-    plant_energy_idx = 1
-    plant_scent_idx = 2
-    seed_idx = 3
-    herbivore_energy_idx = 4
-    herbivore_momentum_idx = 5
-    herbivore_scent_idx = 6
-    predator_energy_idx = 7
-    predator_momentum_idx = 8
-    predator_scent_idx = 9
+    idx_iter = iter(range(10))
 
+    predator_energy = world_tensor[:, :, next(idx_iter)]
+    plant_energy = world_tensor[:, :, next(idx_iter)]
+    herbivore_energy = world_tensor[:, :, next(idx_iter)]
 
-    width = 512
-    height = 512
+    energy_group = world_tensor[:, :, :3]
 
-    plant_init_odds = np.uint8(255)
-    herbivore_init_odds = np.uint8(255)
-    plant_growth_odds = np.uint8(255)
-    plant_germination_odds = np.uint8(255)
-    plant_crowding_odds = np.uint8(25)
-    plant_seed_odds = np.uint8(255)
-    herbivore_eat_max = np.uint8(16)
-    predator_eat_max = np.uint8(128)
+    predator_scent = world_tensor[:, :, next(idx_iter)]
+    plant_scent = world_tensor[:, :, next(idx_iter)]
+    herbivore_scent = world_tensor[:, :, next(idx_iter)]
+
+    scent_group = world_tensor[:, :, 3:6]
+
+    seed_energy = world_tensor[:, :, next(idx_iter)]
+
+    plant_init_odds = 255
+    herbivore_init_odds = 255
+    plant_growth_odds = 255
+    plant_germination_odds = 255
+    plant_crowding_odds = 25
+    plant_seed_odds = 255
+    herbivore_eat_max = 8
+    predator_eat_max = 128
 
     clock = pygame.time.Clock()
 
-    runtime_stats = {}
-
     screens = {
-        'rgb': np.zeros((width, height, 3), dtype=np.uint8),
-        'plant_scent': np.zeros((width, height, 3), dtype=np.uint8),
-        'herbivore_scent': np.zeros((width, height, 3), dtype=np.uint8)
+        'energy_rgb': torch.zeros((width, height, 3), dtype=torch.uint8),
+        'scent_rgb': torch.zeros((width, height, 3), dtype=torch.uint8),
+        'plant_scent': torch.zeros((width, height, 3), dtype=torch.uint8),
+        'herbivore_scent': torch.zeros((width, height, 3), dtype=torch.uint8),
+        'predator_scent': torch.zeros((width, height, 3), dtype=torch.uint8)
     }
 
     display_manager = DisplayManager(width, height, screens)
 
-    # Initialize a 1024x1024x8 tensor with zeros
-    world_tensor = np.zeros((width, height, 10), dtype=np.uint8)
-    plant_energy = world_tensor[:, :, plant_energy_idx]
-    plant_scent = world_tensor[:, :, plant_scent_idx]
-    herbivore_energy = world_tensor[:, :, herbivore_energy_idx]
-    herbivore_scent = world_tensor[:, :, herbivore_scent_idx]
-    predator_scent = world_tensor[:, :, predator_scent_idx]
-    predator_energy = world_tensor[:, :, predator_energy_idx]
-
-    # Set the plant channel to 1 at random locations
-    plant_energy[:] = (rng.integers(0, plant_init_odds, (width, height), dtype=np.uint8) == 0)
+    plant_energy[:] = (torch.randint(0, plant_init_odds, (width, height), dtype=torch.uint8) == 0)
 
     herbivore_energy[:] = (
-        rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
+        (torch.randint(0, herbivore_init_odds, (width, height), dtype=torch.uint8) == 0)
     ) * 255
 
-    world_tensor[:, :, predator_energy_idx] = (
-        rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
+    predator_energy[:] = (
+        (torch.randint(0, herbivore_init_odds, (width, height), dtype=torch.uint8) == 0)
     ) * 255
 
-    plant_crowding_kernel = np.array([
+    plant_crowding_kernel = torch.tensor([
         [0, 1, 1, 1, 0],
         [1, 1, 2, 1, 1],
         [1, 2, 0, 2, 1],
         [1, 1, 2, 1, 1],
         [0, 1, 1, 1, 0],
-    ], dtype=np.uint8)
+    ], dtype=torch.uint8)
 
-    rand_size = 512
-    rand_arrays = rng.integers(0, 255, (rand_size, width, height), dtype=np.uint8)
-
-    done = False
-    step = 0
+    done, step = False, 0
     while not done:
         for event in pygame.event.get():
             if event.type == pygame.KEYDOWN:
@@ -96,48 +101,53 @@ def main():
                     display_manager.next_screen()
                 elif event.key == pygame.K_h:
                     herbivore_energy[:] = (
-                      rng.integers(0, herbivore_init_odds, (width, height), dtype=np.uint8) == 0
+                      torch.randint(0, herbivore_init_odds, (width, height), dtype=torch.uint8) == 0
+                    ) * 255
+                elif event.key == pygame.K_p:
+                    predator_energy[:] = (
+                        torch.randint(0, herbivore_init_odds, (width, height), dtype=torch.uint8) == 0
                     ) * 255
 
-        rand_array = rand_arrays[step % rand_size]
+        rand_array = torch.randint(0, 255, (width, height), dtype=torch.uint8)
 
-        plant_mask = numpy.array(plant_energy[:], dtype=bool)
-        plant_crowding = scipy.ndimage.convolve(plant_mask, plant_crowding_kernel, mode='constant')
+        plant_mask = plant_energy.bool()
 
-        grow(plant_energy, plant_growth_odds, plant_crowding, plant_crowding_odds, rand_array)
-        # grow(plant_energy, plant_growth_odds, plant_scent, plant_crowding_odds, rand_array)
-        world_tensor[:, :, seed_idx] |= plant_crowding > (rand_array % plant_seed_odds)
+        if step % 2 == 0:
+            plant_crowding = correlate_2d(plant_mask, plant_crowding_kernel, mode='constant')
+            grow(plant_energy, plant_growth_odds, plant_crowding, plant_crowding_odds, rand_array)
+            seed_energy |= plant_crowding > (rand_array % plant_seed_odds)
+            germinate(seed_energy, plant_energy, plant_germination_odds, rand_array)
 
-        germinate(world_tensor[:, :, seed_idx], plant_energy, plant_germination_odds, rand_array)
+        diffuse_scent(energy_group, scent_group)
 
-        diffuse_scent(plant_energy, plant_scent)
-        diffuse_scent(herbivore_energy, herbivore_scent)
-        diffuse_scent(predator_energy, predator_scent)
+        move(herbivore_energy, 250, plant_scent, safe_add(herbivore_scent, predator_scent, inplace=False))
 
-        move(herbivore_energy, 250, plant_scent, safe_add(herbivore_scent, predator_scent))
         safe_sub(herbivore_energy, 2)
 
         move(predator_energy, 250, herbivore_scent, predator_scent)
         safe_sub(predator_energy, 1)
 
         eat(herbivore_energy, plant_energy, herbivore_eat_max)
-        eat(world_tensor[:, :, predator_energy_idx], herbivore_energy, predator_eat_max)
+        eat(predator_energy, herbivore_energy, predator_eat_max)
 
-        plant_rgb = world_tensor[:, :, (predator_energy_idx, plant_energy_idx, herbivore_energy_idx)]  # Extract RGB channels
-        # seed_rgb = world_tensor[:, :, (seed_idx, 0, seed_idx)] * 255  # Extract RGB channels
-
-        display_manager.set_screen('rgb', plant_rgb)
+        display_manager.set_screen('energy_rgb', energy_group)
+        display_manager.set_screen('scent_rgb', scent_group)
         display_manager.set_screen('plant_scent', plant_scent)
         display_manager.set_screen('herbivore_scent', herbivore_scent)
+        display_manager.set_screen('predator_scent', predator_scent)
         display_manager.update()
 
-        runtime_stats['current_screen'] = display_manager.screen_names[display_manager.current_screen]
-        runtime_stats['fps'] = clock.get_fps()
-        runtime_stats['seed_count'] = float(np.sum(world_tensor[:, :, seed_idx]))
-        runtime_stats['plant_mass'] = float(np.sum(plant_energy))
-        runtime_stats['herbivore_mass'] = float(np.sum(herbivore_energy))
-        runtime_stats['predator_mass'] = float(np.sum(world_tensor[:, :, predator_energy_idx]))
-        runtime_stats['step'] = step
+        runtime_stats = {
+            'current_screen': display_manager.screen_names[display_manager.current_screen],
+            'fps': clock.get_fps(),
+            'seed_count': float(torch.sum(seed_energy)),
+            'plant_mass': float(torch.sum(plant_energy)),
+            'herbivore_mass': float(torch.sum(herbivore_energy)),
+            'predator_mass': float(torch.sum(predator_energy)),
+            'step': step
+        }
+
+        runtime_stats.update(get_mean_execution_times())
 
         print(json.dumps(runtime_stats, indent=4))
 
@@ -146,4 +156,5 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args)

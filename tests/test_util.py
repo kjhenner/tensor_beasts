@@ -1,6 +1,6 @@
 import pytest
 import torch
-from tensor_beasts.util_torch import (
+from tensor_beasts.util import (
     directional_kernel_set, safe_add, safe_sub, generate_direction_kernel, pad_matrix,
     torch_correlate_3d
 )

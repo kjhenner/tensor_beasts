@@ -1,9 +1,9 @@
 from functools import lru_cache
 
 import torch
-from tensor_beasts.util_torch import torch_correlate_2d as correlate_2d, torch_correlate_3d as correlate_3d, timing
+from tensor_beasts.util import torch_correlate_2d as correlate_2d, torch_correlate_3d as correlate_3d, timing
 
-from tensor_beasts.util_torch import (
+from tensor_beasts.util import (
     directional_kernel_set, pad_matrix, safe_sub, safe_add, get_direction_matrix
 )
 
