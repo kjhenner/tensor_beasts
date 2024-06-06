@@ -12,6 +12,7 @@ PyOpenGL = "^3.1.7"
 torch = "^2.3.0"
 pytest = "^8.2.1"
 numpy = "^1.26.4"
+pydantic = "^2.7.3"
 
 
 [build-system]
