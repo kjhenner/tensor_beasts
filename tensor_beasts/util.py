@@ -1,3 +1,6 @@
+import random
+from typing import List
+
 import torch
 import torch.nn.functional as F
 from functools import lru_cache
@@ -7,6 +10,15 @@ import statistics
 
 # Initialize a dictionary to store function execution times
 execution_times = {}
+
+
+DIRECTION_NAMES = {
+    0: 'hold',
+    1: 'up',
+    2: 'down',
+    3: 'left',
+    4: 'right'
+}
 
 
 def timing(func):
@@ -49,6 +61,11 @@ def safe_add(a, b, inplace=True):
     a += b
     a[a < b] = 255
     return a
+
+
+def safe_sum(matrices: List[torch.Tensor]):
+    original_dtype = matrices[0].dtype
+    return torch.stack(matrices).type(torch.int16).sum(dim=0).clamp(0, 255).type(original_dtype)
 
 
 def safe_sub(a, b, inplace=True):
@@ -231,3 +248,60 @@ def torch_correlate_3d(input_tensor, weights):
     output_tensor = conv_output.squeeze(1).permute(1, 2, 0)
 
     return output_tensor
+
+
+def generate_maze(size: int):
+    size //= 16
+    maze = torch.ones((size*2, size*2), dtype=torch.bool)
+
+    # Starting point
+    x, y = (0, 0)
+    maze[2*x, 2*y] = 0
+
+    # Initialize the stack
+    _stack = [(x, y)]
+    while len(_stack) > 0:
+        x, y = _stack[-1]
+
+        # Define possible directions
+        directions = [(0, 1), (1, 0), (0, -1), (-1, 0)]
+        random.shuffle(directions)
+
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            print(nx, ny)
+            if (nx >= 0) and (ny >= 0) and (nx < size) and (ny < size) and maze[2*nx, 2*ny] == 1:
+                maze[2*nx, 2*ny] = 0
+                maze[2*x+dx, 2*y+dy] = 0
+                _stack.append((nx, ny))
+                break
+        else:
+            _stack.pop()
+
+    # Create an entrance and an exit
+    maze[1, 0] = 0
+    maze[-2, -1] = 0
+    return maze.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
+
+
+@lru_cache
+def generate_diffusion_kernel():
+    kernel = torch.tensor([
+        [0, 0, 1, 0, 0],
+        [0, 1, 2, 1, 0],
+        [1, 2, 0, 2, 1],
+        [0, 1, 2, 1, 0],
+        [0, 0, 1, 0, 0],
+    ], dtype=torch.float32)
+    return kernel / torch.sum(kernel)
+
+
+@lru_cache
+def generate_plant_crowding_kernel():
+    return torch.tensor([
+        [0, 1, 1, 1, 0],
+        [1, 1, 2, 1, 1],
+        [1, 2, 0, 2, 1],
+        [1, 1, 2, 1, 1],
+        [0, 1, 1, 1, 0],
+    ], dtype=torch.uint8)

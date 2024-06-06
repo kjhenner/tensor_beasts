@@ -1,8 +1,12 @@
-from typing import Optional, Dict
+from functools import lru_cache
+from typing import Optional, Dict, List, Union
 import torch
 
-from tensor_beasts.state_updates import grow, germinate, diffuse_scent, move, eat
-from tensor_beasts.util import torch_correlate_2d, safe_sub, safe_add
+from tensor_beasts.util import (
+    torch_correlate_2d, torch_correlate_3d, safe_sub, safe_add, timing,
+    pad_matrix, get_direction_matrix, directional_kernel_set, generate_diffusion_kernel, generate_plant_crowding_kernel,
+    safe_sum
+)
 
 
 class Feature:
@@ -19,9 +23,53 @@ class BaseEntity:
 
 
 class World:
-    def __init__(self, size: int, config: Dict, scalars: Dict):
+    def __init__(self, size: int, config: Optional[Dict] = None, scalars: Optional[Dict] = None):
         self.width, self.height = size, size
-        self.config = config
+
+        self.config = {
+            "entities": {
+                "predator": {
+                    "features": [
+                        {"name": "energy", "group": "energy"},
+                        {"name": "scent", "group": "scent"}
+                    ]
+                },
+                "plant": {
+                    "features": [
+                        {"name": "energy", "group": "energy"},
+                        {"name": "scent", "group": "scent"},
+                        {"name": "seed", "group": None},
+                        {"name": "crowding", "group": None}
+                    ]
+                },
+                "herbivore": {
+                    "features": [
+                        {"name": "energy", "group": "energy"},
+                        {"name": "scent", "group": "scent"}
+                    ]
+                },
+                "obstacle": {
+                    "features": [
+                        {"name": "mask", "group": None}
+                    ]
+                }
+            }
+        }
+        if config is not None:
+            self.config.update(config)
+
+        self.scalars = {
+            "plant_init_odds": 255,
+            "herbivore_init_odds": 255,
+            "plant_growth_odds": 255,
+            "plant_germination_odds": 255,
+            "plant_crowding_odds": 25,
+            "plant_seed_odds": 255,
+            "herbivore_eat_max": 16,
+            "predator_eat_max": 255
+        }
+        if scalars is not None:
+            self.scalars.update(scalars)
 
         self.entities = {}
         self.feature_groups = {}
@@ -32,7 +80,7 @@ class World:
         self._initialize_world_tensor()
         self._assign_features()
 
-        for name, value in scalars.items():
+        for name, value in self.scalars.items():
             setattr(self, name, value)
 
         self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
@@ -45,13 +93,9 @@ class World:
             (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
         ) * 255
 
-        self.plant_crowding_kernel = torch.tensor([
-            [0, 1, 1, 1, 0],
-            [1, 1, 2, 1, 1],
-            [1, 2, 0, 2, 1],
-            [1, 1, 2, 1, 1],
-            [0, 1, 1, 1, 0],
-        ], dtype=torch.uint8)
+        # self.obstacle.mask[:] = (torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8) == 0)
+        # self.obstacle.mask[:] = generate_maze(size) * generate_maze(size)
+        self.obstacle.mask[:] = torch.zeros((self.width, self.height), dtype=torch.uint8)
 
     def _initialize_entities(self):
         """Initialize entities based on the configuration."""
@@ -112,26 +156,198 @@ class World:
         plant_mask = self.plant.energy.bool()
 
         if step % 2 == 0:
-            plant_crowding = torch_correlate_2d(plant_mask, self.plant_crowding_kernel, mode='constant')
-            grow(self.plant.energy, self.plant_growth_odds, plant_crowding, self.plant_crowding_odds, rand_array)
-            self.seed.energy |= plant_crowding > (rand_array % self.plant_seed_odds)
-            germinate(self.seed.energy, self.plant.energy, self.plant_germination_odds, rand_array)
+            # self.plant.crowding = torch_correlate_2d(safe_add(plant_mask, self.obstacle.mask.type(torch.bool), inplace=False), self.plant_crowding_kernel, mode='constant')
+            self.plant.crowding = torch_correlate_2d(plant_mask, generate_plant_crowding_kernel(), mode='constant')
+            self.grow(self.plant.energy, self.plant_growth_odds, self.plant.crowding, self.plant_crowding_odds, rand_array)
 
-        diffuse_scent(self.energy, self.scent)
+            self.plant.seed |= self.plant.crowding > (rand_array % self.plant_seed_odds)
 
-        move(self.herbivore.energy, 250, self.plant.scent, safe_add(self.herbivore.scent, self.predator.scent, inplace=False))
+            self.germinate(self.plant.seed, self.plant.energy, self.plant_germination_odds, rand_array)
 
+        self.diffuse_scent(self.energy, self.scent, mask=self.obstacle.mask)
+
+        self.move(
+            entity_energy=self.herbivore.energy,
+            target_energy=self.plant.scent,
+            opposite_energy=[self.herbivore.scent, self.predator.scent],
+        )
         safe_sub(self.herbivore.energy, 2)
 
-        move(self.predator.energy, 250, self.herbivore.scent, self.predator.scent)
+        self.move(
+            entity_energy=self.predator.energy,
+            target_energy=self.herbivore.scent,
+            opposite_energy=self.predator.scent,
+        )
         safe_sub(self.predator.energy, 1)
 
-        eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
-        eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
+        self.eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
+        self.eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
 
         return {
-            'seed_count': float(torch.sum(self.seed.energy)),
+            'seed_count': float(torch.sum(self.plant.seed)),
             'plant_mass': float(torch.sum(self.plant.energy)),
             'herbivore_mass': float(torch.sum(self.herbivore.energy)),
             'predator_mass': float(torch.sum(self.predator.energy)),
         }
+
+    @staticmethod
+    @timing
+    def diffuse_scent(entity_energy, entity_scent, mask=None, diffusion_steps=10):
+        for _ in range(diffusion_steps):
+            entity_scent[:] = torch_correlate_3d(entity_scent.type(torch.float32), generate_diffusion_kernel().type(torch.float32)).type(torch.uint8)
+        safe_add(entity_scent[:], entity_energy[:])
+        if mask is not None:
+            mask = torch.stack((mask, mask, mask), dim=-1) == 0
+            entity_scent *= mask
+
+    @staticmethod
+    @timing
+    def move(
+        entity_energy: torch.Tensor,
+        target_energy: Union[torch.Tensor, List[torch.Tensor]],
+        opposite_energy: Optional[Union[torch.Tensor, List[torch.Tensor]]]=None,
+        clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]]=None,
+        clearance_kernel_size: Optional[int]=5,
+        divide_threshold: Optional[int]=250,
+        divide_divisor_self: Optional[int]=2,
+        divide_divisor_offspring: Optional[int]=4,
+        carried_features_self: Optional[List[torch.Tensor]]=None,
+        carried_features_offspring: Optional[List[torch.Tensor]]=None,
+        carried_feature_divide_divisors_self: Optional[List[int]]=None,
+        carried_feature_divide_divisors_offspring: Optional[List[int]]=None,
+    ):
+        """
+        Move entities and reproduce entities. Movement is based on the target energy tensor and optional opposite energy tensor.
+
+        :param entity_energy: Energy tensor of the entity to move. This is transferred to the selected position.
+            This is also used for clearance calculations, masking, and reproduction.
+        :param target_energy: Movement will favor moving towards higher values in this tensor.
+        :param opposite_energy: Movement will avoid moving towards higher values in this tensor.
+        :param clearance_mask: Mask tensor for clearance calculations.
+        :param clearance_kernel_size: Size of the kernel used for clearance calculations.
+        :param divide_threshold: Energy threshold for reproduction.
+        :param divide_divisor_self: Energy divisor for the parent entity.
+        :param divide_divisor_offspring: Energy divisor for the offspring entity.
+        :param carried_features_self: List of features that will be moved along with the entity energy.
+        :param carried_features_offspring: List of features that will be copied from the parent to the offspring.
+        :param carried_feature_divide_divisors_self: List of divisors for the carried features of the parent entity.
+        :param carried_feature_divide_divisors_offspring: List of divisors for the carried features of the offspring entity.
+        :return: None
+        """
+        if carried_features_self is not None:
+            if carried_feature_divide_divisors_self is None:
+                carried_feature_divide_divisors_self = [1] * len(carried_features_self)
+            else:
+                assert len(carried_features_self) == len(carried_feature_divide_divisors_self)
+
+        if carried_features_offspring is not None:
+            if carried_feature_divide_divisors_offspring is None:
+                carried_feature_divide_divisors_offspring = [1] * len(carried_features_offspring)
+            else:
+                assert len(carried_features_offspring) == len(carried_feature_divide_divisors_offspring)
+
+        if isinstance(target_energy, list):
+            target_energy = safe_sum(target_energy)
+
+        if opposite_energy is not None:
+            if isinstance(opposite_energy, list):
+                opposite_energy = safe_sum(opposite_energy)
+            target_energy = safe_sub(target_energy, opposite_energy, inplace=False)
+
+        if clearance_mask is not None:
+            if isinstance(clearance_mask, list):
+                clearance_mask = safe_sum(clearance_mask)
+            else:
+                clearance_mask = clearance_mask.clone()
+            clearance_mask[entity_energy > 0] = 1
+        else:
+            clearance_mask = entity_energy > 0
+
+        directions = get_direction_matrix(target_energy)
+
+        # This is 1 where an entity is present and intends to move in that direction
+        direction_masks = {d: ((directions == d) * (entity_energy > 0)).type(torch.uint8) for d in range(1, 5)}
+
+        clearance_kernels = directional_kernel_set(clearance_kernel_size)
+        # TODO: Batch this!
+        for d in range(1, 5):
+            direction_masks[d] *= ~(torch.tensor(
+                torch_correlate_2d(
+                    clearance_mask.type(torch.float32),
+                    clearance_kernels[d].type(torch.float32),
+                    mode='constant',
+                    cval=1
+                )
+            ).type(torch.bool))
+
+        # One where an entity is present in the current state and will move, and zero where it will not
+        move_origin_mask = torch.sum(torch.stack(list(direction_masks.values())), dim=0).type(torch.bool)
+
+        # One where an entity will move away and leave an offspring, and zero where it will not
+        offspring_mask = move_origin_mask * (entity_energy > divide_threshold)
+
+        # One where an entity will move away and leave no offspring, and zero where it will not
+        vacated_mask = move_origin_mask * (entity_energy <= divide_threshold)
+
+        # After this operation, each feature will be the union of its current state and the state after movement
+        for feature, divisor in [(entity_energy, divide_divisor_self)] + list(zip(carried_features_self or [], carried_feature_divide_divisors_self or [])):
+            safe_add(feature, torch.sum(torch.stack([
+                # TODO: Batch? Which is faster, pad or roll?
+                pad_matrix(
+                    torch.where(
+                        ((direction_masks[d] * entity_energy) > divide_threshold).type(torch.bool),
+                        (direction_masks[d] * feature) // divisor,
+                        direction_masks[d] * feature
+                    ),
+                    d
+                )
+                for d in range(1, 5)
+            ]), dim=0))
+
+        # After this operation, each origin position where an offspring will be left will be adjusted by the divisor
+        # Currently, there is a bug here.
+        for feature, divisor in [(entity_energy, divide_divisor_offspring)] + list(zip(carried_features_offspring or [], carried_feature_divide_divisors_offspring or [])):
+            feature[:] = torch.where(
+                offspring_mask,
+                feature // divisor,
+                feature
+            )
+
+        # After this operation, each origin position where no offspring will be left will be zeroed
+        for feature in [entity_energy] + (carried_features_self or []) + (carried_features_offspring or []):
+            feature[:] *= ~vacated_mask
+
+        return {
+            "directions": directions,
+        }
+
+    @staticmethod
+    @timing
+    def eat(eater_energy, eaten_energy, eat_max, eat_efficiency_loss=4):
+        old_eaten_energy = eaten_energy.clone()
+        safe_sub(eaten_energy, (eater_energy > 0).type(torch.uint8) * eat_max)
+        delta = old_eaten_energy - eaten_energy
+        safe_add(eater_energy, delta // eat_efficiency_loss)
+
+    @staticmethod
+    @timing
+    def germinate(seeds, plant_energy, germination_odds, rand_tensor):
+        germination_rand = rand_tensor % germination_odds
+        seed_germination = (
+            seeds & ~(plant_energy > 0) & (germination_rand == 0)
+        )
+        safe_add(plant_energy, seed_germination)
+        safe_sub(seeds, seed_germination)
+
+    @staticmethod
+    @timing
+    def grow(plant_energy, plant_growth_odds, crowding, crowding_odds, rand_tensor):
+        growth_rand = rand_tensor % plant_growth_odds
+        growth = plant_energy <= growth_rand
+        plant_crowding_mask = (rand_tensor % crowding_odds) >= crowding
+        safe_add(plant_energy, (plant_energy > 0) * growth * plant_crowding_mask)
+
+    @staticmethod
+    @timing
+    def reward(energy):
+        pass

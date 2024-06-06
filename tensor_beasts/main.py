@@ -32,46 +32,7 @@ def main(args: argparse.Namespace):
 
     width, height = (args.size,) * 2
 
-    config = {
-        "entities": {
-            "predator": {
-                "features": [
-                    {"name": "energy", "group": "energy"},
-                    {"name": "scent", "group": "scent"}
-                ]
-            },
-            "plant": {
-                "features": [
-                    {"name": "energy", "group": "energy"},
-                    {"name": "scent", "group": "scent"}
-                ]
-            },
-            "herbivore": {
-                "features": [
-                    {"name": "energy", "group": "energy"},
-                    {"name": "scent", "group": "scent"}
-                ]
-            },
-            "seed": {
-                "features": [
-                    {"name": "energy", "group": None}
-                ]
-            }
-        }
-    }
-
-    scalars = {
-        "plant_init_odds": 255,
-        "herbivore_init_odds": 255,
-        "plant_growth_odds": 255,
-        "plant_germination_odds": 255,
-        "plant_crowding_odds": 25,
-        "plant_seed_odds": 255,
-        "herbivore_eat_max": 8,
-        "predator_eat_max": 128
-    }
-
-    world = World(size=args.size, config=config, scalars=scalars)
+    world = World(size=args.size)
 
     clock = pygame.time.Clock()
 
@@ -106,8 +67,15 @@ def main(args: argparse.Namespace):
 
         world_stats = world.update(step)
 
-        display_manager.set_screen('energy_rgb', world.energy)
+        display_manager.set_screen(
+            'energy_rgb',
+            torch.where(world.obstacle.mask.unsqueeze(-1).expand(-1, -1, 3), world.obstacle.mask.unsqueeze(-1).expand(-1, -1, 3) * 255, world.energy)
+        )
         display_manager.set_screen('scent_rgb', world.scent)
+        # display_manager.overlay_screen(
+        #     'scent_rgb',
+        #     world.energy
+        # )
         display_manager.set_screen('plant_scent', world.plant.scent)
         display_manager.set_screen('herbivore_scent', world.herbivore.scent)
         display_manager.set_screen('predator_scent', world.predator.scent)

@@ -45,3 +45,31 @@ Once it's running, there are a few commands you can use:
 - `-` to zoom out.
 - `h` to re-seed with herbivores.
 - `p` to re-seed with predators.
+
+
+## TODO
+
+**UI**
+- [ ] Add panning contorls.
+- [ ] Add play, pause, and step controls.
+- [ ] Add overlay views to put herbivores and predators on top of plants, scents.
+- [ ] Parametrize all the constants.
+- [ ] Add channel aliases in entity config. This way, for example, I could specify
+    that `predator.food` is `herbivore.energy`. This will be useful if there are
+    more species in the future.
+
+**Simulation**
+- [ ] Add obstacles.
+- [ ] Non-linear scent diffusion. It should be hard to accumulate maximum scent,
+    but also hard for it to completely dissapate.
+- [ ] Add scent trails.
+- [ ] Add wind and dynamic wind direction.
+- [ ] Add non-uniform terrain. Heightmap? Nutrient map? Water map?
+- [ ] Seasons?
+- [ ] Rainfall? Watersheds?
+- [ ] Add multiple kinds of plants.
+
+**Performance**
+- [ ] Refactor things to identify repeated calculations.
+- [ ] Can move and eat be batched?
+- [ ] Don't update inactive screens.

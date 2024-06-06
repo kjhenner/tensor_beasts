@@ -66,6 +66,12 @@ class DisplayManager:
             screen = torch.stack((screen, screen, screen), dim=-1)
         self.screens[screen_name] = screen
 
+    def overlay_screen(self, screen_name, screen):
+        """Replace the current screen with the overlay screen where the overlay screen has nonzero values."""
+        if len(screen.shape) < 3:
+            screen = torch.stack((screen, screen, screen), dim=-1)
+        self.screens[screen_name][screen != 0] = screen[screen != 0]
+
     def next_screen(self):
         self.current_screen = (self.current_screen + 1) % len(self.screen_names)
 
