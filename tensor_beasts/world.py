@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Optional, Dict, List, Union
+from typing import Optional, Dict, List, Union, Callable
 import torch
 
 from tensor_beasts.util import (
@@ -28,13 +28,14 @@ class World:
 
         self.config = {
             "entities": {
-                "predator": {
+                "Predator": {
                     "features": [
                         {"name": "energy", "group": "energy"},
-                        {"name": "scent", "group": "scent"}
+                        {"name": "scent", "group": "scent"},
+                        {"name": "offspring_count", "group": None}
                     ]
                 },
-                "plant": {
+                "Plant": {
                     "features": [
                         {"name": "energy", "group": "energy"},
                         {"name": "scent", "group": "scent"},
@@ -42,13 +43,14 @@ class World:
                         {"name": "crowding", "group": None}
                     ]
                 },
-                "herbivore": {
+                "Herbivore": {
                     "features": [
                         {"name": "energy", "group": "energy"},
-                        {"name": "scent", "group": "scent"}
+                        {"name": "scent", "group": "scent"},
+                        {"name": "offspring_count", "group": None}
                     ]
                 },
-                "obstacle": {
+                "Obstacle": {
                     "features": [
                         {"name": "mask", "group": None}
                     ]
@@ -87,11 +89,11 @@ class World:
 
         self.herbivore.energy[:] = (
             (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-        ) * 255
+        ) * 240
 
         self.predator.energy[:] = (
             (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-        ) * 255
+        ) * 240
 
         # self.obstacle.mask[:] = (torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8) == 0)
         # self.obstacle.mask[:] = generate_maze(size) * generate_maze(size)
@@ -170,6 +172,8 @@ class World:
             entity_energy=self.herbivore.energy,
             target_energy=self.plant.scent,
             opposite_energy=[self.herbivore.scent, self.predator.scent],
+            carried_features_self=[self.herbivore.offspring_count],
+            carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False)],
         )
         safe_sub(self.herbivore.energy, 2)
 
@@ -177,17 +181,23 @@ class World:
             entity_energy=self.predator.energy,
             target_energy=self.herbivore.scent,
             opposite_energy=self.predator.scent,
+            carried_features_self=[self.predator.offspring_count],
+            carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False)],
         )
         safe_sub(self.predator.energy, 1)
 
         self.eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
         self.eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
 
+        self.herbivore.offspring_count *= self.herbivore.energy > 0
+        self.predator.offspring_count *= self.predator.energy > 0
+
         return {
             'seed_count': float(torch.sum(self.plant.seed)),
             'plant_mass': float(torch.sum(self.plant.energy)),
             'herbivore_mass': float(torch.sum(self.herbivore.energy)),
             'predator_mass': float(torch.sum(self.predator.energy)),
+            'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
         }
 
     @staticmethod
@@ -205,16 +215,16 @@ class World:
     def move(
         entity_energy: torch.Tensor,
         target_energy: Union[torch.Tensor, List[torch.Tensor]],
-        opposite_energy: Optional[Union[torch.Tensor, List[torch.Tensor]]]=None,
-        clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]]=None,
-        clearance_kernel_size: Optional[int]=5,
-        divide_threshold: Optional[int]=250,
-        divide_divisor_self: Optional[int]=2,
-        divide_divisor_offspring: Optional[int]=4,
-        carried_features_self: Optional[List[torch.Tensor]]=None,
-        carried_features_offspring: Optional[List[torch.Tensor]]=None,
-        carried_feature_divide_divisors_self: Optional[List[int]]=None,
-        carried_feature_divide_divisors_offspring: Optional[List[int]]=None,
+        opposite_energy: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        clearance_kernel_size: Optional[int] = 5,
+        divide_threshold: Optional[int] = 250,
+        divide_fn_self: Optional[Callable] = lambda x: x // 2,
+        divide_fn_offspring: Optional[Callable] = lambda x: x // 4,
+        carried_features_self: Optional[List[torch.Tensor]] = None,
+        carried_features_offspring: Optional[List[torch.Tensor]] = None,
+        carried_feature_fns_self: Optional[List[Callable]] = None,
+        carried_feature_fns_offspring: Optional[List[Callable]] = None,
     ):
         """
         Move entities and reproduce entities. Movement is based on the target energy tensor and optional opposite energy tensor.
@@ -226,25 +236,25 @@ class World:
         :param clearance_mask: Mask tensor for clearance calculations.
         :param clearance_kernel_size: Size of the kernel used for clearance calculations.
         :param divide_threshold: Energy threshold for reproduction.
-        :param divide_divisor_self: Energy divisor for the parent entity.
-        :param divide_divisor_offspring: Energy divisor for the offspring entity.
+        :param divide_fn_self: Function to apply to the entity energy on reproduction.
+        :param divide_fn_offspring: Function to apply to the offspring energy on reproduction.
         :param carried_features_self: List of features that will be moved along with the entity energy.
         :param carried_features_offspring: List of features that will be copied from the parent to the offspring.
-        :param carried_feature_divide_divisors_self: List of divisors for the carried features of the parent entity.
-        :param carried_feature_divide_divisors_offspring: List of divisors for the carried features of the offspring entity.
+        :param carried_feature_fns_self: List of functions to apply to the carried features of the parent entity.
+        :param carried_feature_fns_offspring: List of functions to apply to the carried features of the offspring entity.
         :return: None
         """
         if carried_features_self is not None:
-            if carried_feature_divide_divisors_self is None:
-                carried_feature_divide_divisors_self = [1] * len(carried_features_self)
+            if carried_feature_fns_self is None:
+                carried_feature_fns_self = [lambda x: x] * len(carried_features_self)
             else:
-                assert len(carried_features_self) == len(carried_feature_divide_divisors_self)
+                assert len(carried_features_self) == len(carried_feature_fns_self)
 
         if carried_features_offspring is not None:
-            if carried_feature_divide_divisors_offspring is None:
-                carried_feature_divide_divisors_offspring = [1] * len(carried_features_offspring)
+            if carried_feature_fns_offspring is None:
+                carried_feature_divide_divisors_offspring = [lambda x: x] * len(carried_features_offspring)
             else:
-                assert len(carried_features_offspring) == len(carried_feature_divide_divisors_offspring)
+                assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
 
         if isinstance(target_energy, list):
             target_energy = safe_sum(target_energy)
@@ -290,13 +300,13 @@ class World:
         vacated_mask = move_origin_mask * (entity_energy <= divide_threshold)
 
         # After this operation, each feature will be the union of its current state and the state after movement
-        for feature, divisor in [(entity_energy, divide_divisor_self)] + list(zip(carried_features_self or [], carried_feature_divide_divisors_self or [])):
+        for feature, fn in [(entity_energy, divide_fn_self)] + list(zip(carried_features_self or [], carried_feature_fns_self or [])):
             safe_add(feature, torch.sum(torch.stack([
                 # TODO: Batch? Which is faster, pad or roll?
                 pad_matrix(
                     torch.where(
                         ((direction_masks[d] * entity_energy) > divide_threshold).type(torch.bool),
-                        (direction_masks[d] * feature) // divisor,
+                        direction_masks[d] * fn(feature),
                         direction_masks[d] * feature
                     ),
                     d
@@ -306,10 +316,10 @@ class World:
 
         # After this operation, each origin position where an offspring will be left will be adjusted by the divisor
         # Currently, there is a bug here.
-        for feature, divisor in [(entity_energy, divide_divisor_offspring)] + list(zip(carried_features_offspring or [], carried_feature_divide_divisors_offspring or [])):
+        for feature, fn in [(entity_energy, divide_fn_offspring)] + list(zip(carried_features_offspring or [], carried_feature_fns_offspring or [])):
             feature[:] = torch.where(
                 offspring_mask,
-                feature // divisor,
+                fn(feature),
                 feature
             )
 
@@ -317,9 +327,6 @@ class World:
         for feature in [entity_energy] + (carried_features_self or []) + (carried_features_offspring or []):
             feature[:] *= ~vacated_mask
 
-        return {
-            "directions": directions,
-        }
 
     @staticmethod
     @timing
@@ -346,8 +353,3 @@ class World:
         growth = plant_energy <= growth_rand
         plant_crowding_mask = (rand_tensor % crowding_odds) >= crowding
         safe_add(plant_energy, (plant_energy > 0) * growth * plant_crowding_mask)
-
-    @staticmethod
-    @timing
-    def reward(energy):
-        pass
