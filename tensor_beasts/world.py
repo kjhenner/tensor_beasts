@@ -252,7 +252,7 @@ class World:
 
         if carried_features_offspring is not None:
             if carried_feature_fns_offspring is None:
-                carried_feature_divide_divisors_offspring = [lambda x: x] * len(carried_features_offspring)
+                carried_feature_fns_offspring = [lambda x: x] * len(carried_features_offspring)
             else:
                 assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
 
