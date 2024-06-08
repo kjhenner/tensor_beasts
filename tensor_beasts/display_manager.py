@@ -1,5 +1,3 @@
-from typing import Dict
-
 import pygame
 import torch
 from pygame import DOUBLEBUF, OPENGL
@@ -12,14 +10,12 @@ from OpenGL.GL import (
 
 
 class DisplayManager:
-    def __init__(self, screen_width, screen_height, screens: Dict[str, torch.Tensor]):
+    def __init__(self, screen_width, screen_height):
         self.width = screen_width
         self.height = screen_height
         self.zoom_level = 1
         self.clock = pygame.time.Clock()
         self.current_screen = 0
-        self.screens = screens
-        self.screen_names = list(screens.keys())
         self.display = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL)
 
         self.display_array = torch.zeros((self.height, self.width, 3), dtype=torch.uint8)
@@ -34,9 +30,8 @@ class DisplayManager:
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
 
-    def update(self):
+    def update(self, screen: torch.Tensor):
 
-        screen = self.screens[self.screen_names[self.current_screen]]
         if self.zoom_level > 1:
             zoom_divisor = int(self.width // self.zoom_level)
             screen = screen[:zoom_divisor, :zoom_divisor]
@@ -60,20 +55,6 @@ class DisplayManager:
 
         pygame.display.flip()
         self.clock.tick(60)
-
-    def set_screen(self, screen_name, screen):
-        if len(screen.shape) < 3:
-            screen = torch.stack((screen, screen, screen), dim=-1)
-        self.screens[screen_name] = screen
-
-    def overlay_screen(self, screen_name, screen):
-        """Replace the current screen with the overlay screen where the overlay screen has nonzero values."""
-        if len(screen.shape) < 3:
-            screen = torch.stack((screen, screen, screen), dim=-1)
-        self.screens[screen_name][screen != 0] = screen[screen != 0]
-
-    def next_screen(self):
-        self.current_screen = (self.current_screen + 1) % len(self.screen_names)
 
     def zoom_in(self):
         self.zoom_level *= 2

@@ -288,9 +288,9 @@ def generate_maze(size: int):
 def generate_diffusion_kernel():
     kernel = torch.tensor([
         [0, 0, 1, 0, 0],
-        [0, 1, 2, 1, 0],
-        [1, 2, 0, 2, 1],
-        [0, 1, 2, 1, 0],
+        [0, 1, 1, 1, 0],
+        [1, 1, 2, 1, 1],
+        [0, 1, 1, 1, 0],
         [0, 0, 1, 0, 0],
     ], dtype=torch.float32)
     return kernel / torch.sum(kernel)
@@ -305,3 +305,75 @@ def generate_plant_crowding_kernel():
         [1, 1, 2, 1, 1],
         [0, 1, 1, 1, 0],
     ], dtype=torch.uint8)
+
+
+def fade(t):
+    return t * t * t * (t * (t * 6 - 15) + 10)
+
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+
+def gradient(h, x, y):
+    vectors = torch.tensor([
+      [1, 1], [-1, 1], [1, -1], [-1, -1],
+      [1, 0], [-1, 0], [0, 1], [0, -1]
+    ], dtype=torch.float32)
+    g = vectors[h % 8]
+    return g[..., 0] * x + g[..., 1] * y
+
+
+def perlin_noise(size, res):
+    delta = (res[0] / size[0], res[1] / size[1])
+
+    grid = torch.stack(torch.meshgrid(
+        torch.arange(0, res[0], delta[0], dtype=torch.float32),
+        torch.arange(0, res[1], delta[1], dtype=torch.float32)
+    ), dim=-1)
+
+    grid0 = grid.to(torch.int32)
+    grid1 = grid0 + 1
+
+    random_grid = torch.randint(0, 255, (res[0] + 1, res[1] + 1), dtype=torch.int32)
+
+    dot00 = gradient(
+        random_grid[grid0[..., 0], grid0[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid0[..., 1]
+    )
+    dot01 = gradient(
+        random_grid[grid0[..., 0], grid1[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid1[..., 1]
+    )
+    dot10 = gradient(
+        random_grid[grid1[..., 0], grid0[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid0[..., 1]
+    )
+    dot11 = gradient(
+        random_grid[grid1[..., 0], grid1[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid1[..., 1]
+    )
+
+    u = fade(grid - grid0)
+
+    nx0 = lerp(dot00, dot10, u[..., 0])
+    nx1 = lerp(dot01, dot11, u[..., 0])
+    nxy = lerp(nx0, nx1, u[..., 1])
+
+    return nxy
+
+
+def scale_tensor(input_tensor, floor=64):
+    # Ensure the input_tensor is of dtype uint8
+    if input_tensor.dtype != torch.uint8:
+        raise ValueError("Input tensor must be of type uint8")
+
+    # Create a mask for the non-zero elements
+    non_zero_mask = input_tensor != 0
+
+    # Scale the non-zero elements
+    scaled_tensor = input_tensor.clone().float()  # Create a copy and convert to float for scaling
+
+    # Apply the scaling formula:
+    scaled_tensor[non_zero_mask] = scaled_tensor[non_zero_mask] * ((floor - 1) / 255.0) + floor
+
+    # Convert back to uint8
+    scaled_tensor = scaled_tensor.to(torch.uint8)
+
+    return scaled_tensor
