@@ -60,6 +60,10 @@ def main(args: argparse.Namespace):
                 'scent_rgb',
                 lambda: world.scent,
             ),
+            (
+                'herbivore_rgb',
+                lambda: world.herbivore.energy.unsqueeze(-1).expand(-1, -1, 3),
+            ),
         ]
         display_manager = DisplayManager(width, height)
         current_screen_idx = 0
@@ -76,13 +80,9 @@ def main(args: argparse.Namespace):
                     elif event.key == pygame.K_n:
                         current_screen_idx = (current_screen_idx + 1) % len(screens)
                     elif event.key == pygame.K_h:
-                        world.herbivore.energy[:] = (
-                            torch.randint(0, world.herbivore_init_odds, (world.width, world.height), dtype=torch.uint8) == 0
-                        ) * 255
+                        world.initialize_herbivore()
                     elif event.key == pygame.K_p:
-                        world.predator.energy[:] = (
-                            torch.randint(0, world.herbivore_init_odds, (world.width, world.height), dtype=torch.uint8) == 0
-                        ) * 255
+                        world.initialize_predator()
 
         world_stats = world.update(step)
 

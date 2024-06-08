@@ -113,6 +113,7 @@ class World:
             "plant_growth_step_modulo": 2,
             "herbivore_init_odds": 255,
             "plant_growth_odds": 255,
+            "predator_init_odds": 255,
             "plant_germination_odds": 255,
             "plant_crowding_odds": 25,
             "plant_seed_odds": 255,
@@ -136,13 +137,8 @@ class World:
 
         self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
 
-        self.herbivore.energy[:] = (
-            (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-        ) * 240
-
-        self.predator.energy[:] = (
-            (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-        ) * 240
+        self.initialize_herbivore()
+        self.initialize_predator()
 
         self.plant.fertility_map[:] = ((perlin_noise((size, size), (8, 8)) + 3) * 63).type(torch.uint8)
 
@@ -155,6 +151,24 @@ class World:
         """If ids[0] is 255, increment ids[1]."""
         ids[:, :, 1][ids[:, :, 0] == 255] += 1  # No-good extra assignment. Assigned in the caller too.
         return ids[:, :, 1]
+
+    def initialize_herbivore(self):
+        """Initialize herbivore."""
+        self.herbivore.energy[:] = (
+            (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
+        ) * 240
+
+        self.herbivore.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+        self.herbivore.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+
+    def initialize_predator(self):
+        """Initialize predator."""
+        self.predator.energy[:] = (
+            (torch.randint(0, self.predator_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
+        ) * 240
+
+        self.predator.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+        self.predator.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
 
     def _initialize_entities(self):
         """Initialize entities based on the configuration."""
@@ -232,6 +246,9 @@ class World:
 
             self.germinate(self.plant.seed, self.plant.energy, self.plant_germination_odds, rand_array)
 
+        # We don't actually care that much about id collisions, so we can just use a random id
+        random_fn = lambda x: torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+
         self.move(
             entity_energy=self.herbivore.energy,
             target_energy=self.plant.scent,
@@ -241,7 +258,7 @@ class World:
             carried_features_self=[self.herbivore.offspring_count, self.herbivore.id_0, self.herbivore.id_1],
             carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
             carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-            carried_feature_fns_offspring=[lambda _: self.update_id(self.herbivore_id), lambda x: x + 1],
+            carried_feature_fns_offspring=[random_fn, random_fn],
         )
         safe_sub(self.herbivore.energy, 2)
 
@@ -254,7 +271,7 @@ class World:
             carried_features_self=[self.predator.offspring_count, self.predator.id_0, self.predator.id_1],
             carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
             carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-            carried_feature_fns_offspring=[lambda _: self.update_id(self.predator_id), lambda x: x + 1],
+            carried_feature_fns_offspring=[random_fn, random_fn],
 
         )
         safe_sub(self.predator.energy, 1)
@@ -267,6 +284,8 @@ class World:
         for entity in self.entities.values():
             for cleared_feature in entity.tagged('clear_on_death'):
                 cleared_feature *= entity.energy > 0
+
+        self.log_scores(self.herbivore)
 
         return {
             'seed_count': float(torch.sum(self.plant.seed)),
@@ -290,7 +309,115 @@ class World:
 
     @staticmethod
     @timing
+    def prepare_move(
+        entity_energy: torch.Tensor,
+        target_energy: Union[torch.Tensor, List[torch.Tensor]],
+        target_energy_weights: List[float],
+        opposite_energy: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        opposite_energy_weights: Optional[List[float]] = None,
+        clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        clearance_kernel_size: Optional[int] = 5,
+    ):
+        if target_energy is not None:
+            if not isinstance(target_energy, list):
+                target_energy = [target_energy]
+
+            if target_energy_weights is None:
+                target_energy_weights = [1] * len(target_energy)
+            else:
+                assert len(target_energy) == len(target_energy_weights)
+
+            target_energy = safe_sum([(target * wt).type(torch.uint8) for target, wt in zip(target_energy, target_energy_weights)])
+
+        if opposite_energy is not None:
+            if not isinstance(opposite_energy, list):
+                opposite_energy = [opposite_energy]
+
+            if opposite_energy_weights is None:
+                opposite_energy_weights = [1] * len(opposite_energy)
+            else:
+                assert len(opposite_energy) == len(opposite_energy_weights)
+            opposite_energy = safe_sum([(opposite * wt).type(torch.uint8) for opposite, wt in zip(opposite_energy, opposite_energy_weights)])
+            target_energy = safe_sub(target_energy, opposite_energy, inplace=False)
+
+        if clearance_mask is not None:
+            if isinstance(clearance_mask, list):
+                clearance_mask = safe_sum(clearance_mask)
+            else:
+                clearance_mask = clearance_mask.clone()
+            clearance_mask[entity_energy > 0] = 1
+        else:
+            clearance_mask = entity_energy > 0
+
+        directions = get_direction_matrix(target_energy)
+
+        direction_masks = {d: ((directions == d) * (entity_energy > 0)).type(torch.uint8) for d in range(1, 5)}
+
+        clearance_kernels = directional_kernel_set(clearance_kernel_size)
+        for d in range(1, 5):
+            direction_masks[d] *= ~(torch.tensor(
+                torch_correlate_2d(
+                    clearance_mask.type(torch.float32),
+                    clearance_kernels[d].type(torch.float32),
+                    mode='constant',
+                    cval=1
+                )
+            ).type(torch.bool))
+
+        return direction_masks, target_energy, clearance_mask
+
+    @staticmethod
+    @timing
+    def perform_move(
+        entity_energy: torch.Tensor,
+        direction_masks: dict,
+        divide_threshold: Optional[int] = 250,
+        divide_fn_self: Optional[Callable] = lambda x: x // 2,
+        divide_fn_offspring: Optional[Callable] = lambda x: x // 4,
+        carried_features_self: Optional[List[torch.Tensor]] = None,
+        carried_feature_fns_self: Optional[List[Callable]] = None,
+        carried_features_offspring: Optional[List[torch.Tensor]] = None,
+        carried_feature_fns_offspring: Optional[List[Callable]] = None,
+    ):
+        if carried_features_self is not None:
+            if carried_feature_fns_self is None:
+                carried_feature_fns_self = [lambda x: x] * len(carried_features_self)
+            else:
+                assert len(carried_features_self) == len(carried_feature_fns_self)
+
+        move_origin_mask = torch.sum(torch.stack(list(direction_masks.values())), dim=0).type(torch.bool)
+        offspring_mask = move_origin_mask * (entity_energy > divide_threshold)
+        vacated_mask = move_origin_mask * (entity_energy <= divide_threshold)
+
+        for feature, fn in [(entity_energy, divide_fn_self)] + list(zip(carried_features_self or [], carried_feature_fns_self or [])):
+            safe_add(feature, torch.sum(torch.stack([
+                pad_matrix(
+                    torch.where(
+                        ((direction_masks[d] * entity_energy) > divide_threshold).type(torch.bool),
+                        direction_masks[d] * fn(feature),
+                        direction_masks[d] * feature
+                    ),
+                    d
+                )
+                for d in range(1, 5)
+            ]), dim=0))
+
+        # After this operation, each origin position where an offspring will be left will be adjusted by corresponding
+        # feature functions
+        for feature, fn in [(entity_energy, divide_fn_offspring)] + list(zip(carried_features_offspring or [], carried_feature_fns_offspring or [])):
+            feature[:] = torch.where(
+                offspring_mask,
+                fn(feature),
+                feature
+            )
+
+        # After this operation, each origin position where no offspring will be left will be zeroed
+        for feature in [entity_energy] + (carried_features_self or []) + (carried_features_offspring or []):
+            feature[:] *= ~vacated_mask
+
+    @timing
     def move(
+        self,
         entity_energy: torch.Tensor,
         target_energy: Union[torch.Tensor, List[torch.Tensor]],
         target_energy_weights: List[float],
@@ -326,104 +453,26 @@ class World:
         :param carried_feature_fns_offspring: List of functions to apply to the carried features of the offspring entity.
         :return: None
         """
-        if carried_features_self is not None:
-            if carried_feature_fns_self is None:
-                carried_feature_fns_self = [lambda x: x] * len(carried_features_self)
-            else:
-                assert len(carried_features_self) == len(carried_feature_fns_self)
-
-        if carried_features_offspring is not None:
-            if carried_feature_fns_offspring is None:
-                carried_feature_fns_offspring = [lambda x: x] * len(carried_features_offspring)
-            else:
-                assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
-
-        if target_energy is not None:
-            if not isinstance(target_energy, list):
-                target_energy = [target_energy]
-
-            if target_energy_weights is None:
-                target_energy_weights = [1] * len(target_energy)
-            else:
-                assert len(target_energy) == len(target_energy_weights)
-
-            target_energy = safe_sum([(target * wt).type(torch.uint8) for target, wt in zip(target_energy, target_energy_weights)])
-
-        if opposite_energy is not None:
-            if not isinstance(opposite_energy, list):
-                opposite_energy = [opposite_energy]
-
-            if opposite_energy_weights is None:
-                opposite_energy_weights = [1] * len(opposite_energy)
-            else:
-                assert len(opposite_energy) == len(opposite_energy_weights)
-            # Unsafe assumption that entity energy is always a component of the opposite energy!!
-            # opposite_energy = (safe_sub(safe_sum(opposite_energy), entity_energy, inplace=False))
-            opposite_energy = safe_sum([(opposite * wt).type(torch.uint8) for opposite, wt in zip(opposite_energy, opposite_energy_weights)])
-            target_energy = safe_sub(target_energy, opposite_energy, inplace=False)
-
-        if clearance_mask is not None:
-            if isinstance(clearance_mask, list):
-                clearance_mask = safe_sum(clearance_mask)
-            else:
-                clearance_mask = clearance_mask.clone()
-            clearance_mask[entity_energy > 0] = 1
-        else:
-            clearance_mask = entity_energy > 0
-
-        directions = get_direction_matrix(target_energy)
-
-        # This is 1 where an entity is present and intends to move in that direction
-        direction_masks = {d: ((directions == d) * (entity_energy > 0)).type(torch.uint8) for d in range(1, 5)}
-
-        clearance_kernels = directional_kernel_set(clearance_kernel_size)
-        # TODO: Batch this!
-        for d in range(1, 5):
-            direction_masks[d] *= ~(torch.tensor(
-                torch_correlate_2d(
-                    clearance_mask.type(torch.float32),
-                    clearance_kernels[d].type(torch.float32),
-                    mode='constant',
-                    cval=1
-                )
-            ).type(torch.bool))
-
-        # One where an entity is present in the current state and will move, and zero where it will not
-        move_origin_mask = torch.sum(torch.stack(list(direction_masks.values())), dim=0).type(torch.bool)
-
-        # One where an entity will move away and leave an offspring, and zero where it will not
-        offspring_mask = move_origin_mask * (entity_energy > divide_threshold)
-
-        # One where an entity will move away and leave no offspring, and zero where it will not
-        vacated_mask = move_origin_mask * (entity_energy <= divide_threshold)
-
-        # After this operation, each feature will be the union of its current state and the state after movement
-        for feature, fn in [(entity_energy, divide_fn_self)] + list(zip(carried_features_self or [], carried_feature_fns_self or [])):
-            safe_add(feature, torch.sum(torch.stack([
-                # TODO: Batch? Which is faster, pad or roll?
-                pad_matrix(
-                    torch.where(
-                        ((direction_masks[d] * entity_energy) > divide_threshold).type(torch.bool),
-                        direction_masks[d] * fn(feature),
-                        direction_masks[d] * feature
-                    ),
-                    d
-                )
-                for d in range(1, 5)
-            ]), dim=0))
-
-        # After this operation, each origin position where an offspring will be left will be adjusted by corresponding
-        # feature functions
-        for feature, fn in [(entity_energy, divide_fn_offspring)] + list(zip(carried_features_offspring or [], carried_feature_fns_offspring or [])):
-            feature[:] = torch.where(
-                offspring_mask,
-                fn(feature),
-                feature
-            )
-
-        # After this operation, each origin position where no offspring will be left will be zeroed
-        for feature in [entity_energy] + (carried_features_self or []) + (carried_features_offspring or []):
-            feature[:] *= ~vacated_mask
+        direction_masks, target_energy, clearance_mask = self.prepare_move(
+            entity_energy,
+            target_energy,
+            target_energy_weights,
+            opposite_energy,
+            opposite_energy_weights,
+            clearance_mask,
+            clearance_kernel_size
+        )
+        self.perform_move(
+            entity_energy,
+            direction_masks,
+            divide_threshold,
+            divide_fn_self,
+            divide_fn_offspring,
+            carried_features_self,
+            carried_feature_fns_self,
+            carried_features_offspring,
+            carried_feature_fns_offspring
+        )
 
     @staticmethod
     @timing
@@ -450,3 +499,12 @@ class World:
         growth = safe_add(plant_energy, fertility_map, inplace=False) <= growth_rand
         plant_crowding_mask = (rand_tensor % crowding_odds) >= crowding
         safe_add(plant_energy, (plant_energy > 0) * growth * plant_crowding_mask)
+
+    @timing
+    def log_scores(self, entity: BaseEntity):
+        scores = entity.offspring_count.type(torch.float32) * 255 + entity.energy
+        top_score_idx = torch.argmax(scores)
+        converted_ids = (entity.id_0.type(torch.float32) * 255) + entity.id_1
+        top_score_id = converted_ids.flatten()[top_score_idx]
+        top_score = scores.flatten()[top_score_idx]
+        print(f"Top score: {top_score}, ID: {top_score_id}")

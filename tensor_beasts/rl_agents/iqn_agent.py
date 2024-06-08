@@ -105,9 +105,6 @@ class AttentionMechanism(nn.Module):
         # Apply Leaky ReLU after adding positional embeddings
         world_state = self.leaky_relu(world_state)
 
-        # Permute and reshape to (N, W*H, C) format
-        # world_state = world_state.permute(0, 2, 3, 1).reshape(N, W*H, C)  # (N, W*H, C)
-
         # Create the attention mask
         mask = self.create_local_attention_mask(W, H).to(device)
 
