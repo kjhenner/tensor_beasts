@@ -7,6 +7,7 @@ from OpenGL.GL import (
     GL_TEXTURE_2D, GL_RGB, GL_UNSIGNED_BYTE, GL_LINEAR, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_QUADS,
     GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glLoadIdentity, glScale, glTranslate
 )
+import numpy as np
 
 
 class DisplayManager:
@@ -19,7 +20,7 @@ class DisplayManager:
         self.current_screen = 0
         self.display = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL)
 
-        self.display_array = torch.zeros((self.height, self.width, 3), dtype=torch.uint8)
+        self.display_array = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
         pygame.init()
         glEnable(GL_TEXTURE_2D)
@@ -30,11 +31,12 @@ class DisplayManager:
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, self.width, self.height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        self.screen = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
-    def update(self, screen: torch.Tensor):
+    def update(self):
 
         glBindTexture(GL_TEXTURE_2D, self.texture)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, screen.cpu().numpy())
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, self.screen)
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
@@ -51,6 +53,9 @@ class DisplayManager:
 
         pygame.display.flip()
         self.clock.tick(60)
+
+    def update_screen(self, screen: torch.Tensor):
+        self.screen[:] = screen.cpu().numpy()
 
     def zoom_in(self):
         self.zoom_level *= 2
