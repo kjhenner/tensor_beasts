@@ -5,7 +5,7 @@ from OpenGL.GL import (
     glBindTexture, glClear, glTexCoord2f, glVertex2f, glBegin, glEnd,
     glTexImage2D, glTexParameteri, glTexSubImage2D, glEnable, glGenTextures,
     GL_TEXTURE_2D, GL_RGB, GL_UNSIGNED_BYTE, GL_LINEAR, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_QUADS,
-    GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glLoadIdentity,
+    GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glLoadIdentity, glScale, glTranslate
 )
 
 
@@ -14,6 +14,7 @@ class DisplayManager:
         self.width = screen_width
         self.height = screen_height
         self.zoom_level = 1
+        self.offset = [0, 0]
         self.clock = pygame.time.Clock()
         self.current_screen = 0
         self.display = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL)
@@ -32,19 +33,14 @@ class DisplayManager:
 
     def update(self, screen: torch.Tensor):
 
-        if self.zoom_level > 1:
-            zoom_divisor = int(self.width // self.zoom_level)
-            screen = screen[:zoom_divisor, :zoom_divisor]
-            display = screen.repeat_interleave(self.zoom_level, 0).repeat_interleave(self.zoom_level, 1)
-        else:
-            display = screen
-
         glBindTexture(GL_TEXTURE_2D, self.texture)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, display.cpu().numpy())
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, screen.cpu().numpy())
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         glLoadIdentity()
+        glTranslate(self.offset[0], self.offset[1], 0)
+        glScale(self.zoom_level, self.zoom_level, 1)
 
         glBegin(GL_QUADS)
         glTexCoord2f(0, 0); glVertex2f(-1, -1)
@@ -62,3 +58,7 @@ class DisplayManager:
     def zoom_out(self):
         if self.zoom_level > 1:
             self.zoom_level //= 2
+
+    def pan(self, dx, dy):
+        self.offset[0] += dx
+        self.offset[1] += dy
