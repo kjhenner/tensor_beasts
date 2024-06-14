@@ -41,8 +41,8 @@ class DisplayManager:
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         glLoadIdentity()
-        glTranslate(self.offset[0], self.offset[1], 0)
         glScale(self.zoom_level, self.zoom_level, 1)
+        glTranslate(self.offset[0], self.offset[1], 0)
 
         glBegin(GL_QUADS)
         glTexCoord2f(0, 0); glVertex2f(-1, -1)
@@ -57,13 +57,13 @@ class DisplayManager:
     def update_screen(self, screen: torch.Tensor):
         self.screen[:] = screen.cpu().numpy()
 
-    def zoom_in(self):
-        self.zoom_level *= 2
+    def zoom_in(self, speed=2.0):
+        if self.zoom_level * speed >= 1:
+            self.zoom_level *= speed
 
     def zoom_out(self):
-        if self.zoom_level > 1:
-            self.zoom_level //= 2
+        self.zoom_in(1 / 2)
 
     def pan(self, dx, dy):
-        self.offset[0] += dx
-        self.offset[1] += dy
+        self.offset[0] += dx / self.zoom_level
+        self.offset[1] += dy / self.zoom_level

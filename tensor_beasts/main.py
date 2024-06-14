@@ -138,6 +138,8 @@ def main(args: argparse.Namespace):
                     rel = mouse.get_rel()
                     if mouse.get_pressed()[0]:
                         display_manager.pan(2 * rel[0] / width, -2 * rel[1] / height)
+                elif event.type == pygame.MOUSEWHEEL:
+                    display_manager.zoom_in(1 + event.y * 0.02)
 
         if not args.headless:
             display_manager.update()
