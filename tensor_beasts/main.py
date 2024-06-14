@@ -5,6 +5,7 @@ import pygame
 import threading
 import time
 from pygame import mouse
+import sys
 
 from tensor_beasts.display_manager import DisplayManager
 from tensor_beasts.util import get_mean_execution_times, scale_tensor
@@ -49,12 +50,15 @@ class WorldThread(threading.Thread):
         self.world = world
         self.update_screen_cb = update_screen_cb
         self.clock = clock
+        self.done = False
+
+    def stop(self):
+        self.done = True
 
     def run(self):
-        done = False
         step = 0
         ups = None
-        while not done:
+        while not self.done:
             start = time.time()
             _, world_stats = self.world.update(step)
             end = time.time()
@@ -115,6 +119,11 @@ def main(args: argparse.Namespace):
     while not done:
         if display_manager is not None:
             for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    world_thread.stop()
+                    world_thread.join(5)
+                    pygame.quit()
+                    sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
                         display_manager.zoom_in()
@@ -137,9 +146,12 @@ def main(args: argparse.Namespace):
                 elif event.type == pygame.MOUSEMOTION:
                     rel = mouse.get_rel()
                     if mouse.get_pressed()[0]:
-                        display_manager.pan(2 * rel[0] / width, -2 * rel[1] / height)
+                        display_manager.pan(2 * rel[0] / height, -2 * rel[1] / height)
                 elif event.type == pygame.MOUSEWHEEL:
                     display_manager.zoom_in(1 + event.y * 0.02)
+                elif event.type == pygame.VIDEORESIZE:
+                    width, height = event.w, event.h
+                    display_manager.resize(event.w, event.h)
 
         if not args.headless:
             display_manager.update()
