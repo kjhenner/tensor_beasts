@@ -84,7 +84,7 @@ def main(args: argparse.Namespace):
                     elif event.key == pygame.K_p:
                         world.initialize_predator()
 
-        world_stats = world.update(step)
+        _, world_stats = world.update()
 
         if not args.headless:
             display_manager.update(screens[current_screen_idx][1]())
