@@ -6,6 +6,7 @@ from OpenGL.GL import (
     glTexImage2D, glTexParameteri, glTexSubImage2D, glEnable, glGenTextures,
     GL_TEXTURE_2D, GL_RGB, GL_UNSIGNED_BYTE, GL_LINEAR, GL_COLOR_BUFFER_BIT, GL_DEPTH_BUFFER_BIT, GL_QUADS,
     GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, glLoadIdentity, glScale, glTranslate,
+    GL_NEAREST
 )
 from OpenGL import GLU
 import numpy as np
@@ -33,7 +34,7 @@ class DisplayManager:
         glBindTexture(GL_TEXTURE_2D, self.texture)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, self.width, self.height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         self.screen = np.zeros((self.height, self.width, 3), dtype=np.uint8)
 
     def update(self):
@@ -59,7 +60,7 @@ class DisplayManager:
 
             pygame.display.flip()
             self.dirty = False
-        self.clock.tick(30)
+        self.clock.tick(15)
 
     def update_screen(self, screen: torch.Tensor):
         self.dirty = True
