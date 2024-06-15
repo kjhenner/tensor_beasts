@@ -8,6 +8,9 @@ from tensor_beasts.util import get_mean_execution_times, scale_tensor
 from tensor_beasts.world import World
 
 
+PAN_SPEED = 0.1
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the tensor beasts simulation")
     parser.add_argument(
@@ -77,6 +80,14 @@ def main(args: argparse.Namespace):
                         display_manager.zoom_in()
                     elif event.key == pygame.K_MINUS:
                         display_manager.zoom_out()
+                    elif event.key == pygame.K_LEFT:
+                        display_manager.pan(PAN_SPEED, 0)
+                    elif event.key == pygame.K_RIGHT:
+                        display_manager.pan(-PAN_SPEED, 0)
+                    elif event.key == pygame.K_UP:
+                        display_manager.pan(0, -PAN_SPEED)
+                    elif event.key == pygame.K_DOWN:
+                        display_manager.pan(0, PAN_SPEED)
                     elif event.key == pygame.K_n:
                         current_screen_idx = (current_screen_idx + 1) % len(screens)
                     elif event.key == pygame.K_h:
