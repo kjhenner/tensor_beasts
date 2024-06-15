@@ -45,17 +45,19 @@ def parse_args() -> argparse.Namespace:
 
 
 class WorldThread(threading.Thread):
-    def __init__(self, world, update_screen_cb, clock):
+    def __init__(self, world, update_screen_cb, clock, device):
         super().__init__(daemon=True)
         self.world = world
         self.update_screen_cb = update_screen_cb
         self.clock = clock
         self.done = False
+        self.device = device
 
     def stop(self):
         self.done = True
 
     def run(self):
+        torch.set_default_device(self.device)
         step = 0
         ups = None
         while not self.done:
@@ -112,7 +114,7 @@ def main(args: argparse.Namespace):
         runtime_stats.update(get_mean_execution_times())
         print(json.dumps(runtime_stats, indent=4))
 
-    world_thread = WorldThread(world, update_screen, clock)
+    world_thread = WorldThread(world, update_screen, clock, args.device)
     world_thread.start()
 
     done, step = False, 0
