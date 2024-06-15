@@ -41,7 +41,12 @@ class BaseEntity:
 
 
 class World:
-    def __init__(self, size: int, config: Optional[Dict] = None, scalars: Optional[Dict] = None):
+    def __init__(
+        self, size: int,
+        config: Optional[Dict] = None,
+        scalars: Optional[Dict] = None,
+        max_steps: int = 5000
+    ):
         """Initialize the world.
 
         The world is a tensor of unsigned 8-bit integers with shape (H, W, C) where the size of C is the total number of
@@ -67,14 +72,16 @@ class World:
         :param scalars: The scalars of the world.
         """
         self.width, self.height = size, size
+        self.total_features = 0
+        self.max_steps = max_steps
 
         # TODO: Use Hydra for config?
         self.config = {
             "entities": {
                 "Predator": {
                     "features": [
-                        {"name": "energy", "group": "energy"},
-                        {"name": "scent", "group": "scent"},
+                        {"name": "energy", "group": "energy", "tags:": ["observable"]},
+                        {"name": "scent", "group": "scent", "tags": ["observable"]},
                         {"name": "offspring_count", "tags": ["clear_on_death"]},
                         {"name": "id_0", "group": "predator_id", "tags": ["clear_on_death"]},
                         {"name": "id_1", "group": "predator_id", "tags": ["clear_on_death"]}
@@ -82,8 +89,8 @@ class World:
                 },
                 "Plant": {
                     "features": [
-                        {"name": "energy", "group": "energy"},
-                        {"name": "scent", "group": "scent"},
+                        {"name": "energy", "group": "energy", "tags": ["observable"]},
+                        {"name": "scent", "group": "scent", "tags": ["observable"]},
                         {"name": "fertility_map"},
                         {"name": "seed"},
                         {"name": "crowding"}
@@ -91,8 +98,8 @@ class World:
                 },
                 "Herbivore": {
                     "features": [
-                        {"name": "energy", "group": "energy"},
-                        {"name": "scent", "group": "scent"},
+                        {"name": "energy", "group": "energy", "tags": ["observable"]},
+                        {"name": "scent", "group": "scent", "tags": ["observable"]},
                         {"name": "offspring_count", "tags": ["clear_on_death"]},
                         {"name": "id_0", "group": "herbivore_id", "tags": ["clear_on_death"]},
                         {"name": "id_1", "group": "herbivore_id", "tags": ["clear_on_death"]},
@@ -100,7 +107,7 @@ class World:
                 },
                 "Obstacle": {
                     "features": [
-                        {"name": "mask"}
+                        {"name": "mask", "tags": ["observable"]}
                     ]
                 }
             }
@@ -146,6 +153,8 @@ class World:
         # self.obstacle.mask[:] = generate_maze(size) * generate_maze(size)
         self.obstacle.mask[:] = torch.zeros((self.width, self.height), dtype=torch.uint8)
 
+        self.step = 0
+
     @staticmethod
     def update_id(ids: torch.Tensor):
         """If ids[0] is 255, increment ids[1]."""
@@ -179,10 +188,10 @@ class World:
 
     def _initialize_world_tensor(self):
         """Calculate the total depth and initialize the world tensor."""
-        total_features = sum(
+        self.total_features = sum(
             len(entity_info["features"]) for entity_info in self.config["entities"].values()
         )
-        self.world_tensor = torch.zeros((self.width, self.height, total_features), dtype=torch.uint8)
+        self.world_tensor = torch.zeros((self.width, self.height, self.total_features), dtype=torch.uint8)
 
     def _assign_features(self):
         """Assign features and slices to entities and groups based on the config."""
@@ -207,6 +216,8 @@ class World:
             for entity_name, feature in features:
                 entity = self.entities[entity_name]
                 entity.features[feature["name"]].tensor = self.world_tensor[:, :, idx]
+                for tag in feature.get("tags", []):
+                    self.feature_tags[tag].append(self.world_tensor[:, :, idx])
                 idx += 1
 
                 group_slice = self.world_tensor[:, :, group_start_idx:idx]
@@ -221,17 +232,26 @@ class World:
         """Provide convenient access to entities and feature groups."""
         if name in self.entities:
             return self.entities[name]
-        elif name in self.feature_groups:
-            return self.feature_groups[name]
+        elif name in self.feature_tags:
+            return torch.stack(self.feature_tags[name], dim=-1)
         else:
             raise AttributeError(f"'World' object has no attribute '{name}'")
 
-    def update(self, step):
+    def update(self, action: Optional[torch.Tensor] = None):
+
+        # For now, hard code actions to herbivore
+        if action is None:
+            action_dict = {}
+        else:
+            action_dict = {
+                "herbivore_move": torch.tensor(action, dtype=torch.uint8),
+            }
+
         rand_array = torch.randint(0, 255, (self.width, self.height), dtype=torch.uint8)
 
         plant_mask = self.plant.energy.bool()
 
-        if step % self.plant_growth_step_modulo == 0:
+        if self.step % self.plant_growth_step_modulo == 0:
             self.plant.crowding = torch_correlate_2d(plant_mask, generate_plant_crowding_kernel(), mode='constant')
             self.grow(
                 self.plant.energy,
@@ -259,6 +279,7 @@ class World:
             carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
             carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
             carried_feature_fns_offspring=[random_fn, random_fn],
+            agent_action=action_dict.get("herbivore_move", None)
         )
         safe_sub(self.herbivore.energy, 2)
 
@@ -272,6 +293,7 @@ class World:
             carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
             carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
             carried_feature_fns_offspring=[random_fn, random_fn],
+            agent_action=action_dict.get("predator_move", None)
 
         )
         safe_sub(self.predator.energy, 1)
@@ -287,13 +309,20 @@ class World:
 
         self.log_scores(self.herbivore)
 
-        return {
+        info = {
             'seed_count': float(torch.sum(self.plant.seed)),
             'plant_mass': float(torch.sum(self.plant.energy)),
             'herbivore_mass': float(torch.sum(self.herbivore.energy)),
             'predator_mass': float(torch.sum(self.predator.energy)),
             'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
         }
+        self.step += 1
+        if self.step >= self.max_steps:
+            done = True
+        else:
+            done = False
+
+        return done, info
 
     @staticmethod
     @timing
@@ -306,6 +335,40 @@ class World:
         if mask is not None:
             mask = torch.stack((mask, mask, mask), dim=-1) == 0
             entity_scent *= mask
+
+    @staticmethod
+    def get_direction_masks(
+        directions,
+        entity_energy,
+        clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        clearance_kernel_size: Optional[int] = 5,
+    ):
+        # If we get batched directions, we need to squeeze the batch dimension
+        if len(directions.shape) == 3:
+            directions = directions.squeeze(0)
+
+        direction_masks = {d: ((directions == d) * (entity_energy > 0)).type(torch.uint8) for d in range(1, 5)}
+
+        if clearance_mask is not None:
+            if isinstance(clearance_mask, list):
+                clearance_mask = safe_sum(clearance_mask)
+            else:
+                clearance_mask = clearance_mask.clone()
+            clearance_mask[entity_energy > 0] = 1
+        else:
+            clearance_mask = entity_energy > 0
+
+        clearance_kernels = directional_kernel_set(clearance_kernel_size)
+        for d in range(1, 5):
+            direction_masks[d] *= ~(torch.tensor(
+                torch_correlate_2d(
+                    clearance_mask.type(torch.float32),
+                    clearance_kernels[d].type(torch.float32),
+                    mode='constant',
+                    cval=1
+                )
+            ).type(torch.bool))
+        return direction_masks
 
     @staticmethod
     @timing
@@ -340,31 +403,27 @@ class World:
             opposite_energy = safe_sum([(opposite * wt).type(torch.uint8) for opposite, wt in zip(opposite_energy, opposite_energy_weights)])
             target_energy = safe_sub(target_energy, opposite_energy, inplace=False)
 
-        if clearance_mask is not None:
-            if isinstance(clearance_mask, list):
-                clearance_mask = safe_sum(clearance_mask)
-            else:
-                clearance_mask = clearance_mask.clone()
-            clearance_mask[entity_energy > 0] = 1
-        else:
-            clearance_mask = entity_energy > 0
-
         directions = get_direction_matrix(target_energy)
 
-        direction_masks = {d: ((directions == d) * (entity_energy > 0)).type(torch.uint8) for d in range(1, 5)}
+        direction_masks = World.get_direction_masks(directions, entity_energy, clearance_mask, clearance_kernel_size)
 
-        clearance_kernels = directional_kernel_set(clearance_kernel_size)
-        for d in range(1, 5):
-            direction_masks[d] *= ~(torch.tensor(
-                torch_correlate_2d(
-                    clearance_mask.type(torch.float32),
-                    clearance_kernels[d].type(torch.float32),
-                    mode='constant',
-                    cval=1
-                )
-            ).type(torch.bool))
+        return direction_masks
 
-        return direction_masks, target_energy, clearance_mask
+
+    @timing
+    def prepare_move_nn(
+        self,
+        entity_energy: torch.Tensor,
+    ):
+        # reshape to (N, C, W, H)
+        tensor = self.world_tensor[:, :, :4]
+        directions, tau = self.model.forward(tensor.permute(2, 0, 1).unsqueeze(0), self.num_quantiles)
+        directions = torch.argmax(directions[0, :, :], dim=0)
+
+        direction_masks = World.get_direction_masks(directions, entity_energy, self.obstacle.mask, 5)
+
+        return direction_masks
+
 
     @staticmethod
     @timing
@@ -384,6 +443,12 @@ class World:
                 carried_feature_fns_self = [lambda x: x] * len(carried_features_self)
             else:
                 assert len(carried_features_self) == len(carried_feature_fns_self)
+
+        if carried_features_offspring is not None:
+            if carried_feature_fns_offspring is None:
+                carried_feature_fns_offspring = [lambda x: x] * len(carried_features_offspring)
+            else:
+                assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
 
         move_origin_mask = torch.sum(torch.stack(list(direction_masks.values())), dim=0).type(torch.bool)
         offspring_mask = move_origin_mask * (entity_energy > divide_threshold)
@@ -432,6 +497,7 @@ class World:
         carried_features_offspring: Optional[List[torch.Tensor]] = None,
         carried_feature_fns_self: Optional[List[Callable]] = None,
         carried_feature_fns_offspring: Optional[List[Callable]] = None,
+        agent_action: Optional[torch.Tensor] = None,
     ):
         """
         Move entities and reproduce entities. Movement is based on the target energy tensor and optional opposite energy tensor.
@@ -451,17 +517,22 @@ class World:
         :param carried_features_offspring: List of features that will be copied from the parent to the offspring.
         :param carried_feature_fns_self: List of functions to apply to the carried features of the parent entity.
         :param carried_feature_fns_offspring: List of functions to apply to the carried features of the offspring entity.
+        :param agent_action: Action tensor of the agent.
         :return: None
         """
-        direction_masks, target_energy, clearance_mask = self.prepare_move(
-            entity_energy,
-            target_energy,
-            target_energy_weights,
-            opposite_energy,
-            opposite_energy_weights,
-            clearance_mask,
-            clearance_kernel_size
-        )
+        if agent_action is not None:
+            direction_masks = World.get_direction_masks(agent_action, entity_energy, self.obstacle.mask, 5)
+        else:
+            direction_masks = self.prepare_move(
+                entity_energy,
+                target_energy,
+                target_energy_weights,
+                opposite_energy,
+                opposite_energy_weights,
+                clearance_mask,
+                clearance_kernel_size
+            )
+
         self.perform_move(
             entity_energy,
             direction_masks,
@@ -508,3 +579,9 @@ class World:
         top_score_id = converted_ids.flatten()[top_score_idx]
         top_score = scores.flatten()[top_score_idx]
         print(f"Top score: {top_score}, ID: {top_score_id}")
+
+    @timing
+    def entity_scores(self, entity: Union[BaseEntity | str]):
+        if isinstance(entity, str):
+            entity = self.entities[entity.lower()]
+        return entity.offspring_count.type(torch.float32) * 255 + entity.energy

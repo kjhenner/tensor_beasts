@@ -12,6 +12,17 @@ files = [
 ]
 
 [[package]]
+name = "cloudpickle"
+version = "3.0.0"
+description = "Pickler class to extend the standard pickle.Pickler functionality"
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "cloudpickle-3.0.0-py3-none-any.whl", hash = "sha256:246ee7d0c295602a036e86369c77fecda4ab17b506496730f2f576d9016fd9c7"},
+    {file = "cloudpickle-3.0.0.tar.gz", hash = "sha256:996d9a482c6fb4f33c1a35335cf8afd065d2a56e973270364840712d9131a882"},
+]
+
+[[package]]
 name = "colorama"
 version = "0.4.6"
 description = "Cross-platform colored terminal text."
@@ -35,6 +46,17 @@ files = [
 
 [package.extras]
 test = ["pytest (>=6)"]
+
+[[package]]
+name = "farama-notifications"
+version = "0.0.4"
+description = "Notifications for all Farama Foundation maintained libraries."
+optional = false
+python-versions = "*"
+files = [
+    {file = "Farama-Notifications-0.0.4.tar.gz", hash = "sha256:13fceff2d14314cf80703c8266462ebf3733c7d165336eee998fc58e545efd18"},
+    {file = "Farama_Notifications-0.0.4-py3-none-any.whl", hash = "sha256:14de931035a41961f7c056361dc7f980762a143d05791ef5794a751a2caf05ae"},
+]
 
 [[package]]
 name = "filelock"
@@ -90,6 +112,36 @@ test = ["aiohttp (!=4.0.0a0,!=4.0.0a1)", "numpy", "pytest", "pytest-asyncio (!=0
 test-downstream = ["aiobotocore (>=2.5.4,<3.0.0)", "dask-expr", "dask[dataframe,test]", "moto[server] (>4,<5)", "pytest-timeout", "xarray"]
 test-full = ["adlfs", "aiohttp (!=4.0.0a0,!=4.0.0a1)", "cloudpickle", "dask", "distributed", "dropbox", "dropboxdrivefs", "fastparquet", "fusepy", "gcsfs", "jinja2", "kerchunk", "libarchive-c", "lz4", "notebook", "numpy", "ocifs", "pandas", "panel", "paramiko", "pyarrow", "pyarrow (>=1)", "pyftpdlib", "pygit2", "pytest", "pytest-asyncio (!=0.22.0)", "pytest-benchmark", "pytest-cov", "pytest-mock", "pytest-recording", "pytest-rerunfailures", "python-snappy", "requests", "smbprotocol", "tqdm", "urllib3", "zarr", "zstandard"]
 tqdm = ["tqdm"]
+
+[[package]]
+name = "gymnasium"
+version = "0.29.1"
+description = "A standard API for reinforcement learning and a diverse set of reference environments (formerly Gym)."
+optional = false
+python-versions = ">=3.8"
+files = [
+    {file = "gymnasium-0.29.1-py3-none-any.whl", hash = "sha256:61c3384b5575985bb7f85e43213bcb40f36fcdff388cae6bc229304c71f2843e"},
+    {file = "gymnasium-0.29.1.tar.gz", hash = "sha256:1a532752efcb7590478b1cc7aa04f608eb7a2fdad5570cd217b66b6a35274bb1"},
+]
+
+[package.dependencies]
+cloudpickle = ">=1.2.0"
+farama-notifications = ">=0.0.1"
+numpy = ">=1.21.0"
+typing-extensions = ">=4.3.0"
+
+[package.extras]
+accept-rom-license = ["autorom[accept-rom-license] (>=0.4.2,<0.5.0)"]
+all = ["box2d-py (==2.3.5)", "cython (<3)", "imageio (>=2.14.1)", "jax (>=0.4.0)", "jaxlib (>=0.4.0)", "lz4 (>=3.1.0)", "matplotlib (>=3.0)", "moviepy (>=1.0.0)", "mujoco (>=2.3.3)", "mujoco-py (>=2.1,<2.2)", "opencv-python (>=3.0)", "pygame (>=2.1.3)", "shimmy[atari] (>=0.1.0,<1.0)", "swig (==4.*)", "torch (>=1.0.0)"]
+atari = ["shimmy[atari] (>=0.1.0,<1.0)"]
+box2d = ["box2d-py (==2.3.5)", "pygame (>=2.1.3)", "swig (==4.*)"]
+classic-control = ["pygame (>=2.1.3)", "pygame (>=2.1.3)"]
+jax = ["jax (>=0.4.0)", "jaxlib (>=0.4.0)"]
+mujoco = ["imageio (>=2.14.1)", "mujoco (>=2.3.3)"]
+mujoco-py = ["cython (<3)", "cython (<3)", "mujoco-py (>=2.1,<2.2)", "mujoco-py (>=2.1,<2.2)"]
+other = ["lz4 (>=3.1.0)", "matplotlib (>=3.0)", "moviepy (>=1.0.0)", "opencv-python (>=3.0)", "torch (>=1.0.0)"]
+testing = ["pytest (==7.1.3)", "scipy (>=1.7.3)"]
+toy-text = ["pygame (>=2.1.3)", "pygame (>=2.1.3)"]
 
 [[package]]
 name = "iniconfig"
@@ -705,6 +757,38 @@ files = [
 ]
 
 [[package]]
+name = "tensordict"
+version = "0.4.0"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "tensordict-0.4.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:e53f6db9071d2cd03ff8cfc4d48933aa9d387fb2f45d48a1a3d663bb2df2aa59"},
+    {file = "tensordict-0.4.0-cp310-cp310-manylinux1_x86_64.whl", hash = "sha256:4bc94bbc4847e907436f433ea889609b755f761b9c6bd695c8be692b83942ebb"},
+    {file = "tensordict-0.4.0-cp310-cp310-win_amd64.whl", hash = "sha256:5fc35bb00110a9c7fe20639b75066c48c1ca6ca3a0450fcfa1a9d4775b80abde"},
+    {file = "tensordict-0.4.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:44bb5adebcc198503122b559bd38d50048abef61a377ac0fa5741bf1fc68678a"},
+    {file = "tensordict-0.4.0-cp311-cp311-manylinux1_x86_64.whl", hash = "sha256:31a11a4740c28dda0f40302c6b234544fdcaf52e352a23802f7f8eaa383e1776"},
+    {file = "tensordict-0.4.0-cp311-cp311-win_amd64.whl", hash = "sha256:845b028686af73457572177a263aa06320468b284363c4c5d10598f84fbc68a5"},
+    {file = "tensordict-0.4.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:6ef4dc24caa4971d821988072c57e4a06912d1935503b745c5700615eb0d5c33"},
+    {file = "tensordict-0.4.0-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:496ea5a11bf3e7a63548db7128f49b98914615001dd6c748012372acc5a10110"},
+    {file = "tensordict-0.4.0-cp38-cp38-manylinux1_x86_64.whl", hash = "sha256:7c33913d71e6e7d20140d3e13451eb6e7a8446e08522b3ccdbe7521dcc1f48a6"},
+    {file = "tensordict-0.4.0-cp38-cp38-win_amd64.whl", hash = "sha256:7e8bb793fda32c0ebbe15fbc1c81ff85a90de42d4f38ca4ca65d5116cbd31c3c"},
+    {file = "tensordict-0.4.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:78b33a6d6a87050a9a1c8b959914b8da8bb497755f1570818d62290c5523ed86"},
+    {file = "tensordict-0.4.0-cp39-cp39-manylinux1_x86_64.whl", hash = "sha256:14dda2db38b02f3362675de21c43148a60956209f5cb4cef2f0bf74f28cef7a4"},
+    {file = "tensordict-0.4.0-cp39-cp39-win_amd64.whl", hash = "sha256:aedc5cc205faf662830f9af3b9dad1b42fb12986ce6ab54dee4d409d31f6231b"},
+]
+
+[package.dependencies]
+cloudpickle = "*"
+numpy = "*"
+torch = ">=2.3.0"
+
+[package.extras]
+checkpointing = ["torchsnapshot-nightly"]
+h5 = ["h5py (>=3.8)"]
+tests = ["pytest", "pytest-benchmark", "pytest-instafail", "pytest-rerunfailures", "pyyaml"]
+
+[[package]]
 name = "tomli"
 version = "2.0.1"
 description = "A lil' TOML parser"
@@ -770,6 +854,47 @@ opt-einsum = ["opt-einsum (>=3.3)"]
 optree = ["optree (>=0.9.1)"]
 
 [[package]]
+name = "torchrl"
+version = "0.4.0"
+description = ""
+optional = false
+python-versions = "*"
+files = [
+    {file = "torchrl-0.4.0-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:ae47cbc8137bdef34a4d3950395d0d7987b27b87249d388b613316b27e6e894e"},
+    {file = "torchrl-0.4.0-cp310-cp310-manylinux1_x86_64.whl", hash = "sha256:96f3792c64d9732f1c09ed80209f436a853eb41f2c36546afd4c4d7deb84b963"},
+    {file = "torchrl-0.4.0-cp310-cp310-win_amd64.whl", hash = "sha256:5637b0e52edf2147e7c1a4ad61d539a076a0db768dd4fc94285bfda3e53cba7f"},
+    {file = "torchrl-0.4.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:391599ca178eb3458d1d60fcfed85ad64381d4f833277fb338b9eff916f9ef4e"},
+    {file = "torchrl-0.4.0-cp311-cp311-manylinux1_x86_64.whl", hash = "sha256:1698c32667f4dab8e31cf7070064d531a527a3c0598014063cee8e3e44e2cbe1"},
+    {file = "torchrl-0.4.0-cp311-cp311-win_amd64.whl", hash = "sha256:dc89d183519af55121917a0879806b7565906d538b67202557af70b26930f1bc"},
+    {file = "torchrl-0.4.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:33d695de1340fae3abc23731c639dfd1b4caee13630eaf9d019e116290ebea27"},
+    {file = "torchrl-0.4.0-cp38-cp38-macosx_11_0_arm64.whl", hash = "sha256:b03373fb6816c65d28cd6c5dfe16477968bd5c11f7964af839af4f544a0a3865"},
+    {file = "torchrl-0.4.0-cp38-cp38-manylinux1_x86_64.whl", hash = "sha256:9989b97415be9596d6b22d4964437bdfa14c2ef1e05294a6ce0053f398161353"},
+    {file = "torchrl-0.4.0-cp38-cp38-win_amd64.whl", hash = "sha256:083cc4802e9568d09fdddb881e66f58b56d263322e6df451897735b7910f64bd"},
+    {file = "torchrl-0.4.0-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:5db132859e24b8134b40095a80c85478971d2ec2a8ce940f41cf42c6968b7de5"},
+    {file = "torchrl-0.4.0-cp39-cp39-manylinux1_x86_64.whl", hash = "sha256:894be8700c75fe0830a49734c4d173afa8191747edac5ec445fa8ccdd0829dc5"},
+    {file = "torchrl-0.4.0-cp39-cp39-win_amd64.whl", hash = "sha256:36c8bd14a21690fe3e199f12fd2fcd9ff49aaa04326b4c441b5786366623f137"},
+]
+
+[package.dependencies]
+cloudpickle = "*"
+numpy = "*"
+packaging = "*"
+tensordict = ">=0.4.0"
+torch = ">=2.3.0"
+
+[package.extras]
+all = ["ale-py", "atari-py", "dm-control", "dm-meltingpot", "git", "gym", "gym[accept-rom-license]", "gymnasium", "h5py", "huggingface-hub", "hydra-core (>=1.1)", "hydra-submitit-launcher", "minari", "moviepy", "mujoco", "pandas", "pettingzoo (>=1.24.1)", "pillow", "pygame", "pytest", "pytest-instafail", "pyyaml", "requests", "scikit-learn", "scipy", "tensorboard", "torchsnapshot", "torchvision", "tqdm", "vmas (>=1.2.10)", "wandb"]
+atari = ["ale-py", "atari-py", "gym", "gym[accept-rom-license]", "pygame"]
+checkpointing = ["torchsnapshot"]
+dm-control = ["dm-control"]
+gym-continuous = ["gymnasium", "mujoco"]
+marl = ["dm-meltingpot", "pettingzoo (>=1.24.1)", "vmas (>=1.2.10)"]
+offline-data = ["h5py", "huggingface-hub", "minari", "pandas", "pillow", "requests", "scikit-learn", "torchvision", "tqdm"]
+rendering = ["moviepy"]
+tests = ["pytest", "pytest-instafail", "pyyaml", "scipy"]
+utils = ["git", "hydra-core (>=1.1)", "hydra-submitit-launcher", "tensorboard", "tqdm", "wandb"]
+
+[[package]]
 name = "triton"
 version = "2.3.1"
 description = "A language and compiler for custom Deep Learning operations"
@@ -806,4 +931,4 @@ files = [
 [metadata]
 lock-version = "2.0"
 python-versions = "^3.10"
-content-hash = "2b7b9ca42f36d64018b32b8c131e4cb33f807ae1a752c93813a31e827d9e3777"
+content-hash = "6a294d2d0e3be3f4f7c69eb253778429f24a844c54549e1692e6bd990cfd9c1d"
