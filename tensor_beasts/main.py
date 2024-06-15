@@ -2,6 +2,10 @@ import json
 import torch
 import argparse
 import pygame
+import threading
+import time
+from pygame import mouse
+import sys
 
 from tensor_beasts.display_manager import DisplayManager
 from tensor_beasts.util import get_mean_execution_times, scale_tensor
@@ -40,6 +44,31 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class WorldThread(threading.Thread):
+    def __init__(self, world, update_screen_cb, clock):
+        super().__init__(daemon=True)
+        self.world = world
+        self.update_screen_cb = update_screen_cb
+        self.clock = clock
+        self.done = False
+
+    def stop(self):
+        self.done = True
+
+    def run(self):
+        step = 0
+        ups = None
+        while not self.done:
+            start = time.time()
+            _, world_stats = self.world.update(step)
+            end = time.time()
+            cur_ups = 1 / (end - start)
+            ups = cur_ups if ups is None else (ups + cur_ups) / 2
+            world_stats["ups"] = ups
+            self.update_screen_cb(step, world_stats)
+            step += 1
+
+
 def main(args: argparse.Namespace):
     torch.set_default_device(torch.device(args.device))
 
@@ -71,10 +100,30 @@ def main(args: argparse.Namespace):
         display_manager = DisplayManager(width, height)
         current_screen_idx = 0
 
+    def update_screen(step, world_stats):
+        if not args.headless:
+            display_manager.update_screen(screens[current_screen_idx][1]())
+        runtime_stats = {
+            'current_screen': screens[current_screen_idx][0] if not args.headless else "(headless)",
+            'fps': clock.get_fps(),
+            'step': step
+        }
+        runtime_stats.update(world_stats)
+        runtime_stats.update(get_mean_execution_times())
+        print(json.dumps(runtime_stats, indent=4))
+
+    world_thread = WorldThread(world, update_screen, clock)
+    world_thread.start()
+
     done, step = False, 0
     while not done:
         if display_manager is not None:
             for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    world_thread.stop()
+                    world_thread.join(5)
+                    pygame.quit()
+                    sys.exit()
                 if event.type == pygame.KEYDOWN:
                     if event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
                         display_manager.zoom_in()
@@ -94,21 +143,18 @@ def main(args: argparse.Namespace):
                         world.initialize_herbivore()
                     elif event.key == pygame.K_p:
                         world.initialize_predator()
-
-        _, world_stats = world.update()
+                elif event.type == pygame.MOUSEMOTION:
+                    rel = mouse.get_rel()
+                    if mouse.get_pressed()[0]:
+                        display_manager.pan(2 * rel[0] / height, -2 * rel[1] / height)
+                elif event.type == pygame.MOUSEWHEEL:
+                    display_manager.zoom_in(1 + event.y * 0.02)
+                elif event.type == pygame.VIDEORESIZE:
+                    width, height = event.w, event.h
+                    display_manager.resize(event.w, event.h)
 
         if not args.headless:
-            display_manager.update(screens[current_screen_idx][1]())
-
-        runtime_stats = {
-            'current_screen': screens[current_screen_idx][0] if not args.headless else "(headless)",
-            'fps': clock.get_fps(),
-            'step': step
-        }
-        runtime_stats.update(world_stats)
-        runtime_stats.update(get_mean_execution_times())
-
-        print(json.dumps(runtime_stats, indent=4))
+            display_manager.update()
 
         clock.tick()
         step += 1
