@@ -578,7 +578,6 @@ class World:
         converted_ids = (entity.id_0.type(torch.float32) * 255) + entity.id_1
         top_score_id = converted_ids.flatten()[top_score_idx]
         top_score = scores.flatten()[top_score_idx]
-        print(f"Top score: {top_score}, ID: {top_score_id}")
 
     @timing
     def entity_scores(self, entity: Union[BaseEntity | str]):

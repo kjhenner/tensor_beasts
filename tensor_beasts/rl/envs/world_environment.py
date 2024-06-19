@@ -49,6 +49,7 @@ class TensorBeastsEnv(gym.Env):
         return self.world.observable, info
 
     def step(self, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, bool, bool, Dict]:
+        action = action.reshape(self.world.width, self.world.height)
         done, info = self.world.update(action)
         reward: torch.Tensor = torch.sum(self.world.entity_scores('herbivore'))
         return self.world.observable, reward, done, False, info
