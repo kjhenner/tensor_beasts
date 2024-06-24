@@ -64,6 +64,7 @@ class IqnLoss(LossModule):
         value_network: Union[QValueActor, nn.Module],
         *,
         gamma: float = 0.5,
+        num_quantiles: int = 16,
     ) -> None:
         super().__init__()
         self._in_keys = None
@@ -74,7 +75,8 @@ class IqnLoss(LossModule):
 
         self.convert_to_functional(
             value_network,
-            "value_network"
+            "value_network",
+            create_target_params=True
         )
 
         self.value_network_in_keys = value_network.in_keys
@@ -86,6 +88,7 @@ class IqnLoss(LossModule):
         #     raise TypeError(_GAMMA_LMBDA_DEPREC_ERROR)
 
         self.gamma = gamma
+        self.num_quantiles = num_quantiles
 
     def _set_in_keys(self):
         keys = [
@@ -104,13 +107,22 @@ class IqnLoss(LossModule):
             self._set_in_keys()
         return self._in_keys
 
-    def _calculate_quantile_huber_loss(self, current_q, target_q, quantiles):
-        """Calculates the quantile Huber loss."""
+    def _calculate_quantile_huber_loss(self, current_q, target_q, tau):
+        """
+        Calculates the quantile Huber loss.
+
+        Intuition for quantile loss:
+        If squared error gives rise to a mean (balance of magnitudes above and below target)
+        And absolute error gives rise to a median (balance between number of data points above and below target),
+        Absolute error is like quantile loss with alpha=0.5 for alpha in [0, 1].
+        Quantile loss gives rise to a quantile defined by other values of alpha.
+        """
+
         td_errors = target_q - current_q
 
         huber_loss = F.huber_loss(current_q, target_q, reduction='none', delta=1.0)
 
-        quantile_loss = (quantiles - (td_errors.detach() < 0).float()).abs() * huber_loss
+        quantile_loss = (tau - (td_errors.detach() < 0).float()).abs() * huber_loss
         return quantile_loss.mean()
 
     @dispatch
@@ -125,51 +137,27 @@ class IqnLoss(LossModule):
             a tensor containing the IQN loss.
 
         """
-        current_td = tensordict.clone(False)
-
-        with self.value_network_params.to_module(self.value_network):
-            self.value_network(current_td)
-
-        # Indices of selected actions (N, W*H)
-        current_action_idx = tensordict.get(self.tensor_keys.action)
-
-        # (N, num_quantiles, W*H, num_actions)
-        pred_Q = current_td.get(self.tensor_keys.quantile)
-        tau = current_td.get(self.tensor_keys.tau)
-
         N = tensordict.get(self.tensor_keys.action).shape[0]
-        num_quantiles = tensordict.get(self.tensor_keys.tau).shape[1]
 
-        current_action_idx = current_action_idx.unsqueeze(-1).expand(N, num_quantiles, current_action_idx.shape[-1], 1)
-
-        pred_Q = pred_Q.gather(3, current_action_idx).squeeze(-1)
-
-        step_td = step_mdp(current_td, keep_other=False, exclude_reward=False)
-        step_td_copy = step_td.clone(False)
-
-        # Use online network to compute the action
-        with self.value_network_params.data.to_module(self.value_network):
-            self.value_network(step_td)
-
-        next_action_idx = step_td.get(self.tensor_keys.action)
-        next_action_idx = next_action_idx.unsqueeze(1).unsqueeze(-1).expand(N, num_quantiles, next_action_idx.shape[-1], 1)
-
-        # Use target network to compute the values
+        # Run the target model
         with self.target_value_network_params.to_module(self.value_network):
-            self.value_network(step_td_copy)
-            next_Q = step_td_copy.get(self.tensor_keys.quantile)
+            next_td = self.value_network(
+                step_mdp(tensordict, keep_other=False, exclude_reward=False)
+            )
+        action_idx_next = next_td.get(self.tensor_keys.action)
+        Q_targets = next_td.get(self.tensor_keys.quantile).detach()
+        # TODO: Do we need to transpose this to gather correctly?
+        Q_targets = Q_targets.gather(3, action_idx_next.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)).squeeze(-1)
 
-        next_Q = next_Q.gather(3, next_action_idx)
+        # Run the online model
+        with self.value_network_params.to_module(self.value_network):
+            current_td = self.value_network(tensordict.clone())
+        action_idx = current_td.get(self.tensor_keys.action)
+        tau = current_td.get(self.tensor_keys.tau)
+        Q_expected = current_td.get(self.tensor_keys.quantile)
+        Q_expected = Q_expected.gather(3, action_idx.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)).squeeze(-1)
 
-        reward = step_td.get(self.tensor_keys.reward)
-
-        done = step_td.get(self.tensor_keys.done)
-
-        # The target Q is the observed reward plus the discounted next Q value, masked by the done flag
-        target_Q = reward + (self.gamma * next_Q.squeeze(1).squeeze(-1)) * (~ done)
-        target_Q = target_Q.unsqueeze(1)
-
-        loss = self._calculate_quantile_huber_loss(pred_Q, target_Q, tau)
+        loss = self._calculate_quantile_huber_loss(Q_expected, Q_targets, tau)
         loss = _reduce(loss, reduction="mean")
         td_out = TensorDict({"loss": loss}, [])
         return td_out

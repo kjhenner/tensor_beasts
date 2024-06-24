@@ -38,7 +38,7 @@ class TensorBeastsEnv(gym.Env):
         self.action_space = spaces.Box(
             low=0,
             high=6,
-            shape=(self.world.width, self.world.height),
+            shape=(self.world.width * self.world.height,),
             dtype=np.uint8
         )
 
