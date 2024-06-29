@@ -44,8 +44,7 @@ class World:
     def __init__(
         self, size: int,
         config: Optional[Dict] = None,
-        scalars: Optional[Dict] = None,
-        max_steps: int = 5000
+        scalars: Optional[Dict] = None
     ):
         """Initialize the world.
 
@@ -73,14 +72,13 @@ class World:
         """
         self.width, self.height = size, size
         self.total_features = 0
-        self.max_steps = max_steps
 
         # TODO: Use Hydra for config?
         self.config = {
             "entities": {
                 "Predator": {
                     "features": [
-                        {"name": "energy", "group": "energy", "tags:": ["observable"]},
+                        {"name": "energy", "group": "energy", "tags": ["observable"]},
                         {"name": "scent", "group": "scent", "tags": ["observable"]},
                         {"name": "offspring_count", "tags": ["clear_on_death"]},
                         {"name": "id_0", "group": "predator_id", "tags": ["clear_on_death"]},
@@ -116,7 +114,8 @@ class World:
             self.config.update(config)
 
         self.scalars = {
-            "plant_init_odds": 255,
+            "plant_init_odds": 16,
+            "plant_init_energy": 32,
             "plant_growth_step_modulo": 2,
             "herbivore_init_odds": 255,
             "plant_growth_odds": 255,
@@ -142,7 +141,7 @@ class World:
         for name, value in self.scalars.items():
             setattr(self, name, value)
 
-        self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
+        self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0) * self.plant_init_energy
 
         self.initialize_herbivore()
         self.initialize_predator()
@@ -308,21 +307,6 @@ class World:
                 cleared_feature *= entity.energy > 0
 
         self.log_scores(self.herbivore)
-
-        info = {
-            'seed_count': float(torch.sum(self.plant.seed)),
-            'plant_mass': float(torch.sum(self.plant.energy)),
-            'herbivore_mass': float(torch.sum(self.herbivore.energy)),
-            'predator_mass': float(torch.sum(self.predator.energy)),
-            'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
-        }
-        self.step += 1
-        if self.step >= self.max_steps:
-            done = True
-        else:
-            done = False
-
-        return done, info
 
     @staticmethod
     @timing
@@ -578,10 +562,18 @@ class World:
         converted_ids = (entity.id_0.type(torch.float32) * 255) + entity.id_1
         top_score_id = converted_ids.flatten()[top_score_idx]
         top_score = scores.flatten()[top_score_idx]
-        print(f"Top score: {top_score}, ID: {top_score_id}")
 
     @timing
     def entity_scores(self, entity: Union[BaseEntity | str]):
         if isinstance(entity, str):
             entity = self.entities[entity.lower()]
         return entity.offspring_count.type(torch.float32) * 255 + entity.energy
+
+    def collect_info(self):
+        return {
+            'seed_count': float(torch.sum(self.plant.seed)),
+            'plant_mass': float(torch.sum(self.plant.energy)),
+            'herbivore_mass': float(torch.sum(self.herbivore.energy)),
+            'predator_mass': float(torch.sum(self.predator.energy)),
+            'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
+        }
