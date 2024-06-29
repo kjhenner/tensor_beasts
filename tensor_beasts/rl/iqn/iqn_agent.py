@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -48,7 +48,6 @@ class IQN(nn.Module):
         self,
         feature_size,
         embed_size,
-        window_size,
         iqn_embedding_dimension,
         num_actions,
         num_quantiles,
@@ -56,7 +55,6 @@ class IQN(nn.Module):
         super(IQN, self).__init__()
         self.feature_size = feature_size
         self.embed_size = embed_size
-        self.window_size = window_size
         self.iqn_embedding_dimension = iqn_embedding_dimension
         self.num_actions = num_actions
         self.num_quantiles = num_quantiles
@@ -110,7 +108,8 @@ class IQN(nn.Module):
         tau = torch.rand(size=(N * self.num_quantiles, 1), device=device, dtype=torch.float32)
 
         # Use the cosine fn to generate embeddings for the quantile values.
-        # (Cosine fn just maps floats to an embedding space the NN can work with better than a single value input.)
+        # (Cosine fn just maps floats to an embedding space the NN can work with better than a single value input.
+        # Sort of a numerical semantic space.)
         quantile_embeddings = tau.expand([-1, self.iqn_embedding_dimension])
         quantile_embeddings = torch.cos(torch.arange(1, self.iqn_embedding_dimension + 1, 1, device=device) * math.pi * quantile_embeddings)
 
@@ -128,12 +127,15 @@ class IQN(nn.Module):
         # TODO: Is multiplication here the correct operation?
         obs_embeddings = obs_embeddings * quantile_hidden.unsqueeze(1)
 
+        # The following is the dueling network architecture. Compute separate advantage and value predictions, combine
+        # them to get Q values for relative advantage of each action.
         # Compute advantage using A_head
         advantage = self.A_head(obs_embeddings)  # (N*num_quantiles, W*H, num_actions)
 
         # Compute value predictions using V_head
         value = self.V_head(obs_embeddings)  # (N*num_quantiles, W*H, 1)
 
+        # Relative advantage of each action
         quantiles = value + advantage - advantage.mean(dim=-1, keepdim=True)
 
         # Reshape quantiles to (N, num_quantiles, W*H, num_actions)

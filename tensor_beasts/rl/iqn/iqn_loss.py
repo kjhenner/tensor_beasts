@@ -3,19 +3,37 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
+import torch
 from tensordict import TensorDict, TensorDictBase
 from tensordict.nn import dispatch
 from tensordict.utils import NestedKey
 from torch import nn
 from torch.nn import functional as F
-from torchrl.data.tensor_specs import TensorSpec
 
 from torchrl.envs.utils import step_mdp
 from torchrl.modules.tensordict_module.actors import QValueActor
 from torchrl.modules.tensordict_module.common import ensure_tensordict_compatible
 
 from torchrl.objectives.common import LossModule
-from torchrl.objectives.utils import _GAMMA_LMBDA_DEPREC_ERROR, _reduce
+from torchrl.objectives.utils import _reduce
+
+
+def calculate_quantile_huber_loss(current_q, target_q, tau):
+    """
+    Calculates the quantile Huber loss.
+
+    Intuition for quantile loss:
+    If squared error gives rise to a mean (balance of magnitudes above and below target)
+    And absolute error gives rise to a median (balance between number of data points above and below target),
+    Absolute error is like quantile loss with alpha=0.5 for alpha in [0, 1].
+    Quantile loss gives rise to a quantile defined by other values of alpha.
+    """
+    td_errors = target_q - current_q
+
+    huber_loss = F.huber_loss(current_q, target_q, reduction='none', delta=1.0)
+
+    quantile_loss = (tau - (td_errors.detach() < 0).float()).abs() * huber_loss
+    return quantile_loss.mean()
 
 
 class IqnLoss(LossModule):
@@ -63,7 +81,7 @@ class IqnLoss(LossModule):
         self,
         value_network: Union[QValueActor, nn.Module],
         *,
-        gamma: float = 0.5,
+        gamma: float = 0.99,
         num_quantiles: int = 16,
     ) -> None:
         super().__init__()
@@ -81,9 +99,10 @@ class IqnLoss(LossModule):
 
         self.value_network_in_keys = value_network.in_keys
 
-        # Currently bypassing this separate value estimator thing as both the values and actions
+        # Currently bypassing separate value estimator as both the values and actions
         # are being computed by the same network. Could be worth revisiting this to be consistent
         # with the rest of TorchRL!
+
         # if gamma is not None:
         #     raise TypeError(_GAMMA_LMBDA_DEPREC_ERROR)
 
@@ -107,24 +126,6 @@ class IqnLoss(LossModule):
             self._set_in_keys()
         return self._in_keys
 
-    def _calculate_quantile_huber_loss(self, current_q, target_q, tau):
-        """
-        Calculates the quantile Huber loss.
-
-        Intuition for quantile loss:
-        If squared error gives rise to a mean (balance of magnitudes above and below target)
-        And absolute error gives rise to a median (balance between number of data points above and below target),
-        Absolute error is like quantile loss with alpha=0.5 for alpha in [0, 1].
-        Quantile loss gives rise to a quantile defined by other values of alpha.
-        """
-
-        td_errors = target_q - current_q
-
-        huber_loss = F.huber_loss(current_q, target_q, reduction='none', delta=1.0)
-
-        quantile_loss = (tau - (td_errors.detach() < 0).float()).abs() * huber_loss
-        return quantile_loss.mean()
-
     @dispatch
     def forward(self, tensordict: TensorDictBase) -> TensorDict:
         """Computes the IQN loss given a tensordict sampled from the replay buffer.
@@ -145,9 +146,17 @@ class IqnLoss(LossModule):
                 step_mdp(tensordict, keep_other=False, exclude_reward=False)
             )
         action_idx_next = next_td.get(self.tensor_keys.action)
-        Q_targets = next_td.get(self.tensor_keys.quantile).detach()
+        Q_targets_next = next_td.get(self.tensor_keys.quantile).detach()
+
         # TODO: Do we need to transpose this to gather correctly?
-        Q_targets = Q_targets.gather(3, action_idx_next.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)).squeeze(-1)
+        Q_targets_next = Q_targets_next.gather(
+            3,
+            action_idx_next.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)
+        ).squeeze(-1)
+
+        reward = next_td.get(self.tensor_keys.reward).unsqueeze(-1).expand_as(Q_targets_next)
+        next_done = (~ next_td.get(self.tensor_keys.done)).unsqueeze(-1).expand_as(Q_targets_next)
+        Q_targets = reward + self.gamma * next_done * Q_targets_next
 
         # Run the online model
         with self.value_network_params.to_module(self.value_network):
@@ -155,9 +164,10 @@ class IqnLoss(LossModule):
         action_idx = current_td.get(self.tensor_keys.action)
         tau = current_td.get(self.tensor_keys.tau)
         Q_expected = current_td.get(self.tensor_keys.quantile)
-        Q_expected = Q_expected.gather(3, action_idx.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)).squeeze(-1)
+        Q_expected = Q_expected.gather(
+            3, action_idx.unsqueeze(1).expand(N, self.num_quantiles, -1).unsqueeze(-1)
+        ).squeeze(-1)
 
-        loss = self._calculate_quantile_huber_loss(Q_expected, Q_targets, tau)
-        loss = _reduce(loss, reduction="mean")
-        td_out = TensorDict({"loss": loss}, [])
+        loss = calculate_quantile_huber_loss(Q_expected, Q_targets, tau)
+        td_out = TensorDict({"loss": loss})
         return td_out
