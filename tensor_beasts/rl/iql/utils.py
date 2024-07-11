@@ -4,6 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 import functools
 
+import psutil
 import torch.nn
 from torch import nn
 import torch.optim
@@ -88,24 +89,30 @@ def apply_env_transforms(
 def make_environment(cfg, train_num_envs=1, eval_num_envs=1, logger=None):
     """Make environments for training and evaluation."""
     maker = functools.partial(env_maker, cfg)
-    parallel_env = ParallelEnv(
-        train_num_envs,
-        EnvCreator(maker),
-        serial_for_single=True,
-    )
-    parallel_env.set_seed(cfg.env.seed)
+    # parallel_env = ParallelEnv(
+    #     train_num_envs,
+    #     EnvCreator(maker),
+    #     serial_for_single=False,
+    # )
+    # parallel_env.set_seed(cfg.env.seed)
+    #
+    # train_env = apply_env_transforms(parallel_env)
 
-    train_env = apply_env_transforms(parallel_env)
+    train_env = apply_env_transforms(maker())
+    train_env.set_seed(cfg.env.seed)
 
-    maker = functools.partial(env_maker, cfg, from_pixels=cfg.logger.video)
-    eval_env = TransformedEnv(
-        ParallelEnv(
-            eval_num_envs,
-            EnvCreator(maker),
-            serial_for_single=True,
-        ),
-        train_env.transform.clone(),
-    )
+    # maker = functools.partial(env_maker, cfg, from_pixels=cfg.logger.video)
+    # eval_env = TransformedEnv(
+    #     ParallelEnv(
+    #         eval_num_envs,
+    #         EnvCreator(maker),
+    #         serial_for_single=False,
+    #     ),
+    #     train_env.transform.clone(),
+    # )
+    eval_maker = functools.partial(env_maker, cfg, from_pixels=cfg.logger.video)
+    eval_env = TransformedEnv(eval_maker(), train_env.transform.clone())
+
     if cfg.logger.video:
         eval_env.insert_transform(
             0, VideoRecorder(logger, tag="rendered", in_keys=["pixels"])
@@ -205,9 +212,14 @@ class ConvEncoder(nn.Module):
         self._initialize_weights()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = input.permute(0, 3, 1, 2)
-        output = self.convolutions(input.type(torch.float32))
-        return output.permute(0, 2, 1)
+        if len(input.shape) == 3:
+            input = input.permute(2, 0, 1)
+            output = self.convolutions(input.type(torch.float32))
+            return output.permute(1, 0)
+        else:
+            input = input.permute(0, 3, 1, 2)
+            output = self.convolutions(input.type(torch.float32))
+            return output.permute(0, 2, 1)
 
     def _initialize_weights(self):
         for m in self.modules():
@@ -227,14 +239,16 @@ def make_conv_iql_model(cfg, train_env, eval_env, device):
 
     feature_size, embed_size = cfg.model.feature_size, cfg.model.embed_size
     kernel_size = cfg.model.kernel_size
-    num_actions = action_spec.shape[-1]
+    # num_actions = action_spec.shape[-1]
+    num_actions = 6
 
     # Actor Network
-    # actor_net = ConvEncoder(feature_size, embed_size, kernel_size)
+    # actor_net = ConvEncoder(feature_size, embed_size, kernel_size, label="actor")
 
+    encoder = ConvEncoder(feature_size, embed_size, kernel_size)
     actor_net = nn.Sequential(
-        ConvEncoder(feature_size, embed_size, kernel_size),
-        nn.Linear(embed_size, num_actions)
+        encoder,
+        nn.Linear(embed_size, num_actions),
     )
     actor_module = SafeModule(module=actor_net, in_keys=in_keys, out_keys=["logits"])
     actor = ProbabilisticActor(
@@ -250,14 +264,14 @@ def make_conv_iql_model(cfg, train_env, eval_env, device):
 
     # Critic Network (Q-Network)
     critic_net = nn.Sequential(
-        ConvEncoder(feature_size, embed_size, kernel_size),
-        nn.Linear(embed_size, num_actions)
+        encoder,
+        nn.Linear(embed_size, 1),
     )
     qvalue_module = TensorDictModule(module=critic_net, in_keys=in_keys, out_keys=["state_action_value"])
 
     # Value Network (V-Network)
     value_net = nn.Sequential(
-        ConvEncoder(feature_size, embed_size, kernel_size),
+        encoder,
         nn.Linear(embed_size, 1)
     )
     value_module = TensorDictModule(module=value_net, in_keys=in_keys, out_keys=["state_value"])
@@ -347,3 +361,22 @@ def log_metrics(logger, metrics, step):
 def dump_video(module):
     if isinstance(module, VideoRecorder):
         module.dump()
+
+
+def print_memory_usage():
+    # Get RAM usage
+    process = psutil.Process()
+    ram_usage = process.memory_info().rss / 1024 ** 2  # Convert to MB
+
+    # Get VRAM usage if using MPS
+    if torch.backends.mps.is_available():
+        # Current memory allocated by tensors
+        vram_allocated = torch.mps.current_allocated_memory() / 1024 ** 2  # Convert to MB
+        # Total memory allocated by Metal driver for the process
+        vram_driver = torch.mps.driver_allocated_memory() / 1024 ** 2  # Convert to MB
+    else:
+        vram_allocated, vram_driver = 0, 0
+
+    print(f'RAM usage: {ram_usage:.2f} MB')
+    print(f'VRAM (allocated by tensors): {vram_allocated:.2f} MB')
+    print(f'VRAM (allocated by driver): {vram_driver:.2f} MB')

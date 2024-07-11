@@ -1,0 +1,55 @@
+device: cpu
+
+# Environment
+env:
+  env_name: tensor-beasts-v0
+  world_cfg:
+    size: 64
+    reward_mode: "default"
+    scalars:
+      predator_init_odds: 1024
+      plant_only_steps: 256
+      herbivore_energy_loss: 2
+      herbivore_eat_max: 32
+      plant_init_odds: 128
+      single_herbivore_init: 1
+    entity_cfg: null
+
+
+# collector
+collector:
+  total_frames: 120_000
+  frames_per_batch: 40
+  eps_start: 1.0
+  eps_end: 0.1
+  annealing_frames: 40_000
+  init_random_frames: 1_000
+  max_frames_per_traj: 8_000
+
+# buffer
+buffer:
+  buffer_size: 1000
+  batch_size: 64
+  scratch_dir: null
+
+# logger
+logger:
+  backend: wandb
+  mode: online
+  project_name: torchrl_example_dqn
+  group_name: null
+  exp_name: DQN
+  test_interval: 1_000
+  num_test_episodes: 2
+  video: True
+
+# Optim
+optim:
+  lr: 0.000005
+  max_grad_norm: 5
+
+# loss
+loss:
+  gamma: 0.9
+  hard_update_freq: 500
+  num_updates: 1
