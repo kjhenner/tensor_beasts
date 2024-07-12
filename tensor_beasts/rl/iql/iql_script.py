@@ -31,7 +31,7 @@ from tensor_beasts.rl.iql.utils import (
     make_conv_iql_model,
     make_iql_optimizer,
     make_loss,
-    make_replay_buffer
+    make_replay_buffer, print_memory_usage
 )
 
 
@@ -113,6 +113,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
     frames_per_batch = cfg.collector.frames_per_batch
     eval_rollout_steps = cfg.collector.max_frames_per_traj
     sampling_start = start_time = time.time()
+    print_memory_usage()
     for tensordict in collector:
         sampling_time = time.time() - sampling_start
         pbar.update(tensordict.numel())
@@ -128,6 +129,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         # optimization steps
         training_start = time.time()
         if collected_frames >= init_random_frames:
+            print("Past init_random_frames")
             for _ in range(num_updates):
                 # sample from replay buffer
                 sampled_tensordict = replay_buffer.sample().clone()

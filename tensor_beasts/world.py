@@ -1,6 +1,7 @@
 import dataclasses
 from collections import defaultdict
 from typing import Optional, Dict, List, Union, Callable, Any
+from omegaconf import DictConfig
 import torch
 
 from tensor_beasts.util import (
@@ -42,9 +43,8 @@ class BaseEntity:
 
 class World:
     def __init__(
-        self, size: int,
-        config: Optional[Dict] = None,
-        scalars: Optional[Dict] = None
+        self,
+        config: Optional[DictConfig] = None,
     ):
         """Initialize the world.
 
@@ -65,16 +65,12 @@ class World:
         equivalent to `world_tensor[:, :, N:M]`.
 
         Assigning a feature with one or more tags will add that feature's name to the corresponding tag list.
-
-        :param size: The value of the world's height and width. (H, W) == (size, size)
-        :param config: The configuration of the world.
-        :param scalars: The scalars of the world.
         """
-        self.width, self.height = size, size
+        self.width, self.height = config.size, config.size
         self.total_features = 0
 
         # TODO: Use Hydra for config?
-        self.config = {
+        self.entity_config = {
             "entities": {
                 "Predator": {
                     "features": [
@@ -110,24 +106,28 @@ class World:
                 }
             }
         }
-        if config is not None:
-            self.config.update(config)
+        if config.get("entity_cfg") is not None:
+            self.entity_config.update(config.entity_cfg)
 
         self.scalars = {
             "plant_init_odds": 16,
             "plant_init_energy": 32,
+            "plant_only_steps": 32,
             "plant_growth_step_modulo": 2,
             "herbivore_init_odds": 255,
             "plant_growth_odds": 255,
-            "predator_init_odds": 255,
+            "predator_init_odds": 511,
             "plant_germination_odds": 255,
             "plant_crowding_odds": 25,
             "plant_seed_odds": 255,
             "herbivore_eat_max": 16,
-            "predator_eat_max": 255
+            "predator_eat_max": 255,
+            "herbivore_energy_loss": 1,
+            "predator_energy_loss": 1,
+            "single_herbivore_init": 0
         }
-        if scalars is not None:
-            self.scalars.update(scalars)
+        if config.get("scalars") is not None:
+            self.scalars.update(config.scalars)
 
         self.entities = {}
         self.feature_groups = {}
@@ -142,17 +142,27 @@ class World:
             setattr(self, name, value)
 
         self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0) * self.plant_init_energy
+        # Set plant energy to a split gradient, going from 0 to 255 starting at the
 
         self.initialize_herbivore()
         self.initialize_predator()
 
-        self.plant.fertility_map[:] = ((perlin_noise((size, size), (8, 8)) + 3) * 63).type(torch.uint8)
+        self.plant.fertility_map[:] = ((perlin_noise((self.width, self.height), (8, 8)) + 3) * 63).type(torch.uint8)
 
         # self.obstacle.mask[:] = (torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8) == 0)
         # self.obstacle.mask[:] = generate_maze(size) * generate_maze(size)
+        # Set obstacles at edges of world:
         self.obstacle.mask[:] = torch.zeros((self.width, self.height), dtype=torch.uint8)
+        self.obstacle.mask[0, :] = 1
+        self.obstacle.mask[:, 0] = 1
+        self.obstacle.mask[self.width - 1, :] = 1
+        self.obstacle.mask[:, self.height - 1] = 1
 
         self.step = 0
+
+        for _ in range(self.plant_only_steps):
+            self.update(plant_only=True)
+
 
     @staticmethod
     def update_id(ids: torch.Tensor):
@@ -162,17 +172,23 @@ class World:
 
     def initialize_herbivore(self):
         """Initialize herbivore."""
-        self.herbivore.energy[:] = (
-            (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-        ) * 240
+        if self.single_herbivore_init:
+            self.herbivore.energy[self.width // 2, self.height // 2] = 240
+            self.herbivore.id_0[self.width // 2, self.height // 2] = 0
+            self.herbivore.id_1[self.width // 2, self.height // 2] = 0
+            return
+        else:
+            self.herbivore.energy[:] = (
+                (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
+            ) * 240
 
-        self.herbivore.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-        self.herbivore.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+            self.herbivore.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+            self.herbivore.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
 
     def initialize_predator(self):
         """Initialize predator."""
         self.predator.energy[:] = (
-            (torch.randint(0, self.predator_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
+            (torch.randint(0, self.predator_init_odds, (self.width, self.height), dtype=torch.uint16) == 0)
         ) * 240
 
         self.predator.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
@@ -180,7 +196,7 @@ class World:
 
     def _initialize_entities(self):
         """Initialize entities based on the configuration."""
-        for entity_name, entity_info in self.config["entities"].items():
+        for entity_name, entity_info in self.entity_config["entities"].items():
             entity_class = type(entity_name, (BaseEntity,), {})
             entity_instance = entity_class(entity_info)
             self.entities[entity_name.lower()] = entity_instance
@@ -188,7 +204,7 @@ class World:
     def _initialize_world_tensor(self):
         """Calculate the total depth and initialize the world tensor."""
         self.total_features = sum(
-            len(entity_info["features"]) for entity_info in self.config["entities"].values()
+            len(entity_info["features"]) for entity_info in self.entity_config["entities"].values()
         )
         self.world_tensor = torch.zeros((self.width, self.height, self.total_features), dtype=torch.uint8)
 
@@ -199,7 +215,7 @@ class World:
         ungrouped_features = []
 
         # Collect features groups and tags
-        for entity_name, entity_info in self.config["entities"].items():
+        for entity_name, entity_info in self.entity_config["entities"].items():
             for feature in entity_info["features"]:
                 if "group" in feature:
                     group_feature_map[feature["group"]].append(
@@ -236,7 +252,7 @@ class World:
         else:
             raise AttributeError(f"'World' object has no attribute '{name}'")
 
-    def update(self, action: Optional[torch.Tensor] = None):
+    def update(self, action: Optional[torch.Tensor] = None, plant_only=False):
 
         # For now, hard code actions to herbivore
         if action is None:
@@ -250,7 +266,7 @@ class World:
 
         plant_mask = self.plant.energy.bool()
 
-        if self.step % self.plant_growth_step_modulo == 0:
+        if self.step % self.plant_growth_step_modulo == 0 or plant_only:
             self.plant.crowding = torch_correlate_2d(plant_mask, generate_plant_crowding_kernel(), mode='constant')
             self.grow(
                 self.plant.energy,
@@ -265,40 +281,40 @@ class World:
 
             self.germinate(self.plant.seed, self.plant.energy, self.plant_germination_odds, rand_array)
 
-        # We don't actually care that much about id collisions, so we can just use a random id
-        random_fn = lambda x: torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+        if not plant_only:
+            # We don't actually care that much about id collisions, so we can just use a random id
+            random_fn = lambda x: torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
+            self.move(
+                entity_energy=self.herbivore.energy,
+                target_energy=self.plant.scent,
+                target_energy_weights=[0.5],
+                opposite_energy=[self.herbivore.scent, self.predator.scent],
+                opposite_energy_weights=[0.1, 1],
+                carried_features_self=[self.herbivore.offspring_count, self.herbivore.id_0, self.herbivore.id_1],
+                carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
+                carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
+                carried_feature_fns_offspring=[random_fn, random_fn],
+                agent_action=action_dict.get("herbivore_move", None)
+            )
+            safe_sub(self.herbivore.energy, self.herbivore_energy_loss)
 
-        self.move(
-            entity_energy=self.herbivore.energy,
-            target_energy=self.plant.scent,
-            target_energy_weights=[0.5],
-            opposite_energy=[self.herbivore.scent, self.predator.scent],
-            opposite_energy_weights=[0.1, 1],
-            carried_features_self=[self.herbivore.offspring_count, self.herbivore.id_0, self.herbivore.id_1],
-            carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
-            carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-            carried_feature_fns_offspring=[random_fn, random_fn],
-            agent_action=action_dict.get("herbivore_move", None)
-        )
-        safe_sub(self.herbivore.energy, 2)
+            self.move(
+                entity_energy=self.predator.energy,
+                target_energy=self.herbivore.scent,
+                target_energy_weights=[1],
+                opposite_energy=self.predator.scent,
+                opposite_energy_weights=[1],
+                carried_features_self=[self.predator.offspring_count, self.predator.id_0, self.predator.id_1],
+                carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
+                carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
+                carried_feature_fns_offspring=[random_fn, random_fn],
+                agent_action=action_dict.get("predator_move", None)
 
-        self.move(
-            entity_energy=self.predator.energy,
-            target_energy=self.herbivore.scent,
-            target_energy_weights=[1],
-            opposite_energy=self.predator.scent,
-            opposite_energy_weights=[1],
-            carried_features_self=[self.predator.offspring_count, self.predator.id_0, self.predator.id_1],
-            carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
-            carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-            carried_feature_fns_offspring=[random_fn, random_fn],
-            agent_action=action_dict.get("predator_move", None)
+            )
+            safe_sub(self.predator.energy, self.predator_energy_loss)
 
-        )
-        safe_sub(self.predator.energy, 1)
-
-        self.eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
-        self.eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
+            self.eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
+            self.eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
 
         self.diffuse_scent(self.energy, self.scent, mask=self.obstacle.mask)
 
@@ -306,14 +322,15 @@ class World:
             for cleared_feature in entity.tagged('clear_on_death'):
                 cleared_feature *= entity.energy > 0
 
+        self.step += 1
         self.log_scores(self.herbivore)
 
     @staticmethod
     @timing
-    def diffuse_scent(entity_energy, entity_scent, mask=None, diffusion_steps=1):
+    def diffuse_scent(entity_energy, entity_scent, mask=None, diffusion_steps=2):
         for _ in range(diffusion_steps):
-            scent = entity_scent.type(torch.float32) ** 2
-            entity_scent[:] = torch.pow(torch_correlate_3d(scent, generate_diffusion_kernel().type(torch.float32)), 1.0 / 2.0).type(torch.uint8)
+            scent = entity_scent.type(torch.float32) ** 5
+            entity_scent[:] = torch.pow(torch_correlate_3d(scent, generate_diffusion_kernel().type(torch.float32)), 1.0 / 5.0).type(torch.uint8)
         safe_sub(entity_scent[:], 1)
         safe_add(entity_scent[:], entity_energy[:] // 4)
         if mask is not None:
@@ -344,14 +361,13 @@ class World:
 
         clearance_kernels = directional_kernel_set(clearance_kernel_size)
         for d in range(1, 5):
-            direction_masks[d] *= ~(torch.tensor(
+            direction_masks[d] *= ~(
                 torch_correlate_2d(
                     clearance_mask.type(torch.float32),
                     clearance_kernels[d].type(torch.float32),
                     mode='constant',
                     cval=1
-                )
-            ).type(torch.bool))
+                ).detach().type(torch.bool))
         return direction_masks
 
     @staticmethod
@@ -531,7 +547,7 @@ class World:
 
     @staticmethod
     @timing
-    def eat(eater_energy, eaten_energy, eat_max, eat_efficiency_loss=4):
+    def eat(eater_energy, eaten_energy, eat_max, eat_efficiency_loss=2):
         old_eaten_energy = eaten_energy.clone()
         safe_sub(eaten_energy, (eater_energy > 0).type(torch.uint8) * eat_max)
         delta = old_eaten_energy - eaten_energy
@@ -564,10 +580,51 @@ class World:
         top_score = scores.flatten()[top_score_idx]
 
     @timing
-    def entity_scores(self, entity: Union[BaseEntity | str]):
+    def entity_scores(self, entity: Union[BaseEntity | str], reward_mode: str = "default"):
         if isinstance(entity, str):
             entity = self.entities[entity.lower()]
-        return entity.offspring_count.type(torch.float32) * 255 + entity.energy
+
+        energy_ratio = entity.energy.type(torch.float32) / self.scalars.get(f"{entity.__class__.__name__.lower()}_init_energy", 240)
+        offspring_ratio = entity.offspring_count.type(torch.float32) / self.scalars.get(f"{entity.__class__.__name__.lower()}_offspring_target", 10)
+        # step_multiplier = math.sqrt(float(self.step))
+        step_multiplier = 1
+
+        # print(f"energy_ratio: {energy_ratio}")
+        # print(f"offspring_ratio: {offspring_ratio}")
+        # print(f"step: {self.step}")
+        # print(f"step_multiplier: {step_multiplier}")
+
+        if reward_mode == "default":
+            # Balanced reward considering both energy and offspring
+            reward = (energy_ratio + offspring_ratio) / 2
+        elif reward_mode == "energy_focused":
+            # Reward heavily weighted towards energy
+            reward = energy_ratio * 0.8 + offspring_ratio * 0.2
+        elif reward_mode == "offspring_focused":
+            # Reward heavily weighted towards offspring
+            reward = energy_ratio * 0.2 + offspring_ratio * 0.8
+        elif reward_mode == "survival":
+            # Reward for surviving (energy > 0) and normalized offspring count
+            reward = ((entity.energy > 0).type(torch.float32) + offspring_ratio) / 2
+        else:
+            raise ValueError(f"Unknown reward mode: {reward_mode}")
+
+        # print(f"reward: {reward}")
+
+        # Sum the reward across all entities
+        total_reward = torch.sum(reward)
+        # print(f"total_reward: {total_reward}")
+
+        # print(f"adjusted_reward: {total_reward / (self.width * self.height)}")
+        # print(f"step_multiplier: {step_multiplier}")
+        # Normalize the total reward to [-1, 1]
+        normalized_reward = torch.clamp(total_reward / (self.width * self.height) * 2 - 1, -1, 1) * step_multiplier
+
+        # print(f"normalized_reward: {normalized_reward}")
+
+        # return normalized_reward
+        return total_reward
+
 
     def collect_info(self):
         return {
@@ -577,3 +634,27 @@ class World:
             'predator_mass': float(torch.sum(self.predator.energy)),
             'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
         }
+
+    def rgb_array(self):
+        # Create the obstacle mask (True where obstacles are)
+        obstacle_mask = self.obstacle.mask.unsqueeze(-1).repeat(1, 1, 3)
+
+        # Create energy display
+        energy = self.energy.clone()
+        # Set obstacles to white (255) and keep other values as they are
+        energy = torch.where(obstacle_mask, torch.ones_like(energy) * 255, energy)
+
+        # Create scent display
+        scent = self.scent.clone()
+        # Normalize scent values to 0-255 range for better visibility
+        scent = (scent - scent.min()) / (scent.max() - scent.min() + 1e-8) * 255
+        # Set obstacles to white (255) and keep other values as they are
+        scent = torch.where(obstacle_mask, torch.ones_like(scent) * 255, scent)
+
+        # Arrange the energy and scent channels beside each other
+        output = torch.cat((energy, scent), dim=1)
+
+        # Upscale the output
+        output = output.repeat_interleave(3, dim=0).repeat_interleave(3, dim=1)
+
+        return output.to(torch.uint8)  # Ensure output is in correct dtype for display
