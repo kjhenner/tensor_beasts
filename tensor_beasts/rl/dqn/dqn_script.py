@@ -1,14 +1,6 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This source code is licensed under the MIT license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-DQN: Reproducing experimental results from Mnih et al. 2015 for the
-Deep Q-Learning Algorithm on Atari Environments.
-"""
 import tempfile
 import time
+import copy
 
 import hydra
 import torch.nn
@@ -21,11 +13,10 @@ from torchrl.collectors import SyncDataCollector
 from torchrl.data import LazyMemmapStorage, TensorDictReplayBuffer
 from torchrl.envs import ExplorationType, set_exploration_type
 from torchrl.modules import EGreedyModule
-from torchrl.objectives import DQNLoss, HardUpdate
+from torchrl.objectives import HardUpdate
 from torchrl.record import VideoRecorder
 from torchrl.record.loggers import generate_exp_name, get_logger
 
-from tensor_beasts.display_manager import DisplayManager
 from tensor_beasts.rl.dqn.masked_dqn_loss import MaskedDQNLoss
 from tensor_beasts.rl.dqn.utils import eval_model, make_dqn_model, make_env
 
@@ -43,12 +34,10 @@ def main(cfg: "DictConfig"):  # noqa: F821
             device = "cpu"
     device = torch.device(device)
 
-    # Correct for frame_skip
-    frame_skip = 1
-    total_frames = cfg.collector.total_frames // frame_skip
-    frames_per_batch = cfg.collector.frames_per_batch // frame_skip
-    init_random_frames = cfg.collector.init_random_frames // frame_skip
-    test_interval = cfg.logger.test_interval // frame_skip
+    total_frames = cfg.collector.total_frames
+    frames_per_batch = cfg.collector.frames_per_batch
+    init_random_frames = cfg.collector.init_random_frames
+    test_interval = cfg.logger.test_interval
 
     # Make the components
     model = make_dqn_model(cfg)
@@ -73,6 +62,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
         storing_device=device,
         max_frames_per_traj=-1,
         init_random_frames=init_random_frames,
+        return_same_td=False
     )
 
     # Create the replay buffer
@@ -133,7 +123,6 @@ def main(cfg: "DictConfig"):  # noqa: F821
             ),
         )
     test_env.eval()
-    # display_manager = DisplayManager(128, 128)
 
     # Main loop
     collected_frames = 0
@@ -144,18 +133,19 @@ def main(cfg: "DictConfig"):  # noqa: F821
     num_test_episodes = cfg.logger.num_test_episodes
     q_losses = torch.zeros(num_updates, device=device)
     pbar = tqdm.tqdm(total=total_frames)
+
+    cumulative_rewards = 0
+    eval_count = 0
     for i, data in enumerate(collector):
 
         log_info = {}
         sampling_time = time.time() - sampling_start
         pbar.update(data.numel())
         data = data.reshape(-1)
-        current_frames = data.numel() * frame_skip
+        current_frames = data.numel()
         collected_frames += current_frames
         greedy_module.step(current_frames)
         replay_buffer.extend(data)
-        # display_manager.add_screens_to_buffer(data["observation"][..., :3])
-        # display_manager.update_from_buffer()
 
         # Get and log training rewards and episode lengths
         episode_rewards = data["next", "episode_reward"][data["next", "done"]]
@@ -209,14 +199,11 @@ def main(cfg: "DictConfig"):  # noqa: F821
         # Get and log q-values, loss, epsilon, sampling time and training time
         log_info.update(
             {
-                "train/q_values": (data["action_value"] * data["action"]).sum().item(),
-                "train/q_values_mean": (data["action_value"] * data["action"]).mean().item()
-                / frames_per_batch,
+                "train/q_values_mean": (data["action_value"] * data["action"]).mean().item() / frames_per_batch,
                 "train/q_loss": q_losses.mean().item(),
                 "train/epsilon": greedy_module.eps,
                 "train/sampling_time": sampling_time,
                 "train/training_time": training_time,
-                # Get counts of unique values in the action tensor
                 "train/action_freqencies": {int(value): int(count) for value, count in zip(*data["action"].argmax(-1).unique(return_counts=True))}
             }
         )
@@ -233,9 +220,12 @@ def main(cfg: "DictConfig"):  # noqa: F821
                     model, test_env, num_episodes=num_test_episodes
                 )
                 eval_time = time.time() - eval_start
+                cumulative_rewards += test_rewards
+                eval_count += num_test_episodes
                 log_info.update(
                     {
                         "eval/reward": test_rewards,
+                        "eval/mean_reward": cumulative_rewards / eval_count,
                         "eval/eval_time": eval_time,
                     }
                 )
@@ -247,7 +237,7 @@ def main(cfg: "DictConfig"):  # noqa: F821
                 logger.log_scalar(key, value, step=collected_frames)
 
         # update weights of the inference policy
-        collector.update_policy_weights_()
+        collector.update_policy_weights_(copy.deepcopy(model.state_dict()))
         sampling_start = time.time()
 
     collector.shutdown()

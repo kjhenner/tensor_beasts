@@ -1,5 +1,4 @@
 import dataclasses
-import math
 from collections import defaultdict
 from typing import Optional, Dict, List, Union, Callable, Any
 from omegaconf import DictConfig
@@ -45,7 +44,7 @@ class BaseEntity:
 class World:
     def __init__(
         self,
-        config: Optional[Dict | DictConfig] = None,
+        config: Optional[DictConfig] = None,
     ):
         """Initialize the world.
 
@@ -107,7 +106,7 @@ class World:
                 }
             }
         }
-        if config.entity_cfg is not None:
+        if config.get("entity_cfg") is not None:
             self.entity_config.update(config.entity_cfg)
 
         self.scalars = {
@@ -127,7 +126,7 @@ class World:
             "predator_energy_loss": 1,
             "single_herbivore_init": 0
         }
-        if config.scalars is not None:
+        if config.get("scalars") is not None:
             self.scalars.update(config.scalars)
 
         self.entities = {}
