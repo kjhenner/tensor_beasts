@@ -5,14 +5,13 @@ import pygame
 import threading
 import time
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pygame import mouse
 import sys
 
 from tensor_beasts.display_manager import DisplayManager
-from tensor_beasts.util import get_mean_execution_times, scale_tensor
-from tensor_beasts.world import World
-
+from tensor_beasts.util import get_mean_execution_times
+from tensor_beasts.world import World, Plant, Herbivore, Predator
 
 PAN_SPEED = 0.1
 
@@ -53,40 +52,45 @@ class WorldThread(threading.Thread):
         self.update_screen_cb = update_screen_cb
         self.clock = clock
         self.done = False
+        self.running = True
         self.device = device
+        self.ups = None
 
     def stop(self):
         self.done = True
 
+    def toggle_pause(self):
+        self.running = not self.running
+
+    def step(self):
+        start = time.time()
+        self.world.update()
+        end = time.time()
+        cur_ups = 1 / (end - start)
+        self.ups = cur_ups if self.ups is None else (self.ups + cur_ups) / 2
+        world_stats = {"ups": self.ups}
+        self.update_screen_cb(self.world.step, world_stats)
+
     def run(self):
         torch.set_default_device(self.device)
-        step = 0
-        ups = None
-        while not self.done:
-            start = time.time()
-            self.world.update()
-            end = time.time()
-            cur_ups = 1 / (end - start)
-            ups = cur_ups if ups is None else (ups + cur_ups) / 2
-            world_stats = {"ups": ups}
-            self.update_screen_cb(step, world_stats)
-            step += 1
+        while self.running and not self.done:
+            self.step()
 
 
-def main(args: argparse.Namespace):
-    if not args.device:
+def main(config: DictConfig):
+    if config.world.device == 'auto' or not config.world.device:
         if torch.cuda.is_available():
-            args.device = "cuda"
+            config.world.device = "cuda"
         elif torch.backends.mps.is_available():
-            args.device = "mps"
+            config.world.device = "mps"
         else:
-            args.device = "cpu"
+            config.world.device = "cpu"
 
-    torch.set_default_device(torch.device(args.device))
+    torch.set_default_device(torch.device(config.world.device))
 
-    width, height = (args.size,) * 2
+    width, height = config.world.size
 
-    world = World(DictConfig({"size": args.size}))
+    world = World([Predator, Plant, Herbivore], config.world)
 
     clock = pygame.time.Clock()
 
@@ -97,19 +101,23 @@ def main(args: argparse.Namespace):
     else:
         screens = [
             (
-                'energy_rgb',
-                lambda: torch.where(world.obstacle.mask.unsqueeze(-1).expand(-1, -1, 3), world.obstacle.mask.unsqueeze(-1).expand(-1, -1, 3) * 255, world.energy)
-            ),
-            (
                 'scent_rgb',
-                lambda: world.scent,
+                lambda: world.data_manager.main_td.get(('shared_features', 'scent')),
             ),
             (
-                'herbivore_rgb',
-                lambda: world.herbivore.energy.unsqueeze(-1).expand(-1, -1, 3),
+                'energy_rgb',
+                lambda: world.data_manager.main_td.get(('shared_features', 'energy')),
+            ),
+            # (
+            #     'herbivore_rgb',
+            #     lambda: world.herbivore.energy.unsqueeze(-1).expand(-1, -1, 3),
+            # ),
+            (
+                'fertility_map',
+                lambda: world.data_manager.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
             ),
         ]
-        display_manager = DisplayManager(width, height)
+        display_manager = DisplayManager(*config.world.size)
         current_screen_idx = 0
 
     def update_screen(step, world_stats):
@@ -124,7 +132,7 @@ def main(args: argparse.Namespace):
         runtime_stats.update(get_mean_execution_times())
         print(json.dumps(runtime_stats, indent=4))
 
-    world_thread = WorldThread(world, update_screen, clock, args.device)
+    world_thread = WorldThread(world, update_screen, clock, config.world.device)
     world_thread.start()
 
     done, step = False, 0
@@ -155,6 +163,11 @@ def main(args: argparse.Namespace):
                         world.initialize_herbivore()
                     elif event.key == pygame.K_p:
                         world.initialize_predator()
+                    elif event.key == pygame.K_SPACE:
+                        world_thread.toggle_pause()
+                    elif event.key == pygame.K_s:
+                        if not world_thread.running:
+                            world_thread.step()
                 elif event.type == pygame.MOUSEMOTION:
                     rel = mouse.get_rel()
                     if mouse.get_pressed()[0]:
@@ -174,4 +187,6 @@ def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     args = parse_args()
-    main(args)
+    # Load the config
+    config = OmegaConf.load('beast_config.yaml')
+    main(config)

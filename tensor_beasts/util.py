@@ -1,3 +1,4 @@
+import math
 import random
 from typing import List
 
@@ -285,16 +286,52 @@ def generate_maze(size: int):
 
 
 @lru_cache
-def generate_diffusion_kernel():
+def _generate_diffusion_kernel():
     kernel = torch.tensor([
         [0, 0, 1, 0, 0],
         [0, 1, 1, 1, 0],
-        [1, 1, 2, 1, 1],
+        [1, 1, 1, 1, 1],
         [0, 1, 1, 1, 0],
         [0, 0, 1, 0, 0],
     ], dtype=torch.float32)
     return kernel / torch.sum(kernel)
 
+
+@lru_cache
+def generate_diffusion_kernel(size: int = 7, sigma: float = 1.0, slice_height: float = 0.1):
+    """
+    Generate a 2D slice of a hemispherical diffusion kernel on a flat plane.
+
+    Args:
+    size (int): The size of the kernel (must be odd)
+    sigma (float): The standard deviation of the distribution
+    slice_height (float): Height of the slice above the plane
+
+    Returns:
+    torch.Tensor: The diffusion kernel slice
+    """
+    if size % 2 == 0:
+        raise ValueError("Kernel size must be odd")
+
+    center = size // 2
+    kernel = torch.zeros((size, size), dtype=torch.float32)
+
+    # Normalization constant (doubled because of hemispherical distribution)
+    constant = 2 / (sigma * (2 * math.pi) ** 1.5)
+
+    for i in range(size):
+        for j in range(size):
+            x = i - center
+            y = j - center
+            r_squared = x*x + y*y
+
+            # Contribution from the real source
+            kernel[i, j] = constant * math.exp(-(r_squared + slice_height**2) / (2 * sigma * sigma))
+
+            # Contribution from the image source (mirror source below the plane)
+            kernel[i, j] += constant * math.exp(-(r_squared + (2-slice_height)**2) / (2 * sigma * sigma))
+
+    return kernel
 
 @lru_cache
 def generate_plant_crowding_kernel():
@@ -335,7 +372,11 @@ def perlin_noise(size, res):
     grid0 = grid.to(torch.int32)
     grid1 = grid0 + 1
 
-    random_grid = torch.randint(0, 255, (res[0] + 1, res[1] + 1), dtype=torch.int32)
+    # Generate random gradients between -1 and 1
+    random_grid = torch.rand((res[0] + 1, res[1] + 1, 2), dtype=torch.float32) * 2 - 1
+
+    def gradient(hash, x, y):
+        return hash[..., 0] * x + hash[..., 1] * y
 
     dot00 = gradient(
         random_grid[grid0[..., 0], grid0[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid0[..., 1]
@@ -350,13 +391,19 @@ def perlin_noise(size, res):
         random_grid[grid1[..., 0], grid1[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid1[..., 1]
     )
 
+    def fade(t):
+        return 6 * t**5 - 15 * t**4 + 10 * t**3
+
     u = fade(grid - grid0)
+
+    def lerp(a, b, t):
+        return a + t * (b - a)
 
     nx0 = lerp(dot00, dot10, u[..., 0])
     nx1 = lerp(dot01, dot11, u[..., 0])
     nxy = lerp(nx0, nx1, u[..., 1])
 
-    return nxy
+    return torch.clamp(nxy + 0.5, 0, 1)
 
 
 def scale_tensor(input_tensor, floor=64):

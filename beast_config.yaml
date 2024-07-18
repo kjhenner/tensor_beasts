@@ -1,0 +1,37 @@
+world:
+  device: auto
+  size: [768, 768]
+
+  entities:
+    plant:
+      initial_energy: 32
+      init_prob: 0.03
+      growth_prob: 0.5
+      germination_prob: 0.005
+      seed_prob: 0.1
+
+    herbivore:
+      initial_energy: 240
+      init_odds: 255
+      eat_max: 16
+      energy_loss: 2
+      divide_threshold: 250
+      toy_init: False
+      target_key: plant
+      target_weights: [0.5]
+      opposite_key: [herbivore, predator]
+      opposite_weights: [0.1, 5.0]
+      food_key: plant
+
+    predator:
+      initial_energy: 240
+      init_odds: 255
+      eat_max: 64
+      energy_loss: 1
+      divide_threshold: 250
+      toy_init: False
+      target_key: herbivore
+      target_weights: [1.0]
+      opposite_key: predator
+      opposite_weights: [1.0]
+      food_key: herbivore

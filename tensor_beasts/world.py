@@ -1,349 +1,346 @@
-import dataclasses
-from collections import defaultdict
-from typing import Optional, Dict, List, Union, Callable, Any
-from omegaconf import DictConfig
+import abc
+from dataclasses import dataclass
+from typing import List, Dict, Optional, Type, Tuple, Union, Callable, Iterable
 import torch
+from tensordict import TensorDict
+from omegaconf import DictConfig, ListConfig
 
 from tensor_beasts.util import (
-    torch_correlate_2d, torch_correlate_3d, safe_sub, safe_add, timing,
-    pad_matrix, get_direction_matrix, directional_kernel_set, generate_diffusion_kernel, generate_plant_crowding_kernel,
-    safe_sum, perlin_noise
+    safe_add, safe_sub, torch_correlate_2d, perlin_noise,
+    get_direction_matrix, pad_matrix, directional_kernel_set, torch_correlate_3d, generate_diffusion_kernel, safe_sum
 )
 
 
-@dataclasses.dataclass
-class Feature:
-    group: Optional[str] = None
-    tags: Optional[List[str]] = None
-    tensor: Optional[torch.Tensor] = None
+@dataclass
+class FeatureDefinition:
+    name: str
+    dtype: torch.dtype
+    shape: Tuple[int, ...] = ()
+    shared: bool = False
+    observable: bool = False
+    use_world_size: bool = True
 
 
-class FeatureGroup:
-    pass
+class Entity(abc.ABC):
+    features: List[FeatureDefinition] = []
+
+    def __init__(self, world: 'World', config: DictConfig):
+        self.world = world
+        self.config = config
+        self.data_manager = world.data_manager
+
+    @classmethod
+    def get_feature_definitions(cls) -> List[FeatureDefinition]:
+        return cls.features
+
+    def get_feature(self, feature_name: str) -> torch.Tensor:
+        return self.data_manager.get_feature(self.__class__.__name__.lower(), feature_name)
+
+    def set_feature(self, feature_name: str, value: torch.Tensor) -> None:
+        self.data_manager.set_feature(self.__class__.__name__.lower(), feature_name, value)
+
+    @abc.abstractmethod
+    def update(self, step: int):
+        pass
 
 
-class BaseEntity:
+class EntityDataManager:
+    def __init__(self, entity_classes: List[Type[Entity]], world_size: Tuple[int]):
+        self.entity_classes = {cls.__name__.lower(): cls for cls in entity_classes}
 
-    def __init__(self, entity_info: Dict[str, Any]):
-        self.features = {}
-        for feature_info in entity_info["features"]:
-            self.features[feature_info["name"]] = Feature(
-                group=feature_info.get("group"),
-                tags=feature_info.get("tags", []),
-            )
+        self.entity_data = TensorDict({}, batch_size=[])
+        self.shared_features = TensorDict({}, batch_size=[])
+        self.shared_feature_indices = {}
 
-    def __getattr__(self, item):
-        if item not in self.features:
-            raise AttributeError(f"Feature {item} not found in entity.")
-        return self.features[item].tensor
+        self._initialize_features(world_size)
 
-    def tagged(self, tag: str) -> List[torch.Tensor]:
-        return [feature.tensor for feature in self.features.values() if tag in feature.tags]
+        self.main_td = TensorDict({
+            "entities": self.entity_data,
+            "shared_features": self.shared_features,
+        }, batch_size=[])
+
+    def _initialize_features(self, world_size: Tuple[int]):
+        shared_feature_counts = {}
+        shared_feature_defs = {}
+
+        for entity_name, cls in self.entity_classes.items():
+            for f in cls.get_feature_definitions():
+                if f.shared:
+                    if f.name not in shared_feature_counts:
+                        shared_feature_counts[f.name] = 1
+                        shared_feature_defs[f.name] = f
+                    else:
+                        shared_feature_counts[f.name] += 1
+                        if not self._features_match(shared_feature_defs[f.name], f):
+                            raise ValueError(f"Mismatched definitions for shared feature {f.name}")
+                else:
+                    shape = (*world_size, *f.shape) if f.use_world_size else f.shape
+                    self.entity_data[entity_name, f.name] = torch.zeros(*shape, dtype=f.dtype)
+
+        for feature_name, count in shared_feature_counts.items():
+            f = shared_feature_defs[feature_name]
+            shape = (*world_size, *f.shape) if f.use_world_size else f.shape
+            shape = shape + (count,)
+            self.shared_features[feature_name] = torch.zeros(*shape, dtype=f.dtype)
+            self.shared_feature_indices[feature_name] = {}
+
+            current_index = 0
+            for entity_name, cls in self.entity_classes.items():
+                if any(feat.name == feature_name and feat.shared for feat in cls.get_feature_definitions()):
+                    self.shared_feature_indices[feature_name][entity_name.lower()] = current_index
+                    current_index += 1
+
+    @staticmethod
+    def _features_match(f1: FeatureDefinition, f2: FeatureDefinition) -> bool:
+        return all(
+            getattr(f1, attr) == getattr(f2, attr) for attr in ["shape", "dtype", "use_world_size", "observable"]
+        )
+
+    def get_feature(self, entity_name: str, feature_name: str) -> torch.Tensor:
+        if feature_name in self.shared_features:
+            index = self.shared_feature_indices[feature_name][entity_name]
+            return self.shared_features[feature_name][..., index]
+        elif (entity_name, feature_name) in self.entity_data:
+            return self.entity_data[entity_name, feature_name]
+        else:
+            raise KeyError(f"Feature {feature_name} not found for entity {entity_name}")
+
+    def set_feature(self, entity_name: str, feature_name: str, value: torch.Tensor):
+        if feature_name in self.shared_features:
+            index = self.shared_feature_indices[feature_name][entity_name]
+            self.shared_features[feature_name][..., index] = value
+        elif (entity_name, feature_name) in self.entity_data:
+            self.entity_data[entity_name, feature_name] = value
+        else:
+            raise KeyError(f"Feature {feature_name} not found for entity {entity_name}")
 
 
 class World:
-    def __init__(
-        self,
-        config: Optional[DictConfig] = None,
-    ):
-        """Initialize the world.
-
-        The world is a tensor of unsigned 8-bit integers with shape (H, W, C) where the size of C is the total number of
-        features defined in the config.
-
-        On initialization of a World instance, the entity and feature structure defined in the config are mapped to
-        class attributes that access the corresponding feature channels in the world tensor.
-
-        For example, if the predator energy feature is the Nth feature channel, `world.predator.energy` is equivalent to
-        `world_tensor[:, :, N]`.
-
-        Assigning a feature to a group will ensure that the feature's index along the channel dimension is adjacent to
-        other features in the same group. This is useful for operations that batch process features in the same group.
-        A feature can only belong to one group.
-
-        For example, if the features in the `energy` group are assigned to the nth to mth channels, `world.energy` is
-        equivalent to `world_tensor[:, :, N:M]`.
-
-        Assigning a feature with one or more tags will add that feature's name to the corresponding tag list.
-        """
-        self.width, self.height = config.size, config.size
-        self.total_features = 0
-
-        # TODO: Use Hydra for config?
-        self.entity_config = {
-            "entities": {
-                "Predator": {
-                    "features": [
-                        {"name": "energy", "group": "energy", "tags": ["observable"]},
-                        {"name": "scent", "group": "scent", "tags": ["observable"]},
-                        {"name": "offspring_count", "tags": ["clear_on_death"]},
-                        {"name": "id_0", "group": "predator_id", "tags": ["clear_on_death"]},
-                        {"name": "id_1", "group": "predator_id", "tags": ["clear_on_death"]}
-                    ]
-                },
-                "Plant": {
-                    "features": [
-                        {"name": "energy", "group": "energy", "tags": ["observable"]},
-                        {"name": "scent", "group": "scent", "tags": ["observable"]},
-                        {"name": "fertility_map"},
-                        {"name": "seed"},
-                        {"name": "crowding"}
-                    ]
-                },
-                "Herbivore": {
-                    "features": [
-                        {"name": "energy", "group": "energy", "tags": ["observable"]},
-                        {"name": "scent", "group": "scent", "tags": ["observable"]},
-                        {"name": "offspring_count", "tags": ["clear_on_death"]},
-                        {"name": "id_0", "group": "herbivore_id", "tags": ["clear_on_death"]},
-                        {"name": "id_1", "group": "herbivore_id", "tags": ["clear_on_death"]},
-                    ]
-                },
-                "Obstacle": {
-                    "features": [
-                        {"name": "mask", "tags": ["observable"]}
-                    ]
-                }
-            }
-        }
-        if config.get("entity_cfg") is not None:
-            self.entity_config.update(config.entity_cfg)
-
-        self.scalars = {
-            "plant_init_odds": 16,
-            "plant_init_energy": 32,
-            "plant_only_steps": 32,
-            "plant_growth_step_modulo": 2,
-            "herbivore_init_odds": 255,
-            "plant_growth_odds": 255,
-            "predator_init_odds": 511,
-            "plant_germination_odds": 255,
-            "plant_crowding_odds": 25,
-            "plant_seed_odds": 255,
-            "herbivore_eat_max": 16,
-            "predator_eat_max": 255,
-            "herbivore_energy_loss": 1,
-            "predator_energy_loss": 1,
-            "single_herbivore_init": 0
-        }
-        if config.get("scalars") is not None:
-            self.scalars.update(config.scalars)
-
-        self.entities = {}
-        self.feature_groups = {}
-        self.feature_tags = defaultdict(list)
-        self.world_tensor = None
-
-        self._initialize_entities()
-        self._initialize_world_tensor()
-        self._assign_features()
-
-        for name, value in self.scalars.items():
-            setattr(self, name, value)
-
-        self.plant.energy[:] = (torch.randint(0, self.plant_init_odds, (self.width, self.height), dtype=torch.uint8) == 0) * self.plant_init_energy
-        # Set plant energy to a split gradient, going from 0 to 255 starting at the
-
-        self.initialize_herbivore()
-        self.initialize_predator()
-
-        self.plant.fertility_map[:] = ((perlin_noise((self.width, self.height), (8, 8)) + 3) * 63).type(torch.uint8)
-
-        # self.obstacle.mask[:] = (torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8) == 0)
-        # self.obstacle.mask[:] = generate_maze(size) * generate_maze(size)
-        # Set obstacles at edges of world:
-        self.obstacle.mask[:] = torch.zeros((self.width, self.height), dtype=torch.uint8)
-        self.obstacle.mask[0, :] = 1
-        self.obstacle.mask[:, 0] = 1
-        self.obstacle.mask[self.width - 1, :] = 1
-        self.obstacle.mask[:, self.height - 1] = 1
-
+    def __init__(self, entity_classes: List[Type[Entity]], config: DictConfig):
+        self.size: Tuple[int, ...] = tuple(config.size)
+        self.data_manager = EntityDataManager(entity_classes, config.size)
+        self.entities = [cls(self, config["entities"][cls.__name__.lower()]) for cls in entity_classes]
         self.step = 0
 
-        for _ in range(self.plant_only_steps):
-            self.update(plant_only=True)
+    def custom_diffusion(self, scent, energy, energy_contribution=20.0, diffusion_steps=2, max_value=255):
+        kernel = generate_diffusion_kernel(size=9, sigma=0.99)
+        scent_float = scent.type(torch.float32)
 
-
-    @staticmethod
-    def update_id(ids: torch.Tensor):
-        """If ids[0] is 255, increment ids[1]."""
-        ids[:, :, 1][ids[:, :, 0] == 255] += 1  # No-good extra assignment. Assigned in the caller too.
-        return ids[:, :, 1]
-
-    def initialize_herbivore(self):
-        """Initialize herbivore."""
-        if self.single_herbivore_init:
-            self.herbivore.energy[self.width // 2, self.height // 2] = 240
-            self.herbivore.id_0[self.width // 2, self.height // 2] = 0
-            self.herbivore.id_1[self.width // 2, self.height // 2] = 0
-            return
-        else:
-            self.herbivore.energy[:] = (
-                (torch.randint(0, self.herbivore_init_odds, (self.width, self.height), dtype=torch.uint8) == 0)
-            ) * 240
-
-            self.herbivore.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-            self.herbivore.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-
-    def initialize_predator(self):
-        """Initialize predator."""
-        self.predator.energy[:] = (
-            (torch.randint(0, self.predator_init_odds, (self.width, self.height), dtype=torch.uint16) == 0)
-        ) * 240
-
-        self.predator.id_0[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-        self.predator.id_1[:] = torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-
-    def _initialize_entities(self):
-        """Initialize entities based on the configuration."""
-        for entity_name, entity_info in self.entity_config["entities"].items():
-            entity_class = type(entity_name, (BaseEntity,), {})
-            entity_instance = entity_class(entity_info)
-            self.entities[entity_name.lower()] = entity_instance
-
-    def _initialize_world_tensor(self):
-        """Calculate the total depth and initialize the world tensor."""
-        self.total_features = sum(
-            len(entity_info["features"]) for entity_info in self.entity_config["entities"].values()
-        )
-        self.world_tensor = torch.zeros((self.width, self.height, self.total_features), dtype=torch.uint8)
-
-    def _assign_features(self):
-        """Assign features and slices to entities and groups based on the config."""
-        idx = 0
-        group_feature_map = defaultdict(list)
-        ungrouped_features = []
-
-        # Collect features groups and tags
-        for entity_name, entity_info in self.entity_config["entities"].items():
-            for feature in entity_info["features"]:
-                if "group" in feature:
-                    group_feature_map[feature["group"]].append(
-                        (entity_name.lower(), feature)
-                    )
-                else:
-                    ungrouped_features.append((entity_name.lower(), feature))
-
-        # Start by assigning grouped features in contiguous slices
-        for group, features in group_feature_map.items():
-            group_start_idx = idx
-
-            for entity_name, feature in features:
-                entity = self.entities[entity_name]
-                entity.features[feature["name"]].tensor = self.world_tensor[:, :, idx]
-                for tag in feature.get("tags", []):
-                    self.feature_tags[tag].append(self.world_tensor[:, :, idx])
-                idx += 1
-
-                group_slice = self.world_tensor[:, :, group_start_idx:idx]
-                setattr(self, group, group_slice)
-
-        for entity_name, feature in ungrouped_features:
-            entity = self.entities[entity_name]
-            entity.features[feature["name"]].tensor = self.world_tensor[:, :, idx]
-            idx += 1
-
-    def __getattr__(self, name):
-        """Provide convenient access to entities and feature groups."""
-        if name in self.entities:
-            return self.entities[name]
-        elif name in self.feature_tags:
-            return torch.stack(self.feature_tags[name], dim=-1)
-        else:
-            raise AttributeError(f"'World' object has no attribute '{name}'")
-
-    def update(self, action: Optional[torch.Tensor] = None, plant_only=False):
-
-        # For now, hard code actions to herbivore
-        if action is None:
-            action_dict = {}
-        else:
-            action_dict = {
-                "herbivore_move": torch.tensor(action, dtype=torch.uint8),
-            }
-
-        rand_array = torch.randint(0, 255, (self.width, self.height), dtype=torch.uint8)
-
-        plant_mask = self.plant.energy.bool()
-
-        if self.step % self.plant_growth_step_modulo == 0 or plant_only:
-            self.plant.crowding = torch_correlate_2d(plant_mask, generate_plant_crowding_kernel(), mode='constant')
-            self.grow(
-                self.plant.energy,
-                self.plant_growth_odds,
-                self.plant.crowding,
-                self.plant_crowding_odds,
-                self.plant.fertility_map,
-                rand_array
-            )
-
-            self.plant.seed |= self.plant.crowding > (rand_array % self.plant_seed_odds)
-
-            self.germinate(self.plant.seed, self.plant.energy, self.plant_germination_odds, rand_array)
-
-        if not plant_only:
-            # We don't actually care that much about id collisions, so we can just use a random id
-            random_fn = lambda x: torch.randint(0, 256, (self.width, self.height), dtype=torch.uint8)
-            self.move(
-                entity_energy=self.herbivore.energy,
-                target_energy=self.plant.scent,
-                target_energy_weights=[0.5],
-                opposite_energy=[self.herbivore.scent, self.predator.scent],
-                opposite_energy_weights=[0.1, 1],
-                carried_features_self=[self.herbivore.offspring_count, self.herbivore.id_0, self.herbivore.id_1],
-                carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
-                carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-                carried_feature_fns_offspring=[random_fn, random_fn],
-                agent_action=action_dict.get("herbivore_move", None)
-            )
-            safe_sub(self.herbivore.energy, self.herbivore_energy_loss)
-
-            self.move(
-                entity_energy=self.predator.energy,
-                target_energy=self.herbivore.scent,
-                target_energy_weights=[1],
-                opposite_energy=self.predator.scent,
-                opposite_energy_weights=[1],
-                carried_features_self=[self.predator.offspring_count, self.predator.id_0, self.predator.id_1],
-                carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False), lambda x: x, lambda x: x],
-                carried_features_offspring=[self.herbivore.id_1, self.herbivore.id_0],
-                carried_feature_fns_offspring=[random_fn, random_fn],
-                agent_action=action_dict.get("predator_move", None)
-
-            )
-            safe_sub(self.predator.energy, self.predator_energy_loss)
-
-            self.eat(self.herbivore.energy, self.plant.energy, self.herbivore_eat_max)
-            self.eat(self.predator.energy, self.herbivore.energy, self.predator_eat_max)
-
-        self.diffuse_scent(self.energy, self.scent, mask=self.obstacle.mask)
-
-        for entity in self.entities.values():
-            for cleared_feature in entity.tagged('clear_on_death'):
-                cleared_feature *= entity.energy > 0
-
-        self.step += 1
-        self.log_scores(self.herbivore)
-
-    @staticmethod
-    @timing
-    def diffuse_scent(entity_energy, entity_scent, mask=None, diffusion_steps=2):
         for _ in range(diffusion_steps):
-            scent = entity_scent.type(torch.float32) ** 5
-            entity_scent[:] = torch.pow(torch_correlate_3d(scent, generate_diffusion_kernel().type(torch.float32)), 1.0 / 5.0).type(torch.uint8)
-        safe_sub(entity_scent[:], 1)
-        safe_add(entity_scent[:], entity_energy[:] // 4)
-        if mask is not None:
-            mask = torch.stack((mask, mask, mask), dim=-1) == 0
-            entity_scent *= mask
+            diffused = torch_correlate_3d(scent_float, kernel)
+            scent_float = diffused.clamp(0, max_value)
+
+        # Energy contribution (non-linear)
+        energy_float = energy.type(torch.float32)
+        energy_effect = torch.where(
+            energy_float > 0,
+            torch.log1p(energy_float) / torch.log1p(torch.tensor(max_value, dtype=torch.float32)),
+            torch.zeros_like(energy_float)
+        )
+        scent_float = scent_float + energy_effect * energy_contribution
+
+        return scent_float.round().clamp(0, max_value).type(torch.uint8)
+
+    def diffuse_scent(self):
+        scent = self.data_manager.main_td.get(("shared_features", "scent")).clone()
+        energy = self.data_manager.main_td.get(("shared_features", "energy")).clone()
+        scent = self.custom_diffusion(scent, energy)
+        self.data_manager.main_td.set(("shared_features", "scent"), scent)
+
+    def update(self):
+        self.data_manager.main_td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
+        self.diffuse_scent()
+        for entity in self.entities:
+            entity.update(self.step)
+        self.step += 1
+
+
+class Plant(Entity):
+    features = [
+        FeatureDefinition("energy", torch.uint8, shared=True, observable=True),
+        FeatureDefinition("scent", torch.uint8, shared=True, observable=True),
+        FeatureDefinition("fertility_map", torch.float32),
+        FeatureDefinition("seed", torch.uint8),
+        FeatureDefinition("crowding", torch.float32),
+    ]
+
+    def __init__(
+        self,
+        world: World,
+        config: DictConfig,
+    ):
+        super().__init__(world, config)
+        self.initial_energy = config.initial_energy
+        self.init_prob = config.init_prob
+        self.growth_prob = config.growth_prob
+        self.germination_prob = config.germination_prob
+        self.seed_prob = config.seed_prob
+        self.initialize()
+
+    def initialize(self):
+        energy = self.get_feature("energy")
+        fertility_map = (perlin_noise(energy.shape, (5, 5)))
+        self.set_feature("fertility_map", fertility_map)
+        seed = self.get_feature("seed")
+        self.set_feature("seed", torch.zeros(seed.shape, dtype=seed.dtype))
+        self.set_feature(
+            "energy",
+            ~ torch.randint(
+                0,
+                int(self.init_prob * 255),
+                energy.shape,
+                dtype=torch.uint8
+            ).type(torch.bool) * self.initial_energy
+        )
+
+    def update_crowding(self):
+        energy = self.get_feature("energy")
+        kernel = generate_diffusion_kernel(size=5)
+        crowding = torch.clamp(
+            torch_correlate_2d(energy.bool().type(torch.float32), kernel, mode="constant"),
+            0,
+            1
+        )
+        self.set_feature(
+            "crowding",
+            crowding
+        )
+
+    def grow(self):
+        energy = self.get_feature("energy")
+        fertility_map = self.get_feature("fertility_map")
+        crowding = self.get_feature("crowding")
+        rand = self.data_manager.main_td.get("random")
+
+        # Calculate growth probability based on fertility
+        growth_prob = self.growth_prob * fertility_map ** 2
+        # Combine growth probability with crowding factor
+        combined_prob = growth_prob * (1 - crowding)
+
+        # Generate growth mask
+        growth = rand < (combined_prob * 255)
+
+        # Apply growth to existing plants
+        self.set_feature(
+            "energy",
+            safe_add(energy, (energy > 0) * growth, inplace=False)
+        )
+
+    def seed(self):
+        crowding = self.get_feature("crowding")
+        seed = self.get_feature("seed")
+        rand = self.data_manager.main_td.get("random")
+
+        self.set_feature(
+            "seed",
+            seed | (rand < self.seed_prob * crowding ** 2 * 255).type(seed.dtype)
+        )
+
+    def germinate(self):
+        crowding = self.get_feature("crowding")
+        energy = self.get_feature("energy")
+        seed = self.get_feature("seed")
+        rand = self.data_manager.main_td.get("random")
+
+        seed_germination = (
+            seed & ~(energy > 0) & (rand < ((1 - crowding) ** 2 * self.germination_prob * 255))
+        ).type(torch.uint8)
+        safe_add(energy, seed_germination)
+        safe_sub(seed, seed_germination)
+
+    def update(self, step: int):
+        self.update_crowding()
+        self.grow()
+        self.seed()
+        self.germinate()
+
+
+class Animal(Entity):
+    features = [
+        FeatureDefinition("energy", torch.uint8, shared=True, observable=True),
+        FeatureDefinition("scent", torch.uint8, shared=True, observable=True),
+        FeatureDefinition("id", torch.int32),
+        FeatureDefinition("offspring_count", torch.uint8),
+    ]
+
+    def __init__(
+        self,
+        world,
+        config
+    ):
+        super().__init__(world, config)
+        self.initial_energy = config.initial_energy
+        self.init_odds = config.init_odds
+        self.eat_max = config.eat_max
+        self.energy_loss = config.energy_loss
+        self.divide_threshold = config.divide_threshold
+        self.toy_init = config.toy_init
+        self.target_key = config.target_key
+        self.target_weights = config.target_weights
+        self.food_key = config.food_key
+        self.opposite_key = config.opposite_key
+        self.opposite_weights = config.opposite_weights
+        self.initialize()
+
+    def initialize(self):
+        energy = self.get_feature("energy")
+        if self.toy_init:
+            energy[self.world.size[0] // 2, self.world.size[1] // 2] = self.initial_energy
+        else:
+            energy[:] = (
+                torch.randint(
+                    0,
+                    self.init_odds,
+                    energy.shape,
+                    dtype=torch.uint8
+                ) == 0
+            ) * self.initial_energy
+
+    def update(self, step: int):
+
+        energy = self.get_feature("energy")
+        safe_sub(energy, self.energy_loss)
+
+        random = self.data_manager.main_td.get("random")
+        random_fn = lambda x: random
+
+        if isinstance(self.target_key, ListConfig):
+            target_scent = [
+                self.data_manager.get_feature(key, "scent") for key in self.target_key
+            ]
+        else:
+            target_scent = self.data_manager.get_feature(self.target_key, "scent")
+
+        if isinstance(self.opposite_key, ListConfig):
+            print(self.opposite_key)
+            opposite_scent = [
+                self.data_manager.get_feature(key, "scent") for key in self.opposite_key
+            ]
+        else:
+            opposite_scent = self.data_manager.get_feature(self.opposite_key, "scent")
+
+        food_energy = self.data_manager.get_feature(self.food_key, "energy")
+
+        self.move(
+            target=target_scent,
+            target_weights=self.target_weights,
+            opposite_scent=opposite_scent,
+            opposite_scent_weights=self.opposite_weights,
+            carried_features_self=("offspring_count", "id"),
+            carried_feature_fns_self=(lambda x: safe_add(x, 1), lambda x: x),
+            carried_features_offspring=("id",),
+            carried_feature_fns_offspring=(random_fn,),
+            agent_action=None
+        )
+        self.eat(food_energy)
 
     @staticmethod
     def get_direction_masks(
-        directions,
-        entity_energy,
+        directions: torch.Tensor,
+        entity_energy: torch.Tensor,
         clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
         clearance_kernel_size: Optional[int] = 5,
-    ):
+    ) -> Dict[int, torch.Tensor]:
         # If we get batched directions, we need to squeeze the batch dimension
         if len(directions.shape) == 3:
             directions = directions.squeeze(0)
@@ -370,9 +367,8 @@ class World:
                 ).detach().type(torch.bool))
         return direction_masks
 
-    @staticmethod
-    @timing
     def prepare_move(
+        self,
         entity_energy: torch.Tensor,
         target_energy: Union[torch.Tensor, List[torch.Tensor]],
         target_energy_weights: List[float],
@@ -405,29 +401,14 @@ class World:
 
         directions = get_direction_matrix(target_energy)
 
-        direction_masks = World.get_direction_masks(directions, entity_energy, clearance_mask, clearance_kernel_size)
+        direction_masks = self.get_direction_masks(directions, entity_energy, clearance_mask, clearance_kernel_size)
+        # for k, v in direction_masks.items():
+        #     print(f"Direction {k}: {v.sum()}")
 
         return direction_masks
 
-
-    @timing
-    def prepare_move_nn(
-        self,
-        entity_energy: torch.Tensor,
-    ):
-        # reshape to (N, C, W, H)
-        tensor = self.world_tensor[:, :, :4]
-        directions, tau = self.model.forward(tensor.permute(2, 0, 1).unsqueeze(0), self.num_quantiles)
-        directions = torch.argmax(directions[0, :, :], dim=0)
-
-        direction_masks = World.get_direction_masks(directions, entity_energy, self.obstacle.mask, 5)
-
-        return direction_masks
-
-
-    @staticmethod
-    @timing
     def perform_move(
+        self,
         entity_energy: torch.Tensor,
         direction_masks: dict,
         divide_threshold: Optional[int] = 250,
@@ -480,181 +461,77 @@ class World:
         for feature in [entity_energy] + (carried_features_self or []) + (carried_features_offspring or []):
             feature[:] *= ~vacated_mask
 
-    @timing
     def move(
         self,
-        entity_energy: torch.Tensor,
-        target_energy: Union[torch.Tensor, List[torch.Tensor]],
-        target_energy_weights: List[float],
-        opposite_energy: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
-        opposite_energy_weights: Optional[List[float]] = None,
+        target: Union[torch.Tensor, List[torch.Tensor]],
+        target_weights: List[float],
+        opposite_scent: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
+        opposite_scent_weights: Optional[List[float]] = None,
         clearance_mask: Optional[Union[torch.Tensor, List[torch.Tensor]]] = None,
         clearance_kernel_size: Optional[int] = 5,
         divide_threshold: Optional[int] = 250,
         divide_fn_self: Optional[Callable] = lambda x: x // 2,
         divide_fn_offspring: Optional[Callable] = lambda x: x // 4,
-        carried_features_self: Optional[List[torch.Tensor]] = None,
-        carried_features_offspring: Optional[List[torch.Tensor]] = None,
-        carried_feature_fns_self: Optional[List[Callable]] = None,
-        carried_feature_fns_offspring: Optional[List[Callable]] = None,
+        carried_features_self: Optional[Tuple[str, ...]] = None,
+        carried_features_offspring: Optional[Tuple[str, ...]] = None,
+        carried_feature_fns_self: Optional[Tuple[Callable, ...]] = None,
+        carried_feature_fns_offspring: Optional[Tuple[Callable, ...]] = None,
         agent_action: Optional[torch.Tensor] = None,
     ):
-        """
-        Move entities and reproduce entities. Movement is based on the target energy tensor and optional opposite energy tensor.
+        entity_energy = self.get_feature("energy")
 
-        :param entity_energy: Energy tensor of the entity to move. This is transferred to the selected position.
-            This is also used for clearance calculations, masking, and reproduction.
-        :param target_energy: Movement will favor moving towards higher values in this tensor.
-        :param target_energy_weights: Weights for the target energy tensor.
-        :param opposite_energy: Movement will avoid moving towards higher values in this tensor.
-        :param opposite_energy_weights: Weights for the opposite energy tensor.
-        :param clearance_mask: Mask tensor for clearance calculations.
-        :param clearance_kernel_size: Size of the kernel used for clearance calculations.
-        :param divide_threshold: Energy threshold for reproduction.
-        :param divide_fn_self: Function to apply to the entity energy on reproduction.
-        :param divide_fn_offspring: Function to apply to the offspring energy on reproduction.
-        :param carried_features_self: List of features that will be moved along with the entity energy.
-        :param carried_features_offspring: List of features that will be copied from the parent to the offspring.
-        :param carried_feature_fns_self: List of functions to apply to the carried features of the parent entity.
-        :param carried_feature_fns_offspring: List of functions to apply to the carried features of the offspring entity.
-        :param agent_action: Action tensor of the agent.
-        :return: None
-        """
         if agent_action is not None:
-            direction_masks = World.get_direction_masks(agent_action, entity_energy, self.obstacle.mask, 5)
+            # I.e. if we already have an action selected by the RL model.
+            direction_masks = self.get_direction_masks(
+                agent_action,
+                entity_energy,
+                self.world.data_manager.get_feature("obstacle", "mask"),
+                5
+            )
         else:
             direction_masks = self.prepare_move(
                 entity_energy,
-                target_energy,
-                target_energy_weights,
-                opposite_energy,
-                opposite_energy_weights,
+                target,
+                target_weights,
+                opposite_scent,
+                opposite_scent_weights,
                 clearance_mask,
                 clearance_kernel_size
             )
 
+        carried_features_self_tensors = [self.get_feature(f) for f in (carried_features_self or [])]
+        carried_features_offspring_tensors = [self.get_feature(f) for f in (carried_features_offspring or [])]
+
         self.perform_move(
-            entity_energy,
-            direction_masks,
-            divide_threshold,
-            divide_fn_self,
-            divide_fn_offspring,
-            carried_features_self,
-            carried_feature_fns_self,
-            carried_features_offspring,
-            carried_feature_fns_offspring
+            entity_energy=entity_energy,
+            direction_masks=direction_masks,
+            divide_threshold=divide_threshold,
+            divide_fn_self=divide_fn_self,
+            divide_fn_offspring=divide_fn_offspring,
+            carried_features_self=carried_features_self_tensors,
+            carried_feature_fns_self=carried_feature_fns_self,
+            carried_features_offspring=carried_features_offspring_tensors,
+            carried_feature_fns_offspring=carried_feature_fns_offspring
         )
 
-    @staticmethod
-    @timing
-    def eat(eater_energy, eaten_energy, eat_max, eat_efficiency_loss=2):
-        old_eaten_energy = eaten_energy.clone()
-        safe_sub(eaten_energy, (eater_energy > 0).type(torch.uint8) * eat_max)
-        delta = old_eaten_energy - eaten_energy
-        safe_add(eater_energy, delta // eat_efficiency_loss)
+        # Update the features in the data manager
+        self.set_feature("energy", entity_energy)
+        for feature, tensor in zip(carried_features_self or [], carried_features_self_tensors):
+            self.set_feature(feature, tensor)
+        for feature, tensor in zip(carried_features_offspring or [], carried_features_offspring_tensors):
+            self.set_feature(feature, tensor)
 
-    @staticmethod
-    @timing
-    def germinate(seeds, plant_energy, germination_odds, rand_tensor):
-        germination_rand = rand_tensor % germination_odds
-        seed_germination = (
-            seeds & ~(plant_energy > 0) & (germination_rand == 0)
-        )
-        safe_add(plant_energy, seed_germination)
-        safe_sub(seeds, seed_germination)
-
-    @staticmethod
-    @timing
-    def grow(plant_energy, plant_growth_odds, crowding, crowding_odds, fertility_map, rand_tensor):
-        growth_rand = rand_tensor % plant_growth_odds
-        growth = safe_add(plant_energy, fertility_map, inplace=False) <= growth_rand
-        plant_crowding_mask = (rand_tensor % crowding_odds) >= crowding
-        safe_add(plant_energy, (plant_energy > 0) * growth * plant_crowding_mask)
-
-    @timing
-    def log_scores(self, entity: BaseEntity):
-        scores = entity.offspring_count.type(torch.float32) * 255 + entity.energy
-        top_score_idx = torch.argmax(scores)
-        converted_ids = (entity.id_0.type(torch.float32) * 255) + entity.id_1
-        top_score_id = converted_ids.flatten()[top_score_idx]
-        top_score = scores.flatten()[top_score_idx]
-
-    @timing
-    def entity_scores(self, entity: Union[BaseEntity | str], reward_mode: str = "default"):
-        if isinstance(entity, str):
-            entity = self.entities[entity.lower()]
-
-        energy_ratio = entity.energy.type(torch.float32) / self.scalars.get(f"{entity.__class__.__name__.lower()}_init_energy", 240)
-        offspring_ratio = entity.offspring_count.type(torch.float32) / self.scalars.get(f"{entity.__class__.__name__.lower()}_offspring_target", 10)
-        # step_multiplier = math.sqrt(float(self.step))
-        step_multiplier = 1
-
-        # print(f"energy_ratio: {energy_ratio}")
-        # print(f"offspring_ratio: {offspring_ratio}")
-        # print(f"step: {self.step}")
-        # print(f"step_multiplier: {step_multiplier}")
-
-        if reward_mode == "default":
-            # Balanced reward considering both energy and offspring
-            reward = (energy_ratio + offspring_ratio) / 2
-        elif reward_mode == "energy_focused":
-            # Reward heavily weighted towards energy
-            reward = energy_ratio * 0.8 + offspring_ratio * 0.2
-        elif reward_mode == "offspring_focused":
-            # Reward heavily weighted towards offspring
-            reward = energy_ratio * 0.2 + offspring_ratio * 0.8
-        elif reward_mode == "survival":
-            # Reward for surviving (energy > 0) and normalized offspring count
-            reward = ((entity.energy > 0).type(torch.float32) + offspring_ratio) / 2
-        else:
-            raise ValueError(f"Unknown reward mode: {reward_mode}")
-
-        # print(f"reward: {reward}")
-
-        # Sum the reward across all entities
-        total_reward = torch.sum(reward)
-        # print(f"total_reward: {total_reward}")
-
-        # print(f"adjusted_reward: {total_reward / (self.width * self.height)}")
-        # print(f"step_multiplier: {step_multiplier}")
-        # Normalize the total reward to [-1, 1]
-        normalized_reward = torch.clamp(total_reward / (self.width * self.height) * 2 - 1, -1, 1) * step_multiplier
-
-        # print(f"normalized_reward: {normalized_reward}")
-
-        # return normalized_reward
-        return total_reward
+    def eat(self, food_energy: torch.Tensor):
+        energy = self.get_feature("energy")
+        old_food_energy = food_energy.clone()
+        safe_sub(food_energy, (energy > 0).type(torch.uint8) * self.eat_max)
+        delta = old_food_energy - food_energy
+        safe_add(energy, delta // 2)
 
 
-    def collect_info(self):
-        return {
-            'seed_count': float(torch.sum(self.plant.seed)),
-            'plant_mass': float(torch.sum(self.plant.energy)),
-            'herbivore_mass': float(torch.sum(self.herbivore.energy)),
-            'predator_mass': float(torch.sum(self.predator.energy)),
-            'herbivore_offspring_count': float(torch.sum(self.herbivore.offspring_count)),
-        }
+class Herbivore(Animal):
+    pass
 
-    def rgb_array(self):
-        # Create the obstacle mask (True where obstacles are)
-        obstacle_mask = self.obstacle.mask.unsqueeze(-1).repeat(1, 1, 3)
 
-        # Create energy display
-        energy = self.energy.clone()
-        # Set obstacles to white (255) and keep other values as they are
-        energy = torch.where(obstacle_mask, torch.ones_like(energy) * 255, energy)
-
-        # Create scent display
-        scent = self.scent.clone()
-        # Normalize scent values to 0-255 range for better visibility
-        scent = (scent - scent.min()) / (scent.max() - scent.min() + 1e-8) * 255
-        # Set obstacles to white (255) and keep other values as they are
-        scent = torch.where(obstacle_mask, torch.ones_like(scent) * 255, scent)
-
-        # Arrange the energy and scent channels beside each other
-        output = torch.cat((energy, scent), dim=1)
-
-        # Upscale the output
-        output = output.repeat_interleave(3, dim=0).repeat_interleave(3, dim=1)
-
-        return output.to(torch.uint8)  # Ensure output is in correct dtype for display
+class Predator(Animal):
+    pass
