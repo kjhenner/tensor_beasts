@@ -50,7 +50,7 @@ class Entity(abc.ABC):
             self.world.td[self.__class__.__name__.lower(), feature_name] = value
 
     @abc.abstractmethod
-    def update(self, step: int):
+    def update(self, action: Optional[torch.Tensor] = None):
         pass
 
 
@@ -146,7 +146,7 @@ class Plant(Entity):
         safe_add(energy, seed_germination)
         safe_sub(seed, seed_germination)
 
-    def update(self, step: int):
+    def update(self, action: Optional[torch.Tensor] = None):
         self.update_crowding()
         self.grow()
         self.seed()
@@ -193,7 +193,7 @@ class Animal(Entity):
                 ) == 0
             ) * self.initial_energy
 
-    def update(self, step: int):
+    def update(self, action: Optional[torch.Tensor] = None):
 
         energy = self.get_feature("energy")
         safe_sub(energy, self.energy_loss)

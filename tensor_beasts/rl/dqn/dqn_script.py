@@ -25,14 +25,14 @@ from tensor_beasts.rl.dqn.utils import eval_model, make_dqn_model, make_env
 def main(cfg: "DictConfig"):  # noqa: F821
 
     device = cfg.device
-    if device in ("", None):
+    if device in ("", None, "auto"):
         if torch.cuda.is_available():
-            device = "cuda:0"
+            cfg.device = "cuda:0"
         elif torch.backends.mps.is_available():
-            device = "mps"
+            cfg.device = "mps"
         else:
-            device = "cpu"
-    device = torch.device(device)
+            cfg.device = "cpu"
+    device = torch.device(cfg.device)
 
     total_frames = cfg.collector.total_frames
     frames_per_batch = cfg.collector.frames_per_batch

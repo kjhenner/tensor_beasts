@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Type, Tuple
+from typing import List, Type, Tuple, Optional, Union
 import torch
 from tensordict import TensorDict
 from omegaconf import DictConfig
@@ -27,6 +27,19 @@ class World:
         self.entities = {
             cls.__name__.lower(): cls(self, config["entities"][cls.__name__.lower()]) for cls in entity_classes
         }
+        self._initialize_features()
+        for entity in self.entities.values():
+            entity.initialize()
+        self.step = 0
+
+    def __getattr__(self, item):
+        if item in self.entities:
+            return self.entities[item]
+        else:
+            raise AttributeError(f"Attribute {item} not found in World")
+
+    def reset(self):
+        self.td.clear()
         self._initialize_features()
         for entity in self.entities.values():
             entity.initialize()
@@ -93,11 +106,12 @@ class World:
         scent = self.custom_diffusion(scent, energy)
         self.td.set(("shared_features", "scent"), scent)
 
-    def update(self):
+    def update(self, action_td: Optional[TensorDict] = None):
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
         self.diffuse_scent()
-        for entity in self.entities.values():
-            entity.update(self.step)
+        for name, entity in self.entities.items():
+            if action_td is not None:
+                entity.update(action=action_td.get(name, None))
         self.step += 1
 
     def get_feature(self, entity_name: str, feature_name: str) -> torch.Tensor:
@@ -110,4 +124,23 @@ class World:
 
     @property
     def observable(self):
-        pass
+        observable_features = list(self.td["shared_features"].values())
+
+        # Add non-shared features
+        for entity in self.entities.values():
+            for feature in entity.get_feature_definitions():
+                if feature.observable and not feature.shared:
+                    observable_features.append(entity.get_feature(feature.name))
+
+        # Concatenate along the last dimension
+        return torch.cat(observable_features, dim=-1)
+
+    def entity_scores(self, entity: Union[Entity | str], reward_mode: str = "default"):
+        if isinstance(entity, str):
+            entity = self.entities[entity.lower()]
+        reward = entity.get_feature("offspring_count").type(torch.float32) * 255 + entity.get_feature("energy")
+
+        total_reward = torch.sum(reward)
+        normalized_reward = torch.clamp(total_reward / (self.size[0] * self.size[1]) * 2 - 1, -1, 1)
+
+        return normalized_reward

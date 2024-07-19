@@ -1,10 +1,10 @@
-device: cuda
+device: auto
 
 env:
   env_name: tensor-beasts-v0
   world:
     device: auto
-    size: [768, 768]
+    size: [128, 128]
 
     entities:
       plant:

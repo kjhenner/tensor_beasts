@@ -5,6 +5,7 @@ from gymnasium import spaces
 import torch
 import numpy as np
 from omegaconf import DictConfig
+from tensordict import TensorDict
 
 from tensor_beasts.entities.entity import Predator, Plant, Herbivore
 from tensor_beasts.world import World
@@ -67,14 +68,14 @@ class TensorBeastsEnv(gym.Env):
 
     def reset(self, *args, **kwargs) -> Tuple[Dict, Dict]:
         # Reset the world state and return the initial observation
-        self.world.__init__(self.world_cfg)  # Reinitialize the world
+        self.world.reset()  # Reinitialize the world
         # TorchRL expects info to be packed with the observation rather than as a separate return value
-        terminated = not bool(torch.sum(self.world.herbivore.energy))
+        terminated = not bool(torch.sum(self.world.herbivore.get_feature("energy")))
         assert not terminated, "The world should not be terminated after a reset"
         observation = {
             "observation": self.world.observable.clone(),
-            "mask": self.world.herbivore.energy > 0,
-            "rgb_array": self.world.rgb_array(),
+            "mask": self.world.herbivore.get_feature("energy") > 0,
+            "rgb_array": self.world.td["shared_features", "energy"],
             # "info": self.world.collect_info()
         }
         return observation, {}
@@ -84,15 +85,14 @@ class TensorBeastsEnv(gym.Env):
             action = action.argmax(-1)
 
         action = action.reshape(*self.world.size)
-        self.world.update(action)
+        self.world.update(TensorDict({"herbivore": action}, batch_size=[]))
         reward = self.world.entity_scores('herbivore', reward_mode=self.world_cfg.get("reward_mode", "default"))
         # TorchRL expects info to be packed with the observation rather than as a separate return value
         observation = {
             "observation": self.world.observable.clone(),
-            "mask": self.world.herbivore.energy > 0,
-            "rgb_array": self.world.rgb_array(),
-            # "info": self.world.collect_info()
+            "mask": self.world.herbivore.get_feature("energy") > 0,
+            "rgb_array": self.world.td["shared_features", "energy"],
         }
-        terminated = not bool(torch.sum(self.world.herbivore.energy))
+        terminated = not bool(torch.sum(self.world.herbivore.get_feature("energy")))
         # observation, reward, terminated, truncated, info
         return observation, reward, terminated, False, {}
