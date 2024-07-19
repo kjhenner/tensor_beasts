@@ -1,12 +1,12 @@
-from typing import Optional, Dict, Tuple
+from typing import Dict, Tuple
 
 import gymnasium as gym
 from gymnasium import spaces
 import torch
 import numpy as np
-from gymnasium.core import RenderFrame
 from omegaconf import DictConfig
 
+from tensor_beasts.entities.entity import Predator, Plant, Herbivore
 from tensor_beasts.world import World
 
 
@@ -14,17 +14,12 @@ class TensorBeastsEnv(gym.Env):
 
     def __init__(
         self,
-        device: str = "cpu",
-        world: Optional[World] = None,
         num_actions: int = 5,
         world_cfg: DictConfig = None,
     ):
         super(TensorBeastsEnv, self).__init__()
         self.world_cfg = world_cfg
-        if world is None:
-            self.world = World(config=world_cfg)
-        else:
-            self.world = world
+        self.world = World([Predator, Plant, Herbivore], config=world_cfg)
 
         self.obs_shape = self.world.observable.shape
         self.num_actions = num_actions
@@ -66,7 +61,7 @@ class TensorBeastsEnv(gym.Env):
         #     dtype=np.float32
         # )
         self.action_space = spaces.MultiDiscrete(
-            nvec=[num_actions] * (self.world.width * self.world.height),
+            nvec=[num_actions] * (self.world_cfg.size[0] * self.world_cfg.size[1]),
             dtype=np.int32
         )
 
@@ -88,7 +83,7 @@ class TensorBeastsEnv(gym.Env):
         if action.shape[-1] == self.num_actions:
             action = action.argmax(-1)
 
-        action = action.reshape(self.world.width, self.world.height)
+        action = action.reshape(*self.world.size)
         self.world.update(action)
         reward = self.world.entity_scores('herbivore', reward_mode=self.world_cfg.get("reward_mode", "default"))
         # TorchRL expects info to be packed with the observation rather than as a separate return value

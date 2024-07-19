@@ -7,22 +7,13 @@ import torch.nn
 import torch.optim
 from torchrl.data import CompositeSpec
 from torchrl.envs import (
-    CatFrames,
-    DoubleToFloat,
-    EndOfLifeTransform,
-    GrayScale,
     GymEnv,
-    NoopResetEnv,
-    Resize,
     RewardSum,
-    SignTransform,
     StepCounter,
-    ToTensorImage,
-    TransformedEnv,
-    VecNorm,
+    TransformedEnv
 )
 
-from torchrl.modules import MLP, QValueActor
+from torchrl.modules import QValueActor
 from torchrl.record import VideoRecorder
 
 
@@ -37,7 +28,7 @@ def make_env(device, env_cfg):
         from_pixels=False,
         pixels_only=False,
         device=device,
-        world_cfg=env_cfg.world_cfg,
+        world_cfg=env_cfg.world,
     )
     env = TransformedEnv(env, RewardSum())
     env.append_transform(StepCounter(max_steps=4500))

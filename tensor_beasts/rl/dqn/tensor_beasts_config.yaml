@@ -1,22 +1,46 @@
 device: cuda
 
-# Environment
 env:
   env_name: tensor-beasts-v0
-  world_cfg:
-    size: 64
-    reward_mode: "default"
-    scalars:
-      predator_init_odds: 1024
-      plant_only_steps: 256
-      herbivore_energy_loss: 2
-      herbivore_eat_max: 32
-      plant_init_odds: 128
-      single_herbivore_init: 1
-    entity_cfg: null
+  world:
+    device: auto
+    size: [768, 768]
+
+    entities:
+      plant:
+        initial_energy: 32
+        init_prob: 0.03
+        growth_prob: 0.5
+        germination_prob: 0.005
+        seed_prob: 0.1
+
+      herbivore:
+        initial_energy: 240
+        init_odds: 255
+        eat_max: 16
+        energy_loss: 2
+        divide_threshold: 250
+        toy_init: False
+        target_key: plant
+        target_weights: [0.5]
+        opposite_key: [herbivore, predator]
+        opposite_weights: [0.1, 5.0]
+        food_key: plant
+
+      predator:
+        initial_energy: 240
+        init_odds: 255
+        eat_max: 64
+        energy_loss: 1
+        divide_threshold: 250
+        toy_init: False
+        target_key: herbivore
+        target_weights: [1.0]
+        opposite_key: predator
+        opposite_weights: [1.0]
+        food_key: herbivore
 
 
-# collector
 collector:
   total_frames: 500_000
   frames_per_batch: 128
@@ -26,13 +50,11 @@ collector:
   init_random_frames: 10_000
   max_frames_per_traj: 8_000
 
-# buffer
 buffer:
   buffer_size: 1000
   batch_size: 128
   scratch_dir: null
 
-# logger
 logger:
   backend: wandb
   mode: online
@@ -43,12 +65,10 @@ logger:
   num_test_episodes: 4
   video: True
 
-# Optim
 optim:
   lr: 0.000025
   max_grad_norm: 5
 
-# loss
 loss:
   gamma: 0.9
   hard_update_freq: 500

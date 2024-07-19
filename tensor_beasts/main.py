@@ -10,8 +10,9 @@ from pygame import mouse
 import sys
 
 from tensor_beasts.display_manager import DisplayManager
+from tensor_beasts.entities.entity import Predator, Plant, Herbivore
 from tensor_beasts.util import get_mean_execution_times
-from tensor_beasts.world import World, Plant, Herbivore, Predator
+from tensor_beasts.world import World
 
 PAN_SPEED = 0.1
 
@@ -102,11 +103,11 @@ def main(config: DictConfig):
         screens = [
             (
                 'scent_rgb',
-                lambda: world.data_manager.main_td.get(('shared_features', 'scent')),
+                lambda: world.td.get(('shared_features', 'scent')),
             ),
             (
                 'energy_rgb',
-                lambda: world.data_manager.main_td.get(('shared_features', 'energy')),
+                lambda: world.td.get(('shared_features', 'energy')),
             ),
             # (
             #     'herbivore_rgb',
@@ -114,7 +115,7 @@ def main(config: DictConfig):
             # ),
             (
                 'fertility_map',
-                lambda: world.data_manager.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
+                lambda: world.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
             ),
         ]
         display_manager = DisplayManager(*config.world.size)
