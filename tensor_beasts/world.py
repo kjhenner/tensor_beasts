@@ -110,8 +110,7 @@ class World:
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
         self.diffuse_scent()
         for name, entity in self.entities.items():
-            if action_td is not None:
-                entity.update(action=action_td.get(name, None))
+            entity.update(action=action_td.get(name, None) if action_td is not None else None)
         self.step += 1
 
     def get_feature(self, entity_name: str, feature_name: str) -> torch.Tensor:

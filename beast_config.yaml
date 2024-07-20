@@ -5,10 +5,10 @@ world:
   entities:
     plant:
       initial_energy: 32
-      init_prob: 0.03
+      init_prob: 0.02
       growth_prob: 0.5
       germination_prob: 0.005
-      seed_prob: 0.1
+      seed_prob: 0.05
 
     herbivore:
       initial_energy: 240
