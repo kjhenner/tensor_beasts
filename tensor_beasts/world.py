@@ -4,6 +4,7 @@ import torch
 from tensordict import TensorDict
 from omegaconf import DictConfig
 
+from tensor_beasts import entities
 from tensor_beasts.entities.entity import Entity
 from tensor_beasts.util import (
     torch_correlate_3d, generate_diffusion_kernel
@@ -21,11 +22,13 @@ class FeatureDefinition:
 
 
 class World:
-    def __init__(self, entity_classes: List[Type[Entity]], config: DictConfig):
+    def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
         self.td = TensorDict({}, batch_size=[])
+        print(globals())
         self.entities = {
-            cls.__name__.lower(): cls(self, config["entities"][cls.__name__.lower()]) for cls in entity_classes
+            entity_name: getattr(entities, entity_name.title())(self, entity_config) for
+            entity_name, entity_config in config.entities.items()
         }
         self._initialize_features()
         for entity in self.entities.values():
@@ -108,7 +111,7 @@ class World:
 
     def update(self, action_td: Optional[TensorDict] = None):
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
-        self.diffuse_scent()
+        # self.diffuse_scent()
         for name, entity in self.entities.items():
             entity.update(action=action_td.get(name, None) if action_td is not None else None)
         self.step += 1
@@ -143,3 +146,9 @@ class World:
         normalized_reward = torch.clamp(total_reward / (self.size[0] * self.size[1]) * 2 - 1, -1, 1)
 
         return normalized_reward
+
+    def inspect(self, x: int, y: int):
+        for k, v in self.td.items(include_nested=True, leaves_only=True):
+            if v.shape[:2] == self.size:
+                # Tensors have shape H, W
+                print(k, v[y, x])

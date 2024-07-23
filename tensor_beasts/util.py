@@ -344,6 +344,22 @@ def generate_plant_crowding_kernel():
     ], dtype=torch.uint8)
 
 
+@lru_cache
+def generate_direction_kernels():
+    # Create kernels for the 8 directions
+    return torch.tensor([
+        [-1, -1], [-1, 0], [-1, 1],
+        [ 0, -1],          [ 0, 1],
+        [ 1, -1], [ 1, 0], [ 1, 1]
+    ], dtype=torch.float32)
+
+
+@lru_cache
+def lru_distance(dx, dy):
+    """Cached distance function for efficient 8 direction distance calculation."""
+    return torch.sqrt(dx**2 + dy**2)
+
+
 def fade(t):
     return t * t * t * (t * (t * 6 - 15) + 10)
 
@@ -404,6 +420,59 @@ def perlin_noise(size, res):
     nxy = lerp(nx0, nx1, u[..., 1])
 
     return torch.clamp(nxy + 0.5, 0, 1)
+
+
+def pyramid_elevation(size: tuple, inverted: False, max_height: float = 1) -> torch.Tensor:
+    """
+    Create an inverted pyramid (cone) elevation map with the lowest point in the center.
+
+    Args:
+        size (tuple): The size of the elevation map (height, width).
+        max_height (float): The maximum elevation at the edges of the map.
+
+    Returns:
+        torch.Tensor: The elevation map as a 2D tensor.
+    """
+    height, width = size
+    center_y, center_x = height // 2, width // 2
+
+    y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing='ij')
+
+    # Calculate distance from center
+    distance = torch.maximum(
+        torch.abs(y - center_y),
+        torch.abs(x - center_x)
+    )
+
+    # Normalize distance to [0, 1] range
+    max_distance = max(center_y, center_x)
+    normalized_distance = distance.float() / max_distance
+
+    # Create inverted pyramid
+    if inverted:
+        elevation = normalized_distance * max_height
+    else:
+        elevation = (1 - normalized_distance) * max_height
+
+    return elevation
+
+
+def ramp_elevation(size: tuple, max_height: 255, dimension: int) -> torch.Tensor:
+    """
+    Create an inverted pyramid (cone) elevation map with the lowest point in the center.
+
+    Args:
+        size (tuple): The size of the elevation map (height, width).
+        max_height (float): The maximum elevation at the edges of the map.
+
+    Returns:
+        torch.Tensor: The elevation map as a 2D tensor.
+    """
+    height, width = size
+    if dimension == 0:
+        return torch.arange(width).repeat(height, 1)
+    elif dimension == 1:
+        return torch.arange(height).repeat(width, 1).T
 
 
 def scale_tensor(input_tensor, floor=64):

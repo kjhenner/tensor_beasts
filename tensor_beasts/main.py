@@ -43,19 +43,26 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Keep a state buffer."
     )
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        help="The path to the config file.",
+        default="beast_config.yaml"
+    )
     return parser.parse_args()
 
 
 class WorldThread(threading.Thread):
-    def __init__(self, world, update_screen_cb, clock, device):
+    def __init__(self, world, update_screen_cb, clock, device, running=True, max_ups=None):
         super().__init__(daemon=True)
         self.world = world
         self.update_screen_cb = update_screen_cb
         self.clock = clock
         self.done = False
-        self.running = True
+        self.running = running
         self.device = device
         self.ups = None
+        self.max_ups = 1
 
     def stop(self):
         self.done = True
@@ -67,6 +74,10 @@ class WorldThread(threading.Thread):
         start = time.time()
         self.world.update()
         end = time.time()
+        if self.max_ups:
+            step_time = 1 / self.max_ups
+            if end - start < step_time:
+                time.sleep(step_time - (end - start))
         cur_ups = 1 / (end - start)
         self.ups = cur_ups if self.ups is None else (self.ups + cur_ups) / 2
         world_stats = {"ups": self.ups}
@@ -74,8 +85,9 @@ class WorldThread(threading.Thread):
 
     def run(self):
         torch.set_default_device(self.device)
-        while self.running and not self.done:
-            self.step()
+        while not self.done:
+            if self.running:
+                self.step()
 
 
 def main(config: DictConfig):
@@ -91,7 +103,7 @@ def main(config: DictConfig):
 
     width, height = config.world.size
 
-    world = World([Predator, Plant, Herbivore], config.world)
+    world = World(config.world)
 
     clock = pygame.time.Clock()
 
@@ -101,22 +113,30 @@ def main(config: DictConfig):
         display_manager = None
     else:
         screens = [
-            (
-                'scent_rgb',
-                lambda: world.td.get(('shared_features', 'scent')),
-            ),
-            (
-                'energy_rgb',
-                lambda: world.td.get(('shared_features', 'energy')),
-            ),
+            # (
+            #     'scent_rgb',
+            #     lambda: world.td.get(('shared_features', 'scent')),
+            # ),
+            # (
+            #     'energy_rgb',
+            #     lambda: world.td.get(('shared_features', 'energy')),
+            # ),
             # (
             #     'herbivore_rgb',
             #     lambda: world.herbivore.energy.unsqueeze(-1).expand(-1, -1, 3),
             # ),
+            # (
+            #     'fertility_map',
+            #     lambda: world.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
+            # ),
             (
-                'fertility_map',
-                lambda: world.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
+                'elevation',
+                lambda: world.get_feature("terrain", "elevation") * 255,
             ),
+            (
+                'water_level',
+                lambda: world.get_feature("terrain", "water_level") / 20 * 255,
+            )
         ]
         display_manager = DisplayManager(*config.world.size)
         current_screen_idx = 0
@@ -133,7 +153,14 @@ def main(config: DictConfig):
         runtime_stats.update(get_mean_execution_times())
         print(json.dumps(runtime_stats, indent=4))
 
-    world_thread = WorldThread(world, update_screen, clock, config.world.device)
+    world_thread = WorldThread(
+        world,
+        update_screen,
+        clock,
+        device=config.world.device,
+        running=config.world.running,
+        max_ups=config.world.max_ups
+    )
     world_thread.start()
 
     done, step = False, 0
@@ -160,6 +187,7 @@ def main(config: DictConfig):
                         display_manager.pan(0, PAN_SPEED)
                     elif event.key == pygame.K_n:
                         current_screen_idx = (current_screen_idx + 1) % len(screens)
+                        display_manager.update_screen(screens[current_screen_idx][1]())
                     elif event.key == pygame.K_h:
                         world.initialize_herbivore()
                     elif event.key == pygame.K_p:
@@ -169,10 +197,15 @@ def main(config: DictConfig):
                     elif event.key == pygame.K_s:
                         if not world_thread.running:
                             world_thread.step()
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    pos = mouse.get_pos()
+                    x, y = display_manager.map_grid_position(*pos)
+                    print(f"Inspecting: {(x, y)}")
+                    world.inspect(x, y)
                 elif event.type == pygame.MOUSEMOTION:
                     rel = mouse.get_rel()
                     if mouse.get_pressed()[0]:
-                        display_manager.pan(2 * rel[0] / height, -2 * rel[1] / height)
+                        display_manager.pan(-2 * rel[0] / height, 2 * rel[1] / height)
                 elif event.type == pygame.MOUSEWHEEL:
                     display_manager.zoom_in(1 + event.y * 0.02)
                 elif event.type == pygame.VIDEORESIZE:
@@ -189,5 +222,5 @@ def main(config: DictConfig):
 if __name__ == "__main__":
     args = parse_args()
     # Load the config
-    config = OmegaConf.load('beast_config.yaml')
+    config = OmegaConf.load(args.config_path)
     main(config)

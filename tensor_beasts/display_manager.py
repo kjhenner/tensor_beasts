@@ -50,9 +50,11 @@ class DisplayManager:
         self.buffer_update_interval = 1  # Default 1 second
         self.last_update_time = time.time()
 
+        if self.world_width < 256 and self.world_height < 256:
+            self.resize(256, 256)
+
     def update(self):
 
-        self.handle_input()
         current_time = time.time()
         if len(self.screen_buffer) > 0 and (current_time - self.last_update_time) >= self.buffer_update_interval:
             self.screen[:] = self.screen_buffer.popleft()
@@ -85,6 +87,8 @@ class DisplayManager:
 
     def update_screen(self, screen: torch.Tensor):
         self.dirty = True
+        if screen.size() == (self.world_height, self.world_width):
+            screen = screen.unsqueeze(-1).expand(-1, -1, 3)
         self.screen[:] = screen.cpu().numpy()
 
     def add_screens_to_buffer(self, screens: torch.Tensor):
@@ -129,39 +133,21 @@ class DisplayManager:
         self.display = pygame.display.set_mode((self.screen_width, self.screen_height), DOUBLEBUF | OPENGL | RESIZABLE)
         self.update_projection()
 
-    def handle_input(self):
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                if self.world_thread is not None:
-                    self.world_thread.stop()
-                    self.world_thread.join(5)
-                pygame.quit()
-                sys.exit()
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_PLUS or event.key == pygame.K_EQUALS:
-                    self.zoom_in()
-                elif event.key == pygame.K_MINUS:
-                    self.zoom_out()
-                elif event.key == pygame.K_LEFT:
-                    self.pan(self.pan_speed, 0)
-                elif event.key == pygame.K_RIGHT:
-                    self.pan(-self.pan_speed, 0)
-                elif event.key == pygame.K_UP:
-                    self.pan(0, self.pan_speed)
-                elif event.key == pygame.K_DOWN:
-                    self.pan(0, -self.pan_speed)
-                # elif event.key == pygame.K_n:
-                #     current_screen_idx = (current_screen_idx + 1) % len(screens)
-                # elif event.key == pygame.K_h:
-                #     world.initialize_herbivore()
-                # elif event.key == pygame.K_p:
-                #     world.initialize_predator()
-            elif event.type == pygame.MOUSEMOTION:
-                rel = mouse.get_rel()
-                if mouse.get_pressed()[0]:
-                    self.pan(-2 * rel[0] / self.screen_height, 2 * rel[1] / self.screen_height)
-            elif event.type == pygame.MOUSEWHEEL:
-                self.zoom_in(1 + event.y * 0.02)
-            elif event.type == pygame.VIDEORESIZE:
-                print(f"Resizing to {event.w}x{event.h}")
-                self.resize(event.w, event.h)
+    def map_grid_position(self, screen_x, screen_y):
+        # Convert screen coordinates to OpenGL coordinates
+        gl_x = (screen_x / self.screen_width) * 2 - 1
+        gl_y = 1 - (screen_y / self.screen_height) * 2
+
+        # Apply zoom and pan
+        world_x = (gl_x * self.aspect_ratio * self.zoom_level) + self.offset[0]
+        world_y = (gl_y * self.zoom_level) + self.offset[1]
+
+        # Convert to grid coordinates
+        grid_x = int((world_x + self.aspect_ratio) / (2 * self.aspect_ratio) * self.world_width)
+        grid_y = int((world_y + 1) / 2 * self.world_height)
+
+        # Clamp values to ensure they're within the world bounds
+        grid_x = max(0, min(grid_x, self.world_width - 1))
+        grid_y = max(0, min(grid_y, self.world_height - 1))
+
+        return grid_x, grid_y

@@ -1,0 +1,19 @@
+world:
+  device: auto
+  running: False
+  max_ups: 2
+  size: [16, 16]
+
+  entities:
+    terrain:
+#      rainfall_rate: 5.7e-06
+      rainfall_rate: 5.7e-04
+      flow_rate: 0.1
+      evaporation_rate: 0.001
+      elevation_max: 500
+      elevation:
+        mode: ramp
+        ramp:
+          start: 0
+          end: 500
+
