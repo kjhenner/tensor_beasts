@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 from tensor_beasts.entities.entity import Entity
 from tensor_beasts.util import (
     perlin_noise, generate_direction_kernels, safe_add, safe_sub, lru_distance,
-    pyramid_elevation
+    pyramid_elevation, range_elevation
 )
 from tensor_beasts.world import FeatureDefinition
 
@@ -36,6 +36,8 @@ class Terrain(Entity):
                 0,
                 1, self.world.size[0]
             ).unsqueeze(1).expand(*self.world.size)
+        elif self.config.elevation.mode == "range":
+            elevation = range_elevation(self.world.size)
         else:
             raise ValueError(f"Invalid elevation mode: {self.config.elevation.mode}")
 

@@ -24,8 +24,9 @@ class FeatureDefinition:
 class World:
     def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
+        print(f"world height: {self.size[0]}")
+        print(f"world width: {self.size[1]}")
         self.td = TensorDict({}, batch_size=[])
-        print(globals())
         self.entities = {
             entity_name: getattr(entities, entity_name.title())(self, entity_config) for
             entity_name, entity_config in config.entities.items()

@@ -2,7 +2,7 @@ world:
   device: auto
   running: False
   max_ups: 2
-  size: [16, 16]
+  size: [8, 32]  # [Height, Width]
 
   entities:
     terrain:
@@ -12,7 +12,7 @@ world:
       evaporation_rate: 0.001
       elevation_max: 500
       elevation:
-        mode: ramp
+        mode: range
         ramp:
           start: 0
           end: 500

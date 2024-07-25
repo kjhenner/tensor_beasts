@@ -101,7 +101,8 @@ def main(config: DictConfig):
 
     torch.set_default_device(torch.device(config.world.device))
 
-    width, height = config.world.size
+    height, width = config.world.size
+    print(f"Height: {height}, Width: {width}")
 
     world = World(config.world)
 
@@ -131,14 +132,17 @@ def main(config: DictConfig):
             # ),
             (
                 'elevation',
-                lambda: world.get_feature("terrain", "elevation") * 255,
+                lambda: world.get_feature("terrain", "elevation"),
             ),
             (
                 'water_level',
                 lambda: world.get_feature("terrain", "water_level") / 20 * 255,
             )
         ]
-        display_manager = DisplayManager(*config.world.size)
+        display_manager = DisplayManager(
+            world_width=width,
+            world_height=height
+        )
         current_screen_idx = 0
 
     def update_screen(step, world_stats):
@@ -200,7 +204,7 @@ def main(config: DictConfig):
                 elif event.type == pygame.MOUSEBUTTONUP:
                     pos = mouse.get_pos()
                     x, y = display_manager.map_grid_position(*pos)
-                    print(f"Inspecting: {(x, y)}")
+                    print(f"Inspecting: (H: {y}, W: {x})")
                     world.inspect(x, y)
                 elif event.type == pygame.MOUSEMOTION:
                     rel = mouse.get_rel()
@@ -209,7 +213,6 @@ def main(config: DictConfig):
                 elif event.type == pygame.MOUSEWHEEL:
                     display_manager.zoom_in(1 + event.y * 0.02)
                 elif event.type == pygame.VIDEORESIZE:
-                    width, height = event.w, event.h
                     display_manager.resize(event.w, event.h)
 
         if not args.headless:
