@@ -1,29 +1,21 @@
 from dataclasses import dataclass
-from typing import List, Type, Tuple, Optional, Union
+from typing import List, Type, Tuple, Optional, Union, Dict
 import torch
 from tensordict import TensorDict
 from omegaconf import DictConfig
 
 from tensor_beasts import entities
 from tensor_beasts.entities.entity import Entity
+from tensor_beasts.entities.feature import Feature
 from tensor_beasts.util import (
     torch_correlate_3d, generate_diffusion_kernel
 )
 
 
-@dataclass
-class FeatureDefinition:
-    name: str
-    dtype: torch.dtype
-    shape: Tuple[int, ...] = ()
-    shared: bool = False
-    observable: bool = False
-    use_world_size: bool = True
-
-
 class World:
     def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
+        self.shared_features: Dict[str, Feature] = {}
         print(f"world height: {self.size[0]}")
         print(f"world width: {self.size[1]}")
         self.td = TensorDict({}, batch_size=[])
@@ -51,32 +43,24 @@ class World:
 
     def _initialize_features(self):
 
-        def _features_match(f1: FeatureDefinition, f2: FeatureDefinition) -> bool:
-            return all(
-                getattr(f1, attr) == getattr(f2, attr) for attr in ["shape", "dtype", "use_world_size", "observable"]
-            )
-
         shared_feature_counts = {}
-        shared_feature_defs = {}
 
         self.td["shared_features"] = TensorDict({}, batch_size=[])
 
         for name, entity in self.entities.items():
-            for f in entity.get_feature_definitions():
+            for f in entity.features.values():
                 if f.shared:
                     if f.name not in shared_feature_counts:
                         shared_feature_counts[f.name] = 1
-                        shared_feature_defs[f.name] = f
+                        self.shared_features[f.name] = f
                     else:
                         shared_feature_counts[f.name] += 1
-                        if not _features_match(shared_feature_defs[f.name], f):
-                            raise ValueError(f"Mismatched definitions for shared feature {f.name}")
                 else:
                     shape = (*self.size, *f.shape) if f.use_world_size else f.shape
                     self.td[name, f.name] = torch.zeros(*shape, dtype=f.dtype)
 
         for i, (name, entity) in enumerate(self.entities.items()):
-            for f in entity.get_feature_definitions():
+            for f in entity.features.values():
                 if f.shared:
                     if f.name not in self.td["shared_features"]:
                         count = shared_feature_counts[f.name]
@@ -118,6 +102,8 @@ class World:
         self.step += 1
 
     def get_feature(self, entity_name: str, feature_name: str) -> torch.Tensor:
+        if entity_name == "shared_features":
+            return self.td.get(("shared_features", feature_name))
         entity = self.entities[entity_name]
         return entity.get_feature(feature_name)
 

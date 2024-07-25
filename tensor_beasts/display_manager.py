@@ -4,7 +4,7 @@ import time
 
 import pygame
 import torch
-from pygame import DOUBLEBUF, OPENGL, RESIZABLE, mouse
+from pygame import DOUBLEBUF, OPENGL, RESIZABLE
 from OpenGL.GL import (
     glBindTexture, glClear, glTexCoord2f, glVertex2f, glBegin, glEnd,
     glTexImage2D, glTexParameteri, glTexSubImage2D, glEnable, glGenTextures,
@@ -89,7 +89,6 @@ class DisplayManager:
     def update_screen(self, screen: torch.Tensor):
         self.dirty = True
         if screen.size() == (self.world_height, self.world_width):
-            # Tensors are in shape H, W
             screen = screen.unsqueeze(-1).expand(-1, -1, 3)
         self.screen[:] = screen.cpu().numpy()
 
@@ -126,11 +125,11 @@ class DisplayManager:
 
         if window_aspect_ratio > world_aspect_ratio:
             # Window is wider than world
-            visible_height = self.world_height / 4
+            visible_height = 2
             visible_width = visible_height * window_aspect_ratio
         else:
             # Window is taller than world
-            visible_width = self.world_width / 4
+            visible_width = 2 * world_aspect_ratio
             visible_height = visible_width / window_aspect_ratio
 
         # Apply zoom

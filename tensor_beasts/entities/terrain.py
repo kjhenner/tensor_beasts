@@ -1,25 +1,52 @@
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from omegaconf import DictConfig
 
 from tensor_beasts.entities.entity import Entity
+from tensor_beasts.entities.feature import Feature
 from tensor_beasts.util import (
-    perlin_noise, generate_direction_kernels, safe_add, safe_sub, lru_distance,
+    perlin_noise, generate_direction_kernels, lru_distance,
     pyramid_elevation, range_elevation
 )
-from tensor_beasts.world import FeatureDefinition
+
+
+class Elevation(Feature):
+    name = "elevation"
+    dtype = torch.float32
+    observable = True
+
+
+class WaterLevel(Feature):
+    name = "water_level"
+    dtype = torch.float32
+    observable = True
+
+
+class Flow(Feature):
+    name = "flow"
+    dtype = torch.float32
+    shape = (8,)
+
+
+class Substrate(Feature):
+    name = "substrate"
+    dtype = torch.uint8
+
+
+class Rainfall(Feature):
+    name = "rainfall"
+    dtype = torch.uint8
 
 
 class Terrain(Entity):
-    features = [
-        FeatureDefinition("elevation", torch.float32, observable=True),
-        FeatureDefinition("water_level", torch.float32, observable=True),
-        FeatureDefinition("flow", torch.float32, shape=(8,)),
-        FeatureDefinition("substrate", torch.uint8),
-        FeatureDefinition("rainfall", torch.uint8),
-    ]
+    features = {
+        Flow.name: Flow(),
+        Elevation.name: Elevation(),
+        WaterLevel.name: WaterLevel(),
+        Substrate.name: Substrate(),
+        Rainfall.name: Rainfall()
+    }
 
     def __init__(self, world: 'World', config: DictConfig):
         super().__init__(world, config)
@@ -114,7 +141,6 @@ class Terrain(Entity):
         for i, (dy, dx) in enumerate(shifts):
             water_in += torch.roll(flow[..., i], shifts=(int(dy), int(dx)), dims=(0, 1))
         self.set_feature("water_level", (water_level + water_in - water_out).clamp(0, 20))
-
 
     def update_rainfall(self) -> None:
         """

@@ -10,7 +10,7 @@ from pygame import mouse
 import sys
 
 from tensor_beasts.display_manager import DisplayManager
-from tensor_beasts.entities.entity import Predator, Plant, Herbivore
+from tensor_beasts.entities import Plant, Herbivore, Predator
 from tensor_beasts.util import get_mean_execution_times
 from tensor_beasts.world import World
 
@@ -62,7 +62,7 @@ class WorldThread(threading.Thread):
         self.running = running
         self.device = device
         self.ups = None
-        self.max_ups = 1
+        self.max_ups = max_ups
 
     def stop(self):
         self.done = True
@@ -116,28 +116,28 @@ def main(config: DictConfig):
         screens = [
             # (
             #     'scent_rgb',
-            #     lambda: world.td.get(('shared_features', 'scent')),
+            #     lambda: world.get_feature('shared_features', 'scent'),
             # ),
-            # (
-            #     'energy_rgb',
-            #     lambda: world.td.get(('shared_features', 'energy')),
-            # ),
+            (
+                'energy_rgb',
+                lambda: world.get_feature('shared_features', 'energy'),
+            ),
             # (
             #     'herbivore_rgb',
-            #     lambda: world.herbivore.energy.unsqueeze(-1).expand(-1, -1, 3),
+            #     lambda: world.get_feature('herbivore', 'energy'),
             # ),
             # (
             #     'fertility_map',
-            #     lambda: world.get_feature("plant", "fertility_map").unsqueeze(-1).expand(-1, -1, 3) * 255,
+            #     lambda: world.get_feature("plant", "fertility_map") * 255,
             # ),
-            (
-                'elevation',
-                lambda: world.get_feature("terrain", "elevation"),
-            ),
-            (
-                'water_level',
-                lambda: world.get_feature("terrain", "water_level") / 20 * 255,
-            )
+            # (
+            #     'elevation',
+            #     lambda: world.get_feature("terrain", "elevation"),
+            # ),
+            # (
+            #     'water_level',
+            #     lambda: world.get_feature("terrain", "water_level") / 20 * 255,
+            # )
         ]
         display_manager = DisplayManager(
             world_width=width,

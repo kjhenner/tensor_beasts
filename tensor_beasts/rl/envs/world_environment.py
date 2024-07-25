@@ -7,7 +7,7 @@ import numpy as np
 from omegaconf import DictConfig
 from tensordict import TensorDict
 
-from tensor_beasts.entities.entity import Predator, Plant, Herbivore
+from tensor_beasts.entities import Plant, Herbivore, Predator
 from tensor_beasts.world import World
 
 

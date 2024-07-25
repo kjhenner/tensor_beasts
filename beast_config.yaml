@@ -1,6 +1,25 @@
 world:
   device: auto
-  size: [1024, 1024]
+  running: True
+  max_ups: 0
+  size: [64, 256]
+  display:
+    screens:
+      scent:
+        keys: [shared_features, scent]
+        scale: 1
+      energy:
+        keys: [shared_features, energy]
+        scale: 1
+      herbivore:
+        keys: [herbivore, energy]
+        scale: 1
+      fertility:
+        keys: [plant, fertility]
+        scale: 255
+      elevation:
+        keys: [terrain, elevation]
+        scale: 255
 
   entities:
 
