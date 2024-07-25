@@ -1,4 +1,3 @@
-import sys
 from collections import deque
 import time
 
@@ -58,11 +57,13 @@ class DisplayManager:
         current_time = time.time()
         if len(self.screen_buffer) > 0 and (current_time - self.last_update_time) >= self.buffer_update_interval:
             self.screen[:] = self.screen_buffer.popleft()
-            self.dirty = True
             self.last_update_time = current_time
+            self.dirty = True
 
         if self.dirty:
             screen = np.flipud(self.screen)
+
+            self.update_projection()
             glBindTexture(GL_TEXTURE_2D, self.texture)
             glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, self.world_width, self.world_height, GL_RGB, GL_UNSIGNED_BYTE, screen)
 
@@ -75,8 +76,6 @@ class DisplayManager:
             glTexCoord2f(0, 1); glVertex2f(-self.world_aspect, 1)
             glEnd()
 
-            self.update_projection()
-
             pygame.display.flip()
             self.dirty = False
 
@@ -87,10 +86,10 @@ class DisplayManager:
             self.update()
 
     def update_screen(self, screen: torch.Tensor):
-        self.dirty = True
         if screen.size() == (self.world_height, self.world_width):
             screen = screen.unsqueeze(-1).expand(-1, -1, 3)
         self.screen[:] = screen.cpu().numpy()
+        self.dirty = True
 
     def add_screens_to_buffer(self, screens: torch.Tensor):
         current_time = time.time()
@@ -101,18 +100,18 @@ class DisplayManager:
         time_taken = time.time() - current_time
         self.buffer_update_interval = time_taken / max(len(screens), 1)
 
-    def zoom_in(self, speed=2.0):
-        if self.zoom_level / speed >= 0.1:
-            self.dirty = True
-            self.zoom_level /= speed
+    def zoom_in(self, speed=1.1):
+        self.zoom_level /= speed
+        self.dirty = True
 
     def zoom_out(self):
         self.zoom_in(1 / 1.1)
+        self.dirty = True
 
     def pan(self, dx, dy):
-        self.dirty = True
         self.offset[0] += dx / self.zoom_level
         self.offset[1] += dy / self.zoom_level
+        self.dirty = True
 
     def update_projection(self):
         glViewport(0, 0, self.window_width, self.window_height)
@@ -155,21 +154,35 @@ class DisplayManager:
         self.update_projection()
 
     def map_grid_position(self, screen_x, screen_y):
-        # Convert screen coordinates to OpenGL coordinates
-        gl_x = (screen_x / self.window_width) * 2 - 1
-        gl_y = (screen_y / self.window_height) * 2 - 1
+        # Convert screen coordinates to normalized device coordinates
+        ndc_x = (2 * screen_x / self.window_width) - 1
+        ndc_y = 1 - (2 * screen_y / self.window_height)  # Flip y-coordinate
 
-        # Apply zoom and pan
-        world_x = (gl_x * self.window_aspect * self.zoom_level) + self.offset[0]
-        world_y = (gl_y * self.zoom_level) + self.offset[1]
+        # Calculate the visible area based on zoom and aspect ratios
+        if self.window_aspect > self.world_aspect:
+            visible_height = 2
+            visible_width = visible_height * self.window_aspect
+        else:
+            visible_width = 2 * self.world_aspect
+            visible_height = visible_width / self.window_aspect
 
-        # Convert to grid coordinates
-        grid_x = int((world_x + self.window_aspect) / (2 * self.window_aspect) * self.world_width)
+        visible_width *= self.zoom_level
+        visible_height *= self.zoom_level
+
+        # Transform normalized device coordinates to world coordinates
+        world_x = (ndc_x * visible_width / 2) + self.offset[0]
+        world_y = (ndc_y * visible_height / 2) + self.offset[1]
+
+        # Convert world coordinates to grid coordinates
+        grid_x = int((world_x + self.world_aspect) / (2 * self.world_aspect) * self.world_width)
         grid_y = int((world_y + 1) / 2 * self.world_height)
 
         # Clamp values to ensure they're within the world bounds
         grid_x = max(0, min(grid_x, self.world_width - 1))
         grid_y = max(0, min(grid_y, self.world_height - 1))
+
+        # Flip y-coordinate for screen array access
+        grid_y = self.world_height - 1 - grid_y
 
         print(f"Screen value: {self.screen[grid_y][grid_x]}")
         return grid_x, grid_y

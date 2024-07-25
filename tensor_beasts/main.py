@@ -182,13 +182,13 @@ def main(config: DictConfig):
                     elif event.key == pygame.K_MINUS:
                         display_manager.zoom_out()
                     elif event.key == pygame.K_LEFT:
-                        display_manager.pan(PAN_SPEED, 0)
-                    elif event.key == pygame.K_RIGHT:
                         display_manager.pan(-PAN_SPEED, 0)
+                    elif event.key == pygame.K_RIGHT:
+                        display_manager.pan(PAN_SPEED, 0)
                     elif event.key == pygame.K_UP:
-                        display_manager.pan(0, -PAN_SPEED)
-                    elif event.key == pygame.K_DOWN:
                         display_manager.pan(0, PAN_SPEED)
+                    elif event.key == pygame.K_DOWN:
+                        display_manager.pan(0, -PAN_SPEED)
                     elif event.key == pygame.K_n:
                         current_screen_idx = (current_screen_idx + 1) % len(screens)
                         display_manager.update_screen(screens[current_screen_idx][1]())
