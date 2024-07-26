@@ -1,25 +1,15 @@
+display:
+  screens:
+    - entity_name: shared_features
+      feature_name: energy
+    - entity_name: shared_features
+      feature_name: scent
+
 world:
   device: auto
-  running: True
+  running: False
   max_ups: 0
-  size: [64, 256]
-  display:
-    screens:
-      scent:
-        keys: [shared_features, scent]
-        scale: 1
-      energy:
-        keys: [shared_features, energy]
-        scale: 1
-      herbivore:
-        keys: [herbivore, energy]
-        scale: 1
-      fertility:
-        keys: [plant, fertility]
-        scale: 255
-      elevation:
-        keys: [terrain, elevation]
-        scale: 255
+  size: [1024, 1024]
 
   entities:
 

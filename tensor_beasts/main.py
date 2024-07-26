@@ -10,7 +10,6 @@ from pygame import mouse
 import sys
 
 from tensor_beasts.display_manager import DisplayManager
-from tensor_beasts.entities import Plant, Herbivore, Predator
 from tensor_beasts.util import get_mean_execution_times
 from tensor_beasts.world import World
 
@@ -113,32 +112,6 @@ def main(config: DictConfig):
         pygame.init()
         display_manager = None
     else:
-        screens = [
-            # (
-            #     'scent_rgb',
-            #     lambda: world.get_feature('shared_features', 'scent'),
-            # ),
-            (
-                'energy_rgb',
-                lambda: world.get_feature('shared_features', 'energy'),
-            ),
-            # (
-            #     'herbivore_rgb',
-            #     lambda: world.get_feature('herbivore', 'energy'),
-            # ),
-            # (
-            #     'fertility_map',
-            #     lambda: world.get_feature("plant", "fertility_map") * 255,
-            # ),
-            # (
-            #     'elevation',
-            #     lambda: world.get_feature("terrain", "elevation"),
-            # ),
-            # (
-            #     'water_level',
-            #     lambda: world.get_feature("terrain", "water_level") / 20 * 255,
-            # )
-        ]
         display_manager = DisplayManager(
             world_width=width,
             world_height=height
@@ -147,9 +120,11 @@ def main(config: DictConfig):
 
     def update_screen(step, world_stats):
         if not args.headless:
-            display_manager.update_screen(screens[current_screen_idx][1]())
+            screen_config = config.display.screens[current_screen_idx]
+            screen_data = world.render_feature(screen_config.entity_name, screen_config.feature_name)
+            display_manager.update_screen(screen_data)
         runtime_stats = {
-            'current_screen': screens[current_screen_idx][0] if not args.headless else "(headless)",
+            'current_screen': screen_config.feature_name if not args.headless else "(headless)",
             'fps': clock.get_fps(),
             'step': step
         }
@@ -190,8 +165,7 @@ def main(config: DictConfig):
                     elif event.key == pygame.K_DOWN:
                         display_manager.pan(0, -PAN_SPEED)
                     elif event.key == pygame.K_n:
-                        current_screen_idx = (current_screen_idx + 1) % len(screens)
-                        display_manager.update_screen(screens[current_screen_idx][1]())
+                        current_screen_idx = (current_screen_idx + 1) % len(config.display.screens)
                     elif event.key == pygame.K_h:
                         world.initialize_herbivore()
                     elif event.key == pygame.K_p:

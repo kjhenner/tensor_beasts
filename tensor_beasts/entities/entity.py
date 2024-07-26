@@ -31,6 +31,9 @@ class Entity(abc.ABC):
         else:
             self.world.td[self.__class__.__name__.lower(), feature_name] = value
 
+    def render_feature(self, feature_name: str) -> torch.Tensor:
+        return self.features[feature_name].render(self.get_feature(feature_name))
+
     @abc.abstractmethod
     def update(self, action: Optional[torch.Tensor] = None):
         pass

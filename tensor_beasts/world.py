@@ -96,7 +96,7 @@ class World:
 
     def update(self, action_td: Optional[TensorDict] = None):
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
-        # self.diffuse_scent()
+        self.diffuse_scent()
         for name, entity in self.entities.items():
             entity.update(action=action_td.get(name, None) if action_td is not None else None)
         self.step += 1
@@ -110,6 +110,14 @@ class World:
     def set_feature(self, entity_name: str, feature_name: str, value: torch.Tensor) -> None:
         entity = self.entities[entity_name]
         entity.set_feature(feature_name, value)
+
+    def render_feature(self, entity_name: str, feature_name: str) -> torch.Tensor:
+        print(f"entity_name: {entity_name}")
+        print(f"feature_name: {feature_name}")
+        if entity_name == "shared_features":
+            feature = self.shared_features[feature_name]
+            return feature.render(self.td.get(("shared_features", feature_name)))
+        return self.entities[entity_name].render_feature(feature_name)
 
     @property
     def observable(self):

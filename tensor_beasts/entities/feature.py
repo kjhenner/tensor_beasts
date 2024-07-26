@@ -29,8 +29,12 @@ class Feature(abc.ABC):
             cls._instances[cls] = super().__new__(cls)
         return cls._instances[cls]
 
-    def render(self, tensor_data: torch.Tensor):
-        pass
+    @staticmethod
+    def render(tensor_data: torch.Tensor):
+        if tensor_data.ndim == 2:
+            return tensor_data.unsqueeze(-1).expand(-1, -1, 3)
+        else:
+            return tensor_data
 
 
 class Energy(Feature):
