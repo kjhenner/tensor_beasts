@@ -1,18 +1,32 @@
+display:
+  screens:
+    - entity_name: terrain
+      feature_name: elevation
+    - entity_name: terrain
+      feature_name: water_level
+#    - entity_name: terrain
+#      feature_name: inflow
+#    - entity_name: terrain
+#      feature_name: outflow
+
 world:
   device: auto
   running: False
-  max_ups: 2
-  size: [8, 32]  # [Height, Width]
+#  max_ups: 2
+  max_ups: 0
+  size: [256, 256]  # [Height, Width]
 
   entities:
     terrain:
 #      rainfall_rate: 5.7e-06
-      rainfall_rate: 5.7e-04
-      flow_rate: 0.1
+      rainfall_rate: 5.7e-05
+      flow_rate: 0.0105
       evaporation_rate: 0.001
       elevation_max: 500
       elevation:
-        mode: range
+        mode: perlin
+        perlin:
+          scale: [4, 4]
         ramp:
           start: 0
           end: 500

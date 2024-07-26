@@ -96,7 +96,8 @@ class World:
 
     def update(self, action_td: Optional[TensorDict] = None):
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
-        self.diffuse_scent()
+        if "scent" in self.shared_features.keys():
+            self.diffuse_scent()
         for name, entity in self.entities.items():
             entity.update(action=action_td.get(name, None) if action_td is not None else None)
         self.step += 1

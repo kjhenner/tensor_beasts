@@ -9,7 +9,7 @@ world:
   device: auto
   running: False
   max_ups: 0
-  size: [1024, 1024]
+  size: [768, 768]
 
   entities:
 

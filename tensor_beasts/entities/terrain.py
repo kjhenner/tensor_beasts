@@ -16,11 +16,19 @@ class Elevation(Feature):
     dtype = torch.float32
     observable = True
 
+    @staticmethod
+    def render(tensor_data: torch.Tensor):
+        return tensor_data.unsqueeze(-1).expand(-1, -1, 3) * 255
+
 
 class WaterLevel(Feature):
     name = "water_level"
     dtype = torch.float32
     observable = True
+
+    @staticmethod
+    def render(tensor_data: torch.Tensor):
+        return tensor_data.unsqueeze(-1).expand(-1, -1, 3) / 20 * 255
 
 
 class Flow(Feature):
@@ -29,14 +37,19 @@ class Flow(Feature):
     shape = (8,)
 
 
-class Substrate(Feature):
-    name = "substrate"
-    dtype = torch.uint8
+class Inflow(Feature):
+    name = "inflow"
+    dtype = torch.float32
 
 
-class Rainfall(Feature):
-    name = "rainfall"
-    dtype = torch.uint8
+class Outflow(Feature):
+    name = "outflow"
+    dtype = torch.float32
+
+
+class Slopes(Feature):
+    name = "slopes"
+    dtype = torch.float32
 
 
 class Terrain(Entity):
@@ -44,8 +57,9 @@ class Terrain(Entity):
         Flow.name: Flow(),
         Elevation.name: Elevation(),
         WaterLevel.name: WaterLevel(),
-        Substrate.name: Substrate(),
-        Rainfall.name: Rainfall()
+        Inflow.name: Inflow(),
+        Outflow.name: Outflow(),
+        Slopes.name: Slopes()
     }
 
     def __init__(self, world: 'World', config: DictConfig):
@@ -55,7 +69,7 @@ class Terrain(Entity):
     def initialize(self):
         # Initialize elevation using Perlin noise
         if self.config.elevation.mode == "perlin":
-            elevation = perlin_noise(self.world.size, self.config.elevation.scale)
+            elevation = perlin_noise(self.world.size, self.config.elevation.perlin.scale)
         elif self.config.elevation.mode == "pyramid":
             elevation = pyramid_elevation(self.world.size, inverted=True)
         elif self.config.elevation.mode == "ramp":
@@ -72,8 +86,10 @@ class Terrain(Entity):
 
         # Initialize other features
         self.set_feature("water_level", torch.zeros_like(elevation))
+        self.set_feature("inflow", torch.zeros_like(elevation))
+        self.set_feature("outflow", torch.zeros_like(elevation))
+        self.set_feature("slopes", torch.zeros((*self.world.size, 8), dtype=torch.float32))
         self.set_feature("substrate", torch.randint(0, 5, self.world.size, dtype=torch.uint8))
-        self.set_feature("rainfall", torch.zeros_like(elevation, dtype=torch.uint8))
         self.set_feature("flow", torch.zeros((*self.world.size, 8), dtype=torch.float32))
 
     def d8_flow_direction(
@@ -99,15 +115,18 @@ class Terrain(Entity):
 
         slopes = torch.zeros((*total_height.shape, 8), dtype=torch.float32)
         for i, (dy, dx) in enumerate(kernels):
-            neighbor_height = torch.roll(total_height, shifts=(int(dy), int(dx)), dims=(0, 1))
+            neighbor_height = torch.roll(total_height, shifts=(int(-dy), int(-dx)), dims=(0, 1))
             distance = lru_distance(dx, dy) * 10  # Assuming 10m between cell centers
-            slopes[..., i] = (neighbor_height - total_height) / distance
+            slopes[..., i] = (total_height - neighbor_height) / distance
 
-        slopes += (torch.rand_like(slopes) - 0.5) * epsilon
+        slopes -= torch.rand_like(slopes) * epsilon
         slopes = slopes.clamp(min=0)
+
+        self.set_feature("slopes", slopes)
 
         # Calculate flow rates based on slopes
         flow = self.config.flow_rate * torch.sqrt(slopes)
+        self.set_feature("flow", flow)
 
         # Ensure total outflow doesn't exceed available water
         total_outflow = flow.sum(dim=-1, keepdim=True)
@@ -119,13 +138,12 @@ class Terrain(Entity):
 
         flow *= scaling_factor
 
-        return self.set_feature("flow", flow)
+        self.set_feature("flow", flow)
 
     def update(self, action: Optional[torch.Tensor] = None):
         self.update_rainfall()
         self.d8_flow_direction()
         self.update_water_level()
-        # Add more update steps as needed
 
     def update_water_level(self):
         water_level = self.get_feature("water_level")
@@ -133,6 +151,7 @@ class Terrain(Entity):
 
         # Calculate total outflow
         water_out = torch.sum(flow, dim=-1)
+        self.set_feature("outflow", water_out)
 
         water_in = torch.zeros_like(water_out)
 
@@ -140,6 +159,8 @@ class Terrain(Entity):
         shifts = generate_direction_kernels()
         for i, (dy, dx) in enumerate(shifts):
             water_in += torch.roll(flow[..., i], shifts=(int(dy), int(dx)), dims=(0, 1))
+        self.set_feature("inflow", water_in)
+
         self.set_feature("water_level", (water_level + water_in - water_out).clamp(0, 20))
 
     def update_rainfall(self) -> None:

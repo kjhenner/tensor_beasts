@@ -422,7 +422,7 @@ def perlin_noise(size, res):
     return torch.clamp(nxy + 0.5, 0, 1)
 
 
-def pyramid_elevation(size: tuple, inverted: False, max_height: float = 1) -> torch.Tensor:
+def pyramid_elevation(size: tuple, inverted: True, max_height: float = 1) -> torch.Tensor:
     """
     Create an inverted pyramid (cone) elevation map with the lowest point in the center.
 
@@ -458,14 +458,8 @@ def pyramid_elevation(size: tuple, inverted: False, max_height: float = 1) -> to
 
 
 def range_elevation(size) -> torch.Tensor:
-    step_size = 1.0 / (size[0] * size[1])
-    print(step_size)
     tensor = torch.arange(0, size[0] * size[1])
-    print(tensor)
     tensor = tensor.reshape(size)
-    for i in range(size[0]):
-        for j in range(size[1]):
-            print(f"(H: {i}, W: {j}): {tensor[i, j]}")
     return tensor
 
 
