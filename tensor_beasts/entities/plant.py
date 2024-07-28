@@ -8,11 +8,6 @@ from tensor_beasts.entities.feature import Feature, Energy, Scent
 from tensor_beasts.util import perlin_noise, generate_diffusion_kernel, torch_correlate_2d, safe_add, safe_sub
 
 
-class FertilityMap(Feature):
-    name = "fertility_map"
-    dtype = torch.float32
-
-
 class Seed(Feature):
     name = "seed"
     dtype = torch.uint8
@@ -28,7 +23,6 @@ class Plant(Entity):
     features = {
         Energy.name: Energy(),
         Scent.name: Scent(),
-        FertilityMap.name: FertilityMap(),
         Seed.name: Seed(),
         Crowding.name: Crowding()
     }
@@ -44,6 +38,7 @@ class Plant(Entity):
         self.growth_prob = config.growth_prob
         self.germination_prob = config.germination_prob
         self.seed_prob = config.seed_prob
+        self.water_key = tuple(config.water_key)
 
     def initialize(self):
         energy = self.get_feature("energy")
@@ -76,7 +71,7 @@ class Plant(Entity):
 
     def grow(self):
         energy = self.get_feature("energy")
-        fertility_map = self.get_feature("fertility_map")
+        fertility_map = self.world.td.get(self.water_key) / 20
         crowding = self.get_feature("crowding")
         rand = self.world.td.get("random")
 
@@ -93,6 +88,8 @@ class Plant(Entity):
             "energy",
             safe_add(energy, (energy > 0) * growth, inplace=False)
         )
+
+        safe_sub(energy, (rand < 3).type(torch.uint8), inplace=True)
 
     def seed(self):
         crowding = self.get_feature("crowding")

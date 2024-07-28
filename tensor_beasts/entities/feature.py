@@ -1,40 +1,63 @@
 import abc
-from dataclasses import dataclass
-from typing import Tuple
+from typing import Tuple, Set, Optional
 
 import torch
-
-
-@dataclass
-class FeatureDefinition:
-    name: str
-    dtype: torch.dtype
-    shape: Tuple[int, ...] = ()
-    observable: bool = False
-    use_world_size: bool = True
-    shared: bool = False
+from tensordict import TensorDict, NestedKey
 
 
 class Feature(abc.ABC):
-    _instances = {}
     name: str
-    dtype: torch.dtype
-    shape: Tuple[int, ...] = ()
-    observable: bool = False
-    use_world_size: bool = True
-    shared: bool = False
+    shape: Tuple[int, ...] = None
+    dtype: torch.dtype = None
+    default_tags: Set[str, ...] = None
 
-    def __new__(cls, *args, **kwargs):
-        if not cls.shared or cls not in cls._instances:
-            cls._instances[cls] = super().__new__(cls)
-        return cls._instances[cls]
+    def __init__(
+        self,
+        td: TensorDict,
+        key_prefix: NestedKey,
+        shape_prefix: Optional[Tuple[int, ...]] = tuple(),
+        additional_tags: Optional[Tuple[str, ...]] = None
+    ):
+        self.td = td
+        self.shape = shape_prefix + self.shape
+        self.key = key_prefix + (self.name,)
+        self.tags = set(additional_tags).update(self.default_tags or set())
 
-    @staticmethod
-    def render(tensor_data: torch.Tensor):
-        if tensor_data.ndim == 2:
-            return tensor_data.unsqueeze(-1).expand(-1, -1, 3)
+    def render(self):
+        if self.data.ndim == 2:
+            return self.data.unsqueeze(-1).expand(-1, -1, 3)
         else:
-            return tensor_data
+            return self.data
+
+    @property
+    def data(self):
+        return self.td.get(self.key)
+
+    @data.setter
+    def data(self, value):
+        self.td.set(self.key, value)
+
+
+class SharedFeature(Feature):
+    _count = 0
+
+    def __init__(
+        self,
+        td: TensorDict,
+        key_prefix: NestedKey = "shared_features",
+        additional_tags: Tuple[str, ...] = None
+    ):
+        super().__init__(td, key_prefix, shape, additional_tags)
+        self.idx = SharedFeature._count
+        SharedFeature._count += 1
+
+    @property
+    def data(self):
+        return self.td[self.key][self.idx]
+
+    @data.setter
+    def data(self, value):
+        self.td[self.key][self.idx] = value
 
 
 class Energy(Feature):

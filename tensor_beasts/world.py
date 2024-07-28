@@ -62,12 +62,12 @@ class World:
         for i, (name, entity) in enumerate(self.entities.items()):
             for f in entity.features.values():
                 if f.shared:
+                    count = shared_feature_counts[f.name]
                     if f.name not in self.td["shared_features"]:
-                        count = shared_feature_counts[f.name]
                         shape = (*self.size, *f.shape) if f.use_world_size else f.shape
                         shape = shape + (count,)
                         self.td.set(("shared_features", f.name), torch.zeros(*shape, dtype=f.dtype))
-                    entity.set_shared_feature_idx(f.name, i)
+                    entity.set_shared_feature_idx(f.name, count - 1)
 
     def custom_diffusion(self, scent, energy, energy_contribution=20.0, diffusion_steps=2, max_value=255):
         kernel = generate_diffusion_kernel(size=9, sigma=0.99)

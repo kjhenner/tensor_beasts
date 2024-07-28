@@ -1,5 +1,7 @@
 display:
   screens:
+    - entity_name: plant
+      feature_name: energy
     - entity_name: terrain
       feature_name: elevation
     - entity_name: terrain
@@ -23,11 +25,18 @@ world:
       flow_rate: 0.0105
       evaporation_rate: 0.001
       elevation_max: 500
+      surface_water_max: 10
+      soil_max: 10
+      soil_porosity: 0.4
       elevation:
-        mode: perlin
         perlin:
           scale: [4, 4]
         ramp:
-          start: 0
-          end: 500
 
+    plant:
+      initial_energy: 32
+      init_prob: 0.02
+      growth_prob: 0.5
+      germination_prob: 0.005
+      seed_prob: 0.05
+      water_key: [terrain, water_level]
