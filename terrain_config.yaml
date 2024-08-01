@@ -1,7 +1,7 @@
 display:
   screens:
-    - entity_name: plant
-      feature_name: energy
+#    - entity_name: plant
+#      feature_name: energy
     - entity_name: terrain
       feature_name: elevation
     - entity_name: terrain
@@ -13,8 +13,7 @@ display:
 
 world:
   device: auto
-  running: False
-#  max_ups: 2
+  running: True
   max_ups: 0
   size: [256, 256]  # [Height, Width]
 
@@ -32,11 +31,11 @@ world:
         perlin:
           scale: [4, 4]
         ramp:
-
-    plant:
-      initial_energy: 32
-      init_prob: 0.02
-      growth_prob: 0.5
-      germination_prob: 0.005
-      seed_prob: 0.05
-      water_key: [terrain, water_level]
+#
+#    plant:
+#      initial_energy: 32
+#      init_prob: 0.02
+#      growth_prob: 0.5
+#      germination_prob: 0.005
+#      seed_prob: 0.05
+#      water_key: [terrain, water_level]

@@ -1,6 +1,6 @@
 import math
 import random
-from typing import List
+from typing import List, Union, Tuple, SupportsAbs
 
 import torch
 import torch.nn.functional as F
@@ -345,19 +345,27 @@ def generate_plant_crowding_kernel():
 
 
 @lru_cache
-def generate_direction_kernels():
-    # Create kernels for the 8 directions
-    return torch.tensor([
-        [-1, -1], [-1, 0], [-1, 1],
-        [ 0, -1],          [ 0, 1],
-        [ 1, -1], [ 1, 0], [ 1, 1]
-    ], dtype=torch.float32)
+def generate_direction_kernels(eight_directions: bool = False):
+    if eight_directions:
+        # Create kernels for the 8 directions
+        return torch.tensor([
+            [-1, -1], [-1, 0], [-1, 1],
+            [ 0, -1],          [ 0, 1],
+            [ 1, -1], [ 1, 0], [ 1, 1]
+        ], dtype=torch.float32)
+    else:
+        # Create kernels for the 4 directions
+        return torch.tensor([
+                      [-1, 0],
+            [ 0, -1],          [ 0, 1],
+                      [ 1, 0]
+        ], dtype=torch.float32)
 
 
 @lru_cache
-def lru_distance(dx, dy):
-    """Cached distance function for efficient 8 direction distance calculation."""
-    return torch.sqrt(dx**2 + dy**2)
+def lru_distance(dx, dy, scale: float = 1.0):
+    """LRU distance function for efficient 8 direction distance calculation."""
+    return torch.sqrt(dx**2 + dy**2) * scale
 
 
 def fade(t):
@@ -499,3 +507,71 @@ def scale_tensor(input_tensor, floor=64):
     scaled_tensor = scaled_tensor.to(torch.uint8)
 
     return scaled_tensor
+
+
+def roll_with_padding(
+    input: torch.Tensor,
+    shifts: Union[int, Tuple[int, ...]],
+    dims: Union[int, Tuple[int, ...]],
+    padding_mode='constant',
+    padding_value=0
+):
+    if isinstance(shifts, int):
+        shifts = (shifts,)
+    if isinstance(dims, int):
+        dims = (dims,)
+
+    if len(shifts) != len(dims):
+        raise ValueError("Length of shifts must match length of dims")
+
+    # Padding starts from the last dimension, while the shifts for rolling start from the first dimension,
+    # so the padding indices need to be reversed here.
+    paddings = [0] * (input.dim() * 2)
+    for shift, dim in zip(shifts, dims):
+        pad_left = max(0, shift)
+        pad_right = max(0, -shift)
+        paddings[-2 * (dim + 1)] = pad_left
+        paddings[-2 * (dim + 1) + 1] = pad_right
+
+    if padding_mode == 'constant':
+        result = F.pad(input, paddings, mode='constant', value=padding_value)
+    elif padding_mode in ['reflect', 'replicate', 'circular']:
+        result = F.pad(input, paddings, mode=padding_mode)
+    else:
+        raise ValueError(f"Unsupported padding mode: {padding_mode}")
+
+    result = torch.roll(result, shifts, dims)
+
+    slices = [slice(None)] * input.dim()
+    for shift, dim in zip(shifts, dims):
+        if shift > 0:
+            slices[dim] = slice(shift, None)
+        elif shift < 0:
+            slices[dim] = slice(None, shift)
+
+    return result[tuple(slices)]
+
+
+def neighbors(
+    input: torch.Tensor,
+    padding_value: float = 0,
+    padding_mode: str = 'constant',
+    eight_direction: bool = False,
+    reverse: bool = False
+) -> torch.Tensor:
+    kernels = generate_direction_kernels(eight_direction)
+    if reverse:
+        kernels *= -1
+    if eight_direction:
+        neighbors_tensor = torch.zeros(input.shape + (8,), dtype=input.dtype)
+    else:
+        neighbors_tensor = torch.zeros(input.shape + (4,), dtype=input.dtype)
+    for i, (dy, dx) in enumerate(kernels):
+        neighbors_tensor[..., i] = roll_with_padding(
+            input,
+            shifts=(int(dy), int(dx)),
+            dims=(0, 1),
+            padding_mode=padding_mode,
+            padding_value=padding_value
+        )
+    return neighbors_tensor

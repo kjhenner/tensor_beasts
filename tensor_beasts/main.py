@@ -121,7 +121,7 @@ def main(config: DictConfig):
     def update_screen(step, world_stats):
         if not args.headless:
             screen_config = config.display.screens[current_screen_idx]
-            screen_data = world.render_feature(screen_config.entity_name, screen_config.feature_name)
+            screen_data = world.__getattr__(screen_config.entity_name).__getattribute__(screen_config.feature_name).render()
             display_manager.update_screen(screen_data)
         runtime_stats = {
             'current_screen': screen_config.feature_name if not args.headless else "(headless)",

@@ -4,29 +4,22 @@ import torch
 from omegaconf import ListConfig
 
 from tensor_beasts.entities import Entity
-from tensor_beasts.entities.feature import Feature, Scent, Energy
+from tensor_beasts.features.shared_features import Energy, Scent
+
+from tensor_beasts.features.animal_features import IdFeature, OffspringCount
 from tensor_beasts.util import (
     safe_sub, safe_add, safe_sum, directional_kernel_set, torch_correlate_2d,
     get_direction_matrix, pad_matrix
 )
 
 
-class IdFeature(Feature):
-    name = "id"
-    dtype = torch.int32
-
-
-class OffspringCount(Feature):
-    name = "offspring_count"
-    dtype = torch.int32
-
 
 class Animal(Entity):
     features = {
-        Energy.name: Energy(),
-        Scent.name: Scent(),
-        IdFeature.name: IdFeature(),
-        OffspringCount.name: OffspringCount()
+        Energy.name: Energy,
+        Scent.name: Scent,
+        IdFeature.name: IdFeature,
+        OffspringCount.name: OffspringCount
     }
 
     def __init__(
