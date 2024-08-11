@@ -11,10 +11,11 @@ class World:
     def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
         self.config = config
+        print(f"World config: {config}")
         self.td = TensorDict({}, batch_size=[])
         self.entity_dict: Dict[str, Entity] = {}
         for entity_name, entity_config in config.entities.items():
-            self.entity_dict[entity_name] = getattr(entities, entity_name.title())(self, entity_config)
+            self.entity_dict[entity_name] = getattr(entities, entity_name)(self, entity_config)
         for entity in self.entity_dict.values():
             entity.initialize()
         self.step = 0
@@ -53,7 +54,7 @@ class World:
         return normalized_reward
 
     def inspect(self, x: int, y: int):
-        for k, v in self.td.items(include_nested=True, leaves_only=True):
-            if v.shape[:2] == self.size:
-                # Tensors have shape H, W
-                print(k, v[y, x])
+        output = f"World at ({x}, {y})\n"
+        for entity in self.entity_dict.values():
+            output += entity.inspect(x, y)
+        print(output)

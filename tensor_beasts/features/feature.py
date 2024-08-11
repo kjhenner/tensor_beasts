@@ -3,6 +3,8 @@ from typing import Tuple, Set, Optional
 
 import torch
 from omegaconf import DictConfig, OmegaConf
+from rich.console import Console
+from rich.table import Table
 from tensordict import TensorDict, NestedKey
 
 OmegaConf.register_new_resolver(
@@ -42,6 +44,54 @@ class Feature(abc.ABC):
         else:
             return self.data
 
+    def inspect(self, x: int, y: int):
+        if self.data.ndim == 2:
+            return f"{self.name}: {self.data[y, x]}"
+        else:
+            data = self.data[y, x]
+            grid = [
+            f"{data[0]:.4f} {data[1]:.4f} {data[2]:.4f}",
+            f"{data[3]:.4f}        {data[4]:.4f}",
+            f"{data[5]:.4f} {data[6]:.4f} {data[7]:.4f}"
+            ]
+            return f"{self.name}:\n" + "\n".join(grid)
+
+    def inspect_3d(self, data):
+        if data.ndim != 3:
+            raise ValueError("This function expects a 3D tensor.")
+
+        rows, cols, depth = data.shape
+        console = Console()
+        table = Table(padding=0, collapse_padding=True)
+        table.show_header = False
+        table.show_lines = True
+
+        # Add columns for each element in the 3x3 grid
+        for _ in range(cols * 3):
+            table.add_column(justify="center", width=8)
+
+        for y in range(rows):
+            row_data = []
+            for x in range(cols):
+                cell_data = data[y, x]
+                if depth == 1:
+                    row_data.extend([f"{cell_data[0]:.4f}", "", ""])
+                else:
+                    for i in range(9):
+                        if i < 4:
+                            row_data.append(f"{cell_data[i]:.4f}")
+                        elif i == 4:
+                            row_data.append("")
+                        else:
+                            row_data.append(f"{cell_data[i-1]:.4f}")
+
+            # Add three rows for each y
+            for i in range(3):
+                table.add_row(*row_data[i::3])
+            table.add_section()
+
+        console.print(table)
+
     def update(self, step: int):
         pass
 
@@ -49,6 +99,7 @@ class Feature(abc.ABC):
         self.data = torch.zeros(self.shape, dtype=self.dtype)
 
     def initialize_data(self, *args, **kwargs):
+        print(f"Initializing {self.name} with args: {args} and kwargs: {kwargs}")
         self.zero_init()
 
     @property
@@ -57,7 +108,7 @@ class Feature(abc.ABC):
 
     @data.setter
     def data(self, value):
-        self.td.set(self.key, value)
+        self.td.set(self.key, value, inplace=True)
 
 
 class SharedFeature(Feature, abc.ABC):

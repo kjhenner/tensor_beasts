@@ -1,36 +1,42 @@
 display:
-  screens:
-#    - entity_name: plant
-#      feature_name: energy
-    - entity_name: terrain
-      feature_name: elevation
-    - entity_name: terrain
-      feature_name: water_level
-#    - entity_name: terrain
-#      feature_name: inflow
-#    - entity_name: terrain
-#      feature_name: outflow
+  color_displays:
+    - title: "elevation"
+      entity: Terrain
+      feature: elevation
+    - title: "surface_water_volume"
+      entity: Terrain
+      feature: surface_water_volume
+    - title: "soil_water_volume"
+      entity: Terrain
+      feature: soil_water_volume
+  text_displays:
+    - title: "elevation"
+      entity: Terrain
+      feature: elevation
+    - title: "surface_water_volume"
+      entity: Terrain
+      feature: surface_water_volume
+    - title: "soil_water_volume"
+      entity: Terrain
+      feature: soil_water_volume
 
 world:
   device: auto
   running: True
   max_ups: 0
-  size: [256, 256]  # [Height, Width]
+  size: [64, 64]  # [Height, Width]
 
   entities:
-    terrain:
-#      rainfall_rate: 5.7e-06
-      rainfall_rate: 5.7e-05
-      flow_rate: 0.0105
-      evaporation_rate: 0.001
-      elevation_max: 500
-      surface_water_max: 10
-      soil_max: 10
-      soil_porosity: 0.4
+    Terrain:
       elevation:
         perlin:
           scale: [4, 4]
         ramp:
+      surface_water_volume:
+        rainfall_rate: 5.7e-5
+      soil_water_volume:
+        infoltration_rate: 1e-5
+        flow_rate: 1e-5
 #
 #    plant:
 #      initial_energy: 32

@@ -1,5 +1,5 @@
 import abc
-from typing import Optional, Dict, Type, Union, ClassVar, get_type_hints
+from typing import Optional, Dict, Type, ClassVar
 import torch
 from omegaconf import DictConfig
 
@@ -47,6 +47,12 @@ class Entity(abc.ABC, metaclass=EntityMeta):
                     config=self.config.get(feature_name, None)
                 )
             setattr(self, feature_name, feature)
+
+    def inspect(self, x: int, y: int):
+        output = f"Entity: {self.__class__.__name__}"
+        for feature_name in self.__features__.keys():
+            output += "\n\t" + self.__getattribute__(feature_name).inspect(x, y)
+        return output
 
     def initialize(self):
         pass

@@ -1,6 +1,6 @@
 import math
 import random
-from typing import List, Union, Tuple, SupportsAbs
+from typing import List, Union, Tuple, SupportsAbs, Optional
 
 import torch
 import torch.nn.functional as F
@@ -8,6 +8,8 @@ from functools import lru_cache
 
 import time
 import statistics
+
+from tensordict import TensorDict, NestedKey
 
 # Initialize a dictionary to store function execution times
 execution_times = {}
@@ -345,21 +347,35 @@ def generate_plant_crowding_kernel():
 
 
 @lru_cache
-def generate_direction_kernels(eight_directions: bool = False):
-    if eight_directions:
-        # Create kernels for the 8 directions
-        return torch.tensor([
-            [-1, -1], [-1, 0], [-1, 1],
-            [ 0, -1],          [ 0, 1],
-            [ 1, -1], [ 1, 0], [ 1, 1]
-        ], dtype=torch.float32)
+def generate_direction_kernels(eight_directions: bool = False, include_center: bool = False):
+    if not include_center:
+        if eight_directions:
+            # Create kernels for the 8 directions
+            return torch.tensor([
+                [-1, -1], [-1, 0], [-1, 1],
+                [ 0, -1],          [ 0, 1],
+                [ 1, -1], [ 1, 0], [ 1, 1]
+            ], dtype=torch.float32)
+        else:
+            # Create kernels for the 4 directions
+            return torch.tensor([
+                          [-1, 0],
+                [ 0, -1],          [ 0, 1],
+                          [ 1, 0]
+            ], dtype=torch.float32)
     else:
-        # Create kernels for the 4 directions
-        return torch.tensor([
-                      [-1, 0],
-            [ 0, -1],          [ 0, 1],
-                      [ 1, 0]
-        ], dtype=torch.float32)
+        if eight_directions:
+            # Create kernels for the 8 directions
+            return torch.tensor([
+                [-1, -1], [-1, 0], [-1, 1],
+                [ 0, -1], [ 0, 0], [ 0, 1],
+                [ 1, -1], [ 1, 0], [ 1, 1]
+            ], dtype=torch.float32)
+        else:
+            # Create kernels for the 4 directions
+            return torch.tensor([
+                [-1, 0], [ 0, -1], [ 0, 0], [ 0, 1], [ 1, 0]
+            ], dtype=torch.float32)
 
 
 @lru_cache
@@ -513,8 +529,8 @@ def roll_with_padding(
     input: torch.Tensor,
     shifts: Union[int, Tuple[int, ...]],
     dims: Union[int, Tuple[int, ...]],
-    padding_mode='constant',
-    padding_value=0
+    padding_mode: str ='constant',
+    padding_value: float = 0.0
 ):
     if isinstance(shifts, int):
         shifts = (shifts,)
@@ -526,12 +542,14 @@ def roll_with_padding(
 
     # Padding starts from the last dimension, while the shifts for rolling start from the first dimension,
     # so the padding indices need to be reversed here.
-    paddings = [0] * (input.dim() * 2)
+    paddings = [0] * (len(dims) * 2)
     for shift, dim in zip(shifts, dims):
         pad_left = max(0, shift)
         pad_right = max(0, -shift)
         paddings[-2 * (dim + 1)] = pad_left
         paddings[-2 * (dim + 1) + 1] = pad_right
+
+    paddings += [0] * (input.dim() - len(dims) * 2)
 
     if padding_mode == 'constant':
         result = F.pad(input, paddings, mode='constant', value=padding_value)
@@ -560,7 +578,9 @@ def neighbors(
     reverse: bool = False
 ) -> torch.Tensor:
     kernels = generate_direction_kernels(eight_direction)
-    if reverse:
+    # If we roll the input tensor by the negative of the kernel direction, the resulting tensor will
+    # contain the neighbor in the direction of the kernel.
+    if not reverse:
         kernels *= -1
     if eight_direction:
         neighbors_tensor = torch.zeros(input.shape + (8,), dtype=input.dtype)
@@ -575,3 +595,290 @@ def neighbors(
             padding_value=padding_value
         )
     return neighbors_tensor
+
+
+def pad_and_view(td: TensorDict, key: NestedKey, pad: Tuple[int, ...], value: Union[int, float] = 0):
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    if padded_key not in td:
+        original = td[key]
+        padded = torch.nn.functional.pad(original, pad, mode='constant', value=value)
+        td[padded_key] = padded
+
+        slices = tuple(slice(pad[i * 2], -pad[i * 2 + 1]) for i in range(len(pad) // 2))
+        view = td[padded_key][slices]
+        td[key] = view
+    assert td[key].storage().data_ptr() == td[padded_key].storage().data_ptr()
+
+
+def unfold_neighbors(td: TensorDict, key: NestedKey, kernel_size: Tuple[int, ...], pad_value: float = 0.0):
+    neighbors_key = f"{key}_neighbors" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_neighbors",)
+    if neighbors_key in td:
+        return td[neighbors_key]
+    # Ensure we have a padded version
+    padding = (kernel_size[0] - 1) // 2
+    pad = (padding,) * (2 * td[key].dim())
+    pad_and_view(td, key, pad, pad_value)
+
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    x_padded = td[padded_key]
+    assert td[key].storage().data_ptr() == x_padded.storage().data_ptr()
+
+    H, W = td[key].shape
+    kH, kW = kernel_size
+
+    # Calculate strides
+    stride = x_padded.stride()
+
+    # Create the unfolded view
+    unfolded = torch.as_strided(x_padded,
+        size=(H, W, kH, kW),
+        stride=(stride[0], stride[1], stride[0], stride[1]))
+    assert unfolded.storage().data_ptr() == x_padded.storage().data_ptr()
+
+    # Store the result
+    td[neighbors_key] = unfolded
+    return unfolded
+
+
+def fold_neighbors(td: TensorDict, key: NestedKey):
+    inverse_neighbors_key = f"{key}_inverse" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_inverse",)
+    if inverse_neighbors_key in td:
+        return td[inverse_neighbors_key]
+
+    pad = (0, 0, 0, 0, 1, 1, 1, 1)
+    pad_and_view(td, key, pad, 0)
+
+    print(td[key])
+
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    x_padded = td[padded_key].contiguous()
+
+    H, W, kH, kW = x_padded.shape
+    H_orig, W_orig = H - 2, W - 2
+    assert kH == 3 and kW == 3, "This function assumes a 3x3 neighborhood"
+
+    # Calculate the correct strides
+    s0 = W * kH * kW
+    s1 = kH * kW
+
+    inverse_neighbors = torch.as_strided(
+        x_padded,
+        size=(H_orig, W_orig, 3, 3),
+        stride=(s0, s1, W, 1),
+        storage_offset=s0 + s1
+    )
+
+    td[inverse_neighbors_key] = inverse_neighbors
+    return inverse_neighbors
+
+
+def custom_filter_operation(input_tensor, kernels):
+    H, W = input_tensor.shape
+
+    # Pad the input tensor
+    padded = F.pad(input_tensor, (1, 1, 1, 1))
+
+    # Unfold the padded tensor to create patches
+    patches = padded.unfold(0, 3, 1).unfold(1, 3, 1)
+
+    # Reshape patches and kernels for batched matrix multiplication
+    patches = patches.reshape(H, W, 9)
+    kernels = kernels.reshape(H, W, 9)
+
+    # Perform batched matrix multiplication
+    result = torch.sum(patches * kernels, dim=-1)
+
+    return result
+
+
+def normalized_gradient_kernels(elevation_patches, sigma: float = 1e-9):
+    H, W, _, _ = elevation_patches.shape
+
+    # Calculate the center elevation for each patch
+    center_elevation = elevation_patches[:, :, 1, 1]
+
+    # Calculate the elevation difference
+    elevation_diff = center_elevation.unsqueeze(-1).unsqueeze(-1) - elevation_patches
+
+    # Create a distance matrix
+    distance_matrix = torch.tensor([
+        [1.414, 1.0, 1.414],
+        [1.0,   0.0, 1.0  ],
+        [1.414, 1.0, 1.414]
+    ])
+
+    # Adjust the elevation difference based on distance
+    adjusted_diff = elevation_diff / distance_matrix
+
+    # Set the center difference to 0
+    adjusted_diff[:, :, 1, 1] = 0
+
+    # Create flow kernels based on adjusted negative elevation difference
+    flow_kernels = adjusted_diff.clamp(min=0.0)
+
+    # Normalize the kernels
+    kernel_sums = flow_kernels.sum(dim=(-1, -2), keepdim=True) + sigma
+    normalized_kernels = flow_kernels / kernel_sums
+
+
+    return normalized_kernels
+
+
+def gauss_seidel_diffusion_step(density, k, iterations=10):
+    """
+    Perform a diffusion step using the modified equation and Gauss-Seidel method.
+
+    :param density: Current density field (2D tensor)
+    :param k: Diffusion constant
+    :param iterations: Number of Gauss-Seidel iterations
+    :return: Updated density field
+    """
+    new_density = density.clone()
+
+    # Create convolution kernel for neighboring cells
+    kernel = torch.tensor([[0, 1, 0],
+                           [1, 0, 1],
+                           [0, 1, 0]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+
+    if density.is_cuda:
+        kernel = kernel.cuda()
+
+    for _ in range(iterations):
+        # Compute sum of neighboring densities
+        neighbors_sum = torch.nn.functional.conv2d(
+            new_density.unsqueeze(0).unsqueeze(0),
+            kernel,
+            padding=1
+        ).squeeze()
+
+        # Apply the diffusion equation
+        new_density = (new_density + k * neighbors_sum / 4) / (1 + k)
+
+    return new_density
+
+
+def apply_kernels(td, input_key, kernels, k):
+    input_patches = unfold_neighbors(td, input_key, (3, 3))
+
+    # Apply the kernels through batched multiplication
+    updated = torch.einsum('ijkl, ijkl -> ij', input_patches, kernels)
+    td.set(input_key, updated, inplace=True)
+
+
+def flow_gradient(input, apply_distances=True):
+    device = input.device
+    H, W = input.shape
+    padded_input = torch.nn.functional.pad(
+        input.unsqueeze(0),
+        (1, 1, 1, 1),
+        mode="constant",
+        value=0
+    ).squeeze()
+    stride = padded_input.stride()
+    unfolded = torch.as_strided(
+        padded_input,
+        size=(H, W, 3, 3),
+        stride=(stride[0], stride[1], stride[0], stride[1])
+    )
+
+    expanded_input = input.reshape(H, W, 1, 1).expand(H, W, 3, 3)
+
+    if apply_distances:
+        euclidean_distance_matrix = torch.tensor(
+            [[1.4142, 1.0000, 1.4142],
+             [1.0000, 1.0000, 1.0000],
+             [1.4142, 1.0000, 1.4142]],
+            dtype=input.dtype,
+            device=device
+        )
+        gradient = (expanded_input - unfolded) / euclidean_distance_matrix.unsqueeze(0).unsqueeze(0)
+    else:
+        gradient = (expanded_input - unfolded)
+
+    gradient[0, :, 0, :] = 0
+    gradient[-1, :, -1, :] = 0
+    gradient[:, 0, :, 0] = 0
+    gradient[:, -1, :, -1] = 0
+    assert not torch.isnan(gradient).any()
+    assert not torch.isinf(gradient).any()
+
+    return gradient
+
+
+def flow(
+    input: torch.tensor,
+    gradient: Optional[torch.tensor] = None,
+    outflow: Optional[torch.tensor] = None,
+    flow_rate=0.1
+):
+    # 1. Get the normalized outlfow kernels from the slopes
+    # 2. Scale the normalized outflow kernels according to the flow rate
+    # 3. Divide available water among the outflow directions according to the scaled outflow kernels
+    # 4. Sum over dim=(-1, -2) to get the outflow for each cell
+    # 5. Validate that the sum of outflow for each cell is less than or equal to the available water
+    # 6. To get inflow, for each direction, roll the kernels in the opposite direction, then select the
+    #    outflow value corresponding to that direction.
+
+    # if gradient is not None and outflow is not None:
+    #     raise Warning("Both gradient and outflow are provided. Gradient will be ignored!.")
+
+    if not outflow:
+        assert gradient is not None, "Gradient must be provided if outflow is not provided"
+        outflow = gradient.clamp(min=0.0) * flow_rate
+
+    total_outflow = torch.sum(outflow, dim=(-1, -2))
+
+    condition = (total_outflow <= input).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+    adjusted_outflow = outflow * torch.nan_to_num(input / total_outflow, 0.0).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+
+    corrected_outflow = safe_where(
+        condition,
+        outflow,
+        adjusted_outflow
+    )
+
+    padded_corrected_outflow = torch.nn.functional.pad(
+        corrected_outflow,
+        (0, 0, 0, 0, 1, 1, 1, 1),
+        mode="constant", value=0
+    )
+
+    padded_input = torch.nn.functional.pad(
+        input.unsqueeze(0),
+        (1, 1, 1, 1),
+        mode="constant",
+        value=0
+    ).squeeze()
+    inflow = torch.zeros_like(padded_input)
+    for i in range(3):
+        for j in range(3):
+            if i == 1 and j == 1:
+                continue  # Skip the center cell
+            shifted_outflow = torch.roll(padded_corrected_outflow[:, :, i, j], shifts=(i-1, j-1), dims=(0, 1))
+            inflow.add_(shifted_outflow)
+
+    inflow = inflow[1:-1, 1:-1]
+
+    assert torch.isclose(torch.sum(inflow), torch.sum(corrected_outflow))
+
+    result = (input + inflow).subtract_(torch.sum(corrected_outflow, dim=(-1, -2)))
+    return result, inflow, corrected_outflow
+
+
+def safe_where(condition, x, y):
+    """
+    Custom implementation to replace torch.where without MPS issues.
+
+    Args:
+    condition (torch.Tensor): A boolean tensor
+    x (torch.Tensor): Tensor to use where condition is True
+    y (torch.Tensor): Tensor to use where condition is False
+
+    Returns:
+    torch.Tensor: A tensor with values from x where condition is True, and values from y where condition is False
+    """
+    condition = condition.to(torch.float32)
+    return condition * x + (1 - condition) * y
+
+
+

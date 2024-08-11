@@ -1,0 +1,31 @@
+display:
+  color_displays:
+    - title: "fluid_density"
+      entity: DiffusionToy
+      feature: fluid_density
+    - title: "elevation"
+      entity: DiffusionToy
+      feature: elevation
+  text_displays:
+    - title: "fluid_density"
+      entity: DiffusionToy
+      feature: fluid_density
+    - title: "elevation"
+      entity: DiffusionToy
+      feature: elevation
+
+world:
+  device: auto
+  running: True
+  max_ups: 0
+  size: [256, 256]  # [Height, Width]
+
+  entities:
+    DiffusionToy:
+      fluid_density:
+        flow_rate: 0.01
+        rainfall_rate: 5.7e-7
+      elevation:
+        perlin:
+          scale: [4, 4]
+        ramp:

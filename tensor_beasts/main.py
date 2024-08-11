@@ -116,18 +116,33 @@ def main(config: DictConfig):
             world_width=width,
             world_height=height
         )
-        current_screen_idx = 0
+    color_display_idx = 0
+    text_display_idx = 0
 
     def update_screen(step, world_stats):
-        if not args.headless:
-            screen_config = config.display.screens[current_screen_idx]
-            screen_data = world.__getattr__(screen_config.entity_name).__getattribute__(screen_config.feature_name).render()
-            display_manager.update_screen(screen_data)
         runtime_stats = {
-            'current_screen': screen_config.feature_name if not args.headless else "(headless)",
             'fps': clock.get_fps(),
             'step': step
         }
+        if not args.headless:
+            color_display_config = config.display.color_displays[color_display_idx]
+            color_data = world.__getattr__(color_display_config.entity).__getattribute__(color_display_config.feature).render()
+
+            if text_display_idx == 0:
+                text_display_title = "None"
+                text_data = None
+            else:
+                text_display_config = config.display.text_displays[text_display_idx - 1]
+                text_data = world.__getattr__(text_display_config.entity).__getattribute__(text_display_config.feature).data
+                text_display_title = text_display_config.title
+
+            runtime_stats.update({
+                'color_display': color_display_config.title,
+                'text_display': text_display_title
+            })
+
+            display_manager.update_screen(color_data, text_data)
+
         runtime_stats.update(world_stats)
         runtime_stats.update(get_mean_execution_times())
         print(json.dumps(runtime_stats, indent=4))
@@ -165,7 +180,11 @@ def main(config: DictConfig):
                     elif event.key == pygame.K_DOWN:
                         display_manager.pan(0, -PAN_SPEED)
                     elif event.key == pygame.K_n:
-                        current_screen_idx = (current_screen_idx + 1) % len(config.display.screens)
+                        color_display_idx = (color_display_idx + 1) % len(config.display.color_displays)
+                        world_thread.update_screen_cb(world.step, {})
+                    elif event.key == pygame.K_m:
+                        text_display_idx = (text_display_idx + 1) % (len(config.display.text_displays) + 1)
+                        world_thread.update_screen_cb(world.step, {})
                     elif event.key == pygame.K_h:
                         world.initialize_herbivore()
                     elif event.key == pygame.K_p:
