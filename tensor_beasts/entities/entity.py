@@ -29,23 +29,17 @@ class Entity(abc.ABC, metaclass=EntityMeta):
 
     def __init__(self, world: 'World', config: DictConfig):
         self.world = world
+        self.td = world.td
         self.config = self.default_config
         self.config.update(config)
 
         for feature_name, feature_class in self.__features__.items():
-            if issubclass(feature_class, SharedFeature):
-                feature = feature_class(
-                    td=self.world.td,
-                    shape_prefix=self.world.config.size,
-                    config=self.config.get(feature_name, None)
-                )
-            else:
-                feature = feature_class(
-                    td=self.world.td,
-                    key_prefix=(self.__class__.__name__.lower(),),
-                    shape_prefix=self.world.config.size,
-                    config=self.config.get(feature_name, None)
-                )
+            feature = feature_class(
+                td=self.world.td,
+                key_prefix=(self.__class__.__name__.lower(),),
+                shape_prefix=self.world.config.size,
+                config=self.config.get(feature_name, None)
+            )
             setattr(self, feature_name, feature)
 
     def inspect(self, x: int, y: int):

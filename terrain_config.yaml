@@ -1,30 +1,53 @@
 display:
   color_displays:
-    - title: "elevation"
-      entity: Terrain
-      feature: elevation
-    - title: "surface_water_volume"
-      entity: Terrain
-      feature: surface_water_volume
-    - title: "soil_water_volume"
-      entity: Terrain
-      feature: soil_water_volume
-  text_displays:
-    - title: "elevation"
-      entity: Terrain
-      feature: elevation
-    - title: "surface_water_volume"
-      entity: Terrain
-      feature: surface_water_volume
-    - title: "soil_water_volume"
-      entity: Terrain
-      feature: soil_water_volume
+    - title: "layers"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,elevation}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [127, 127, 127]
+          input_range: [0, 1]
+        - key: "${key:terrain,surface_water_volume}"
+          threshold: 0.5
+          color_min: [0, 0, 128]
+          color_max: [0, 0, 255]
+          input_range: [0, 20]
+        - key: "${key:plant,energy}"
+          threshold: 1
+          color_min: [0, 32, 16]
+          color_max: [0, 255, 127]
+          input_range: [0, 255]
+    - title: "condition"
+      fn_name: "layered"
+      layers:
+        - key: "${key:plant,soil_sat_coeff}"
+          threshold: -3
+          color_min: [255, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [-2.5, 2.5]
+    - title: "available_sat"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,soil_water_saturation}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [255, 255, 255]
+          input_range: [0, 1]
+    - title: "available_sat"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,surface_water_volume}"
+          threshold: 0.0
+          color_min: [0, 0, 0]
+          color_max: [255, 255, 255]
+          input_range: [0, 0.5]
 
 world:
   device: auto
   running: True
   max_ups: 0
-  size: [64, 64]  # [Height, Width]
+  size: [512, 512]  # [Height, Width]
 
   entities:
     Terrain:
@@ -34,14 +57,17 @@ world:
         ramp:
       surface_water_volume:
         rainfall_rate: 5.7e-5
+        flow_rate: 0.2
       soil_water_volume:
-        infoltration_rate: 1e-5
-        flow_rate: 1e-5
-#
-#    plant:
-#      initial_energy: 32
-#      init_prob: 0.02
-#      growth_prob: 0.5
-#      germination_prob: 0.005
-#      seed_prob: 0.05
-#      water_key: [terrain, water_level]
+        field_capacity: 0.55
+        infiltration_rate: 2e-5
+        flow_rate: 0.1
+      soil_volume:
+        init_scale: 5.0
+
+    Plant:
+      initial_energy: 32
+      init_prob: 0.02
+      growth_prob: 10.0
+      germination_prob: 0.005
+      seed_prob: 0.05

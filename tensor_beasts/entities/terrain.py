@@ -27,4 +27,5 @@ class Terrain(Entity):
 
     def update(self, action: Optional[torch.Tensor] = None):
         self.surface_water_volume.update(0)
+        self.soil_volume.update(0)
         self.soil_water_volume.update(0)

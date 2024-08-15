@@ -6,15 +6,26 @@ from omegaconf import DictConfig
 from tensor_beasts.entities import Entity
 from tensor_beasts.features.shared_features import Energy, Scent
 from tensor_beasts.features.plant_features import Seed, Crowding
-from tensor_beasts.util import generate_diffusion_kernel, torch_correlate_2d, safe_add, safe_sub
+from tensor_beasts.util import safe_add, safe_sub
 
 
 class Plant(Entity):
+    # t/ha/y * 2e-5 = kg/10m^2/m
 
     energy: Energy
     scent: Scent
     seed: Seed
     crowding: Crowding
+    default_config = DictConfig({
+        "energy_key": "${key:plant,energy}",
+        "soil_water_volume_key": "${key:terrain,soil_water_volume}",
+        "soil_volume_key": "${key:terrain,soil_volume}",
+        "soil_sat_coeff_key": "${key:plant,soil_sat_coeff}",
+        "soil_porosity": 0.4,
+        "ideal_growth_rate": 4e-4,  # ~200 t/ha/y
+        "ideal_soil_saturation": 0.65,
+        "soil_saturation_tolerance": 0.2,
+    })
 
     def __init__(
         self,
@@ -22,73 +33,43 @@ class Plant(Entity):
         config: DictConfig,
     ):
         super().__init__(world, config)
-        self.initial_energy = config.initial_energy
-        self.init_prob = config.init_prob
-        self.growth_prob = config.growth_prob
-        self.germination_prob = config.germination_prob
-        self.seed_prob = config.seed_prob
-        self.water_key = tuple(config.water_key)
 
     def initialize(self):
-        self.seed.zero_init()
-
-        self.energy.zero_init()
+        self.seed.initialize_data()
+        self.crowding.initialize_data()
+        self.energy.initialize_data()
         self.energy.data = ~ torch.randint(
             0,
-            int(self.init_prob * 255),
+            int(self.config.init_prob * 255),
             self.energy.data.shape,
             dtype=torch.uint8
-        ).type(torch.bool) * self.initial_energy
-
-    def update_crowding(self):
-        energy = self.energy.data
-        kernel = generate_diffusion_kernel(size=5)
-        crowding = torch.clamp(
-            torch_correlate_2d(energy.bool().type(torch.float32), kernel, mode="constant"),
-            0,
-            1
-        )
-        self.crowding.data = crowding
-
-    def grow(self):
-        energy = self.energy.data
-        fertility_map = self.world.td.get(self.water_key) / 20
-        crowding = self.crowding.data
-        rand = self.world.td.get("random")
-
-        # Calculate growth probability based on fertility
-        growth_prob = self.growth_prob * fertility_map ** 2
-        # Combine growth probability with crowding factor
-        combined_prob = growth_prob * (1 - crowding)
-
-        # Generate growth mask
-        growth = rand < (combined_prob * 255)
-
-        # Apply growth to existing plants
-        self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
-
-        safe_sub(energy, (rand < 3).type(torch.uint8), inplace=True)
-
-    def seed(self):
-        crowding = self.crowding.data
-        seed = self.seed.data
-        rand = self.world.td.get("random")
-        self.seed.data = seed | (rand < self.seed_prob * crowding ** 2 * 255).type(seed.dtype)
-
-    def germinate(self):
-        crowding = self.crowding.data
-        energy = self.energy.data
-        seed = self.seed.data
-        rand = self.world.td.get("random")
-
-        seed_germination = (
-            seed & ~(energy > 0) & (rand < ((1 - crowding) ** 2 * self.germination_prob * 255))
-        ).type(torch.uint8)
-        safe_add(energy, seed_germination)
-        safe_sub(seed, seed_germination)
+        ).type(torch.bool) * self.config.initial_energy
 
     def update(self, action: Optional[torch.Tensor] = None):
-        self.update_crowding()
-        self.grow()
-        self.seed()
-        self.germinate()
+        self.crowding.update(0)
+        self.seed.update(0)
+
+        energy = self.energy.data
+        soil_water_volume = self.td.get(self.config.soil_water_volume_key)
+        soil_volume = self.td.get(self.config.soil_volume_key)
+        soil_saturation = torch.nan_to_num(soil_water_volume / (soil_volume * self.config.soil_porosity), 1.0, 1.0, 1.0)
+
+        soil_sat_coeff = 1 - (
+            torch.abs(
+                soil_saturation - self.config.ideal_soil_saturation
+            ) / self.config.soil_saturation_tolerance
+        )
+        self.td.set(self.config.soil_sat_coeff_key, soil_sat_coeff, inplace=True)
+
+        condition = (
+            self.config.ideal_growth_rate * soil_sat_coeff
+        ).type(torch.float32)
+
+        death_prob = torch.abs(torch.clamp(condition, max=0))
+        growth_prob = torch.clamp(condition, min=0)
+
+        growth = torch.rand(energy.shape) < growth_prob
+        death = torch.rand(energy.shape) < death_prob
+
+        self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
+        self.energy.data *= ~ death

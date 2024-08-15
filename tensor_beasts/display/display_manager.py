@@ -251,10 +251,6 @@ class DisplayManager:
         x = (x - self.offset[0]) * (2 / visible_width)
         y = (y + self.offset[1]) * (2 / visible_height)
 
-        # # Apply zoom and offset
-        # x = (x - self.offset[0]) * (2 / visible_width)
-        # y = (y + self.offset[1]) * (2 / visible_height)
-
         # Convert world coordinates to screen coordinates
         screen_x = int((x + 1) * self.window_width / 2)
         screen_y = int((1 - y) * self.window_height / 2)  # Flip y-coordinate for screen

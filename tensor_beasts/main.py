@@ -9,7 +9,9 @@ from omegaconf import DictConfig, OmegaConf
 from pygame import mouse
 import sys
 
-from tensor_beasts.display_manager import DisplayManager
+from tensor_beasts.display.display_manager import DisplayManager
+
+from tensor_beasts.display.rendering import dispatch_render
 from tensor_beasts.util import get_mean_execution_times
 from tensor_beasts.world import World
 
@@ -125,23 +127,14 @@ def main(config: DictConfig):
             'step': step
         }
         if not args.headless:
-            color_display_config = config.display.color_displays[color_display_idx]
-            color_data = world.__getattr__(color_display_config.entity).__getattribute__(color_display_config.feature).render()
-
-            if text_display_idx == 0:
-                text_display_title = "None"
-                text_data = None
-            else:
-                text_display_config = config.display.text_displays[text_display_idx - 1]
-                text_data = world.__getattr__(text_display_config.entity).__getattribute__(text_display_config.feature).data
-                text_display_title = text_display_config.title
+            render_config = config.display.color_displays[color_display_idx]
+            color_data = dispatch_render(world.td, render_config)
 
             runtime_stats.update({
-                'color_display': color_display_config.title,
-                'text_display': text_display_title
+                'display': render_config.title
             })
 
-            display_manager.update_screen(color_data, text_data)
+            display_manager.update_screen(color_data)
 
         runtime_stats.update(world_stats)
         runtime_stats.update(get_mean_execution_times())

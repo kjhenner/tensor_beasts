@@ -113,42 +113,52 @@ class Feature(abc.ABC):
 
 class SharedFeature(Feature, abc.ABC):
     _count = 0
-    _key_prefix = None
     _is_parent = False
+    _shared_key_prefix = None
+    _shared_key = None
 
     def __init__(
         self,
         td: TensorDict,
         is_parent: bool = False,
-        key_prefix: NestedKey = "shared_features",
+        key_prefix: NestedKey = None,
         shape_prefix: Tuple[int, ...] = tuple(),
         additional_tags: Tuple[str, ...] = None,
-        config: Optional[DictConfig] = None
+        config: Optional[DictConfig] = None,
+        shared_key_prefix: NestedKey = "shared_features"
     ):
         super().__init__(td, key_prefix, shape_prefix, additional_tags, config)
+        if shared_key_prefix not in td:
+            td[shared_key_prefix] = TensorDict({}, batch_size=[])
+
         self._is_parent = is_parent
         if not self._is_parent:
             self.idx = type(self)._count
             type(self)._count += 1
-        if not self._key_prefix:
-            self._key_prefix = key_prefix
+        if not self._shared_key_prefix:
+            self._shared_key_prefix = shared_key_prefix
         else:
-            assert self._key_prefix == key_prefix, "SharedFeature key_prefix must be the same for all instances."
+            assert self._shared_key_prefix == shared_key_prefix, "SharedFeature shared_key_prefix must be the same for all instances."
+        if not self._shared_key:
+            self._shared_key = (*shared_key_prefix, self.name) if isinstance(shared_key_prefix, tuple) else (shared_key_prefix, self.name)
 
     def zero_init(self):
+        self.shape = self.shape + (type(self)._count,)
+        if self._shared_key not in self.td:
+            self.td[self._shared_key] = torch.zeros(self.shape, dtype=self.dtype)
         if self.key not in self.td:
-            self.td[self.key] = torch.zeros(self.shape, dtype=self.dtype)
-        self.data = torch.zeros(self.shape[:-1], dtype=self.dtype)
+            self.td[self.key] = self.td[self._shared_key][:, :, self.idx]
+        self.data = torch.zeros_like(self.td[self.key])
 
     @property
     def data(self):
         if self._is_parent:
-            return self.td[self.key]
-        return self.td[self.key][self.idx]
+            return self.td[self._shared_key]
+        return self.td[self.key]
 
     @data.setter
     def data(self, value):
         if self._is_parent:
-            self.td[self.key] = value
+            self.td.set(self._shared_key, value, inplace=True)
         else:
-            self.td[self.key][self.idx] = value
+            self.td.set(self.key, value, inplace=True)

@@ -184,7 +184,7 @@ def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     Mimic scipy.ndimage.correlate using PyTorch's conv2d.
 
     Parameters:
-    - input: 2D torch tensor, the input image.
+    - input: 2D torch tensor, the input.
     - kernel: 2D torch tensor, the kernel for correlation.
     - mode: str, boundary mode (only 'constant' mode implemented similar to scipy.ndimage.correlate).
     - cval: float, value to fill pad when mode is 'constant'.
@@ -272,7 +272,6 @@ def generate_maze(size: int):
 
         for dx, dy in directions:
             nx, ny = x + dx, y + dy
-            print(nx, ny)
             if (nx >= 0) and (ny >= 0) and (nx < size) and (ny < size) and maze[2*nx, 2*ny] == 1:
                 maze[2*nx, 2*ny] = 0
                 maze[2*x+dx, 2*y+dy] = 0
@@ -648,8 +647,6 @@ def fold_neighbors(td: TensorDict, key: NestedKey):
     pad = (0, 0, 0, 0, 1, 1, 1, 1)
     pad_and_view(td, key, pad, 0)
 
-    print(td[key])
-
     padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
     x_padded = td[padded_key].contiguous()
 
@@ -822,7 +819,7 @@ def flow(
     # if gradient is not None and outflow is not None:
     #     raise Warning("Both gradient and outflow are provided. Gradient will be ignored!.")
 
-    if not outflow:
+    if outflow is None:
         assert gradient is not None, "Gradient must be provided if outflow is not provided"
         outflow = gradient.clamp(min=0.0) * flow_rate
 
