@@ -22,14 +22,11 @@ def test_surface_flow(terrain_entity):
     slope = terrain_entity.slopes
     surface_water = terrain_entity.surface_water_volume
     surface_water.data[1, 1] = 10
-    print(surface_water.data)
     outflow = terrain_entity.surface_outflow
     slope.update(0)
     outflow.update(0)
-    print(outflow.data)
 
     surface_water.update(0)
-    print(surface_water.data)
 
     assert torch.isclose(torch.sum(surface_water.data[:2, ...]), torch.tensor(10.0))
     assert surface_water.data[1, 1] < 10
@@ -44,15 +41,12 @@ def test_subsurface_flow(terrain_entity):
     subsurface_water = terrain_entity.soil_water_volume
     subsurface_water.data[1, 1] = 10
     subsurface_water.data[2, 1] = 10
-    print(subsurface_water.data)
     saturation_gradient.update(0)
     outflow = terrain_entity.subsurface_outflow
     slope.update(0)
     outflow.update(0)
-    print(outflow.data)
 
     subsurface_water.update(0)
-    print(subsurface_water.data)
 
     assert torch.isclose(torch.sum(subsurface_water.data + surface_water.data), torch.tensor(10.0))
     assert subsurface_water.data[1, 1] < 10

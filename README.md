@@ -73,3 +73,9 @@ Once it's running, there are a few commands you can use:
 - [ ] Refactor things to identify repeated calculations.
 - [ ] Can move and eat be batched?
 - [ ] Don't update inactive screens.
+
+
+8/15:
+- [ ] Support dynamic screen sizes.
+- [ ] Slice view.
+- [ ] Control panels for live param changes.

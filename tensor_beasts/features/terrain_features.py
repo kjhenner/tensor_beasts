@@ -24,7 +24,7 @@ class Elevation(Feature):
         for key, config in self.config.items():
             # Initialize elevation using Perlin noise
             if key == "perlin":
-                self.data *= perlin_noise(self.shape, self.config.perlin.scale)
+                self.data *= perlin_noise(self.shape, self.config.perlin.scale, 4)
             elif key == "pyramid":
                 self.data *= pyramid_elevation(self.shape, inverted=True)
             elif key == "ramp":
@@ -63,8 +63,8 @@ class SoilVolume(Feature):
         "elevation_key": "${key:terrain,elevation}",
         "elevation_scale": 100,
         "surface_outflow_key": "${key:terrain,surface_outflow}",
-        "erosion_rate": 0.1,
-        "init_scale": 10.0,
+        "erosion_rate": 1e-3,
+        "init_scale": 8.0,
         "epsilon": 1e-8
     })
 
@@ -80,12 +80,12 @@ class SoilVolume(Feature):
 
     def update(self, step: int):
         surface_outflow = self.td.get(self.config.surface_outflow_key)
-        self.data, inflow, outflow = flow(
+        result, inflow, outflow = flow(
             self.data,
             outflow=surface_outflow,
             flow_rate=self.config.erosion_rate
         )
-        self.data = torch.clamp(self.data, min=self.config.epsilon)
+        self.data = torch.clamp(result, min=self.config.epsilon)
 
 
 class SoilWaterVolume(Feature):
@@ -100,13 +100,13 @@ class SoilWaterVolume(Feature):
         "surface_water_volume_key": "${key:terrain,surface_water_volume}",
         "soil_water_saturation_key": "${key:terrain,soil_water_saturation}",
         "infiltation_rate": 0.001,
-        "flow_rate": 0.001,
-        "saturation_gradient_coeff": 0.3,
+        "flow_rate": 0.1,
+        "saturation_gradient_coeff": 0.2,
         "evaporation_rate": 1e-5
     })
 
     def initialize_data(self):
-        self.data = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity * self.config.field_capacity
+        self.data = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity * self.config.field_capacity * 0.5
 
     def render(self) -> torch.Tensor:
         soil_capacity = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity
@@ -118,7 +118,6 @@ class SoilWaterVolume(Feature):
         original_total = self.data.sum() + surface_water_volume.sum()
 
         soil_capacity = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity
-        soil_saturation = torch.nan_to_num(self.data / soil_capacity, 1.0, 1.0, 1.0)
 
         field_capacity = soil_capacity * self.config.field_capacity
 
@@ -136,13 +135,11 @@ class SoilWaterVolume(Feature):
 
         # Calculate excess water above field capacity
         excess_water = torch.clamp(self.data - field_capacity, min=0)
-        available_water = excess_water
-        self.td.set(self.config.soil_water_saturation_key, torch.nan_to_num(available_water / soil_capacity), inplace=True)
 
         # Water flows from high to low and from high availability to low
         gradient = flow_gradient(
             (1 - self.config.saturation_gradient_coeff) * elevation
-            + self.config.saturation_gradient_coeff * torch.nan_to_num(available_water / soil_capacity)
+            + self.config.saturation_gradient_coeff * torch.nan_to_num(excess_water / soil_capacity)
         )
 
         self.data, inflow, outflow = flow(
@@ -153,8 +150,12 @@ class SoilWaterVolume(Feature):
 
         # Excess water flows back to surface
         surface_water_volume += torch.clamp(self.data - soil_capacity, min=0)
-        self.data = torch.relu(torch.clamp(self.data, max=soil_capacity))
+        self.data = torch.clamp(torch.clamp(self.data, max=soil_capacity), min=0)
         soil_saturation = torch.nan_to_num(self.data / soil_capacity, 1.0, 1.0, 1.0)
+        self.td.set(self.config.soil_water_saturation_key, soil_saturation, inplace=True)
+        print(gradient.sum(dim=(-1, -2)).max())
+        print(gradient.shape)
+        # self.td.set(self.config.soil_water_saturation_key, gradient.sum(dim=(-1, -2)) * 150, inplace=True)
         assert torch.isclose(surface_water_volume.sum() + self.data.sum(), original_total)
 
         evaporation = self.config.evaporation_rate * torch.sigmoid(soil_saturation + 1)
@@ -173,6 +174,8 @@ class SurfaceWaterVolume(Feature):
         "elevation_scale": 100,
         "rainfall_rate": 5.7e-08,
         "flow_rate": 0.1,
+        "relaxation_factor": 0.5,
+        "steps": 1
     })
 
     def render(self) -> torch.Tensor:
@@ -180,13 +183,16 @@ class SurfaceWaterVolume(Feature):
 
     def update(self, step: int):
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale
-        gradient = flow_gradient(self.data + elevation)
-        self.data, inflow, outflow = flow(
-            self.data,
-            gradient=gradient,
-            flow_rate=self.config.flow_rate
-        )
+        for _ in range(self.config.steps):
+            gradient = flow_gradient(self.data + elevation)
+            self.data, inflow, outflow = flow(
+                self.data,
+                gradient=gradient,
+                flow_rate=self.config.flow_rate,
+                relaxation_factor=self.config.relaxation_factor
+            )
         self.td.set(self.config.outflow_key, outflow)
-        self.data += self.config.rainfall_rate
+        if step % 1000 < 500:
+            self.data += self.config.rainfall_rate
         print(f"Surface water min and max: {torch.min(self.data)}, {torch.max(self.data)}")
         print(f"Rainfall total: {torch.sum(torch.ones_like(self.data) * self.config.rainfall_rate)}")

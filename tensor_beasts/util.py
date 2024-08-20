@@ -2,6 +2,7 @@ import math
 import random
 from typing import List, Union, Tuple, SupportsAbs, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from functools import lru_cache
@@ -400,49 +401,61 @@ def gradient(h, x, y):
     return g[..., 0] * x + g[..., 1] * y
 
 
-def perlin_noise(size, res):
-    delta = (res[0] / size[0], res[1] / size[1])
+def perlin_noise(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
+    def generate_noise(x, y, res):
+        grid0_x, grid0_y = x.to(torch.int32), y.to(torch.int32)
+        grid1_x, grid1_y = grid0_x + 1, grid0_y + 1
 
-    grid = torch.stack(torch.meshgrid(
-        torch.arange(0, res[0], delta[0], dtype=torch.float32),
-        torch.arange(0, res[1], delta[1], dtype=torch.float32)
-    ), dim=-1)
+        random_grid = torch.rand((res[0] + 1, res[1] + 1, 2), dtype=torch.float32) * 2 - 1
 
-    grid0 = grid.to(torch.int32)
-    grid1 = grid0 + 1
+        def gradient(hash, x, y):
+            return hash[..., 0] * x + hash[..., 1] * y
 
-    # Generate random gradients between -1 and 1
-    random_grid = torch.rand((res[0] + 1, res[1] + 1, 2), dtype=torch.float32) * 2 - 1
+        dot00 = gradient(random_grid[grid0_x, grid0_y], x - grid0_x, y - grid0_y)
+        dot01 = gradient(random_grid[grid0_x, grid1_y], x - grid0_x, y - grid1_y)
+        dot10 = gradient(random_grid[grid1_x, grid0_y], x - grid1_x, y - grid0_y)
+        dot11 = gradient(random_grid[grid1_x, grid1_y], x - grid1_x, y - grid1_y)
 
-    def gradient(hash, x, y):
-        return hash[..., 0] * x + hash[..., 1] * y
+        def fade(t):
+            return 6 * t**5 - 15 * t**4 + 10 * t**3
 
-    dot00 = gradient(
-        random_grid[grid0[..., 0], grid0[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid0[..., 1]
-    )
-    dot01 = gradient(
-        random_grid[grid0[..., 0], grid1[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid1[..., 1]
-    )
-    dot10 = gradient(
-        random_grid[grid1[..., 0], grid0[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid0[..., 1]
-    )
-    dot11 = gradient(
-        random_grid[grid1[..., 0], grid1[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid1[..., 1]
-    )
+        u = fade(x - grid0_x)
+        v = fade(y - grid0_y)
 
-    def fade(t):
-        return 6 * t**5 - 15 * t**4 + 10 * t**3
+        def lerp(a, b, t):
+            return a + t * (b - a)
 
-    u = fade(grid - grid0)
+        nx0 = lerp(dot00, dot10, u)
+        nx1 = lerp(dot01, dot11, u)
+        nxy = lerp(nx0, nx1, v)
 
-    def lerp(a, b, t):
-        return a + t * (b - a)
+        return nxy
 
-    nx0 = lerp(dot00, dot10, u[..., 0])
-    nx1 = lerp(dot01, dot11, u[..., 0])
-    nxy = lerp(nx0, nx1, u[..., 1])
+    def domain_warp(x, y, warp_amount=0.1):
+        wx = x + warp_amount * generate_noise(x, y, (res[0]//2, res[1]//2))
+        wy = y + warp_amount * generate_noise(x, y, (res[0]//2, res[1]//2))
+        return wx, wy
 
-    return torch.clamp(nxy + 0.5, 0, 1)
+    base_x = torch.linspace(0, res[0], size[0])
+    base_y = torch.linspace(0, res[1], size[1])
+    x, y = torch.meshgrid(base_x, base_y, indexing='ij')
+
+    # Apply domain warping
+    x, y = domain_warp(x, y)
+
+    # Generate fractal Brownian motion (fBm)
+    noise = torch.zeros(size)
+    frequency = 1
+    amplitude = 1
+    for _ in range(octaves):
+        noise += amplitude * generate_noise(x * frequency, y * frequency, (int(res[0]*frequency), int(res[1]*frequency)))
+        frequency *= lacunarity
+        amplitude *= persistence
+
+    # Normalize the noise
+    noise = (noise - noise.min()) / (noise.max() - noise.min())
+
+    return noise
 
 
 def pyramid_elevation(size: tuple, inverted: True, max_height: float = 1) -> torch.Tensor:
@@ -688,76 +701,10 @@ def custom_filter_operation(input_tensor, kernels):
     return result
 
 
-def normalized_gradient_kernels(elevation_patches, sigma: float = 1e-9):
-    H, W, _, _ = elevation_patches.shape
-
-    # Calculate the center elevation for each patch
-    center_elevation = elevation_patches[:, :, 1, 1]
-
-    # Calculate the elevation difference
-    elevation_diff = center_elevation.unsqueeze(-1).unsqueeze(-1) - elevation_patches
-
-    # Create a distance matrix
-    distance_matrix = torch.tensor([
-        [1.414, 1.0, 1.414],
-        [1.0,   0.0, 1.0  ],
-        [1.414, 1.0, 1.414]
-    ])
-
-    # Adjust the elevation difference based on distance
-    adjusted_diff = elevation_diff / distance_matrix
-
-    # Set the center difference to 0
-    adjusted_diff[:, :, 1, 1] = 0
-
-    # Create flow kernels based on adjusted negative elevation difference
-    flow_kernels = adjusted_diff.clamp(min=0.0)
-
-    # Normalize the kernels
-    kernel_sums = flow_kernels.sum(dim=(-1, -2), keepdim=True) + sigma
-    normalized_kernels = flow_kernels / kernel_sums
-
-
-    return normalized_kernels
-
-
-def gauss_seidel_diffusion_step(density, k, iterations=10):
-    """
-    Perform a diffusion step using the modified equation and Gauss-Seidel method.
-
-    :param density: Current density field (2D tensor)
-    :param k: Diffusion constant
-    :param iterations: Number of Gauss-Seidel iterations
-    :return: Updated density field
-    """
-    new_density = density.clone()
-
-    # Create convolution kernel for neighboring cells
-    kernel = torch.tensor([[0, 1, 0],
-                           [1, 0, 1],
-                           [0, 1, 0]], dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-
-    if density.is_cuda:
-        kernel = kernel.cuda()
-
-    for _ in range(iterations):
-        # Compute sum of neighboring densities
-        neighbors_sum = torch.nn.functional.conv2d(
-            new_density.unsqueeze(0).unsqueeze(0),
-            kernel,
-            padding=1
-        ).squeeze()
-
-        # Apply the diffusion equation
-        new_density = (new_density + k * neighbors_sum / 4) / (1 + k)
-
-    return new_density
-
-
-def apply_kernels(td, input_key, kernels, k):
+def apply_kernels(td, input_key, kernels):
     input_patches = unfold_neighbors(td, input_key, (3, 3))
 
-    # Apply the kernels through batched multiplication
+    # Apply the kernels through einstein summation
     updated = torch.einsum('ijkl, ijkl -> ij', input_patches, kernels)
     td.set(input_key, updated, inplace=True)
 
@@ -806,27 +753,25 @@ def flow(
     input: torch.tensor,
     gradient: Optional[torch.tensor] = None,
     outflow: Optional[torch.tensor] = None,
-    flow_rate=0.1
+    flow_rate=0.1,
+    relaxation_factor=1.0
 ):
-    # 1. Get the normalized outlfow kernels from the slopes
-    # 2. Scale the normalized outflow kernels according to the flow rate
-    # 3. Divide available water among the outflow directions according to the scaled outflow kernels
-    # 4. Sum over dim=(-1, -2) to get the outflow for each cell
-    # 5. Validate that the sum of outflow for each cell is less than or equal to the available water
-    # 6. To get inflow, for each direction, roll the kernels in the opposite direction, then select the
-    #    outflow value corresponding to that direction.
-
-    # if gradient is not None and outflow is not None:
-    #     raise Warning("Both gradient and outflow are provided. Gradient will be ignored!.")
+    if gradient is None:
+        assert outflow is not None, "Outflow must be provided if gradient is not provided."
+        outflow = outflow.clone()
+        outflow *= flow_rate
 
     if outflow is None:
-        assert gradient is not None, "Gradient must be provided if outflow is not provided"
+        assert gradient is not None, "Gradient must be provided if outflow is not provided."
         outflow = gradient.clamp(min=0.0) * flow_rate
 
     total_outflow = torch.sum(outflow, dim=(-1, -2))
 
     condition = (total_outflow <= input).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
-    adjusted_outflow = outflow * torch.nan_to_num(input / total_outflow, 0.0).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+    adjusted_outflow = (
+        outflow *
+        torch.nan_to_num(input / total_outflow, 0.0).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+    )
 
     corrected_outflow = safe_where(
         condition,
@@ -858,7 +803,11 @@ def flow(
 
     assert torch.isclose(torch.sum(inflow), torch.sum(corrected_outflow))
 
-    result = (input + inflow).subtract_(torch.sum(corrected_outflow, dim=(-1, -2)))
+    result = (input + inflow) - (torch.sum(corrected_outflow, dim=(-1, -2)))
+
+    if relaxation_factor != 1.0:
+        result = result * relaxation_factor + input * (1 - relaxation_factor)
+
     return result, inflow, corrected_outflow
 
 

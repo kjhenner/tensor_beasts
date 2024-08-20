@@ -21,30 +21,6 @@ PAN_SPEED = 0.1
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the tensor beasts simulation")
     parser.add_argument(
-        "--size",
-        type=int,
-        help="The size of the world. (default: 768)",
-        required=False,
-        default=768
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        help="The device to use. (default: mps)",
-        required=False,
-        default=None
-    )
-    parser.add_argument(
-        "--headless",
-        action="store_true",
-        help="Run the simulation in headless mode."
-    )
-    parser.add_argument(
-        "--store_buffer",
-        action="store_true",
-        help="Keep a state buffer."
-    )
-    parser.add_argument(
         "--config_path",
         type=str,
         help="The path to the config file.",
@@ -109,14 +85,14 @@ def main(config: DictConfig):
 
     clock = pygame.time.Clock()
 
-    if args.headless:
+    if config.display.get("headless", False):
         # Initialize pygame here as it won't be handled by the display manager
         pygame.init()
         display_manager = None
     else:
         display_manager = DisplayManager(
-            world_width=width,
-            world_height=height
+            display_width=width,
+            display_height=height
         )
     color_display_idx = 0
     text_display_idx = 0
@@ -124,17 +100,19 @@ def main(config: DictConfig):
     def update_screen(step, world_stats):
         runtime_stats = {
             'fps': clock.get_fps(),
-            'step': step
+            'step': step,
+            'hour': step // 60,
+            'day': step // 1440
         }
-        if not args.headless:
+        if not config.display.get("headless", False):
             render_config = config.display.color_displays[color_display_idx]
-            color_data = dispatch_render(world.td, render_config)
+            screen_data = dispatch_render(world.td, render_config)
 
             runtime_stats.update({
                 'display': render_config.title
             })
 
-            display_manager.update_screen(color_data)
+            display_manager.update_screen(screen_data)
 
         runtime_stats.update(world_stats)
         runtime_stats.update(get_mean_execution_times())
@@ -189,7 +167,7 @@ def main(config: DictConfig):
                             world_thread.step()
                 elif event.type == pygame.MOUSEBUTTONUP:
                     pos = mouse.get_pos()
-                    x, y = display_manager.map_grid_position(*pos)
+                    x, y = display_manager.display_to_screen(*pos)
                     print(f"Inspecting: (H: {y}, W: {x})")
                     world.inspect(x, y)
                 elif event.type == pygame.MOUSEMOTION:
@@ -201,7 +179,7 @@ def main(config: DictConfig):
                 elif event.type == pygame.VIDEORESIZE:
                     display_manager.resize(event.w, event.h)
 
-        if not args.headless:
+        if not config.display.get("headless", False):
             display_manager.update()
 
         clock.tick()
@@ -210,6 +188,5 @@ def main(config: DictConfig):
 
 if __name__ == "__main__":
     args = parse_args()
-    # Load the config
     config = OmegaConf.load(args.config_path)
     main(config)
