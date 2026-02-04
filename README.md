@@ -23,19 +23,19 @@ poetry install tensor-beasts
 
 Run the simulation with:
 ```bash
-poetry run python -m tensor_beasts
+python -m tensor_beasts
 ```
 
 CLI options:
 ```bash
-usage: main.py [-h] [--size SIZE] [--device DEVICE]
+usage: main.py [-h] [--config_path CONFIG_PATH]
 
 Run the tensor beasts simulation
 
 options:
-  -h, --help       show this help message and exit
-  --size SIZE      The size of the world. (default: 768)
-  --device DEVICE  The device to use. (default: mps)
+  -h, --help            show this help message and exit
+  --config_path CONFIG_PATH
+                        The path to the config file. (default: beast_config.yaml)
 ```
 
 Once it's running, there are a few commands you can use:
@@ -45,6 +45,16 @@ Once it's running, there are a few commands you can use:
 - `-` to zoom out.
 - `h` to re-seed with herbivores.
 - `p` to re-seed with predators.
+
+## Configuration
+
+Configs are strict and forward-only. Entity names must match class names exactly:
+`Terrain`, `Plant`, `Herbivore`, `Predator`, `DiffusionToy`.
+
+Display renderers must be explicit:
+- `fn_name: default` requires `key`
+- `fn_name: layered` requires `layers` with `key`, `threshold`, `color_min`, `color_max`, `input_range`
+- `fn_name: cross_section` requires `background_color`, `screen_height`, `section_idx`, `section_dim`, `levels`
 
 
 ## TODO

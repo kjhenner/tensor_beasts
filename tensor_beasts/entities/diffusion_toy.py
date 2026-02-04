@@ -3,10 +3,12 @@ from typing import Optional
 import torch
 
 from tensor_beasts.entities import Entity
+from tensor_beasts.registry import register_entity
 from tensor_beasts.features.terrain_features import Elevation
 from tensor_beasts.features.toy_features import FluidDensity
 
 
+@register_entity
 class DiffusionToy(Entity):
 
     elevation: Elevation

@@ -1,0 +1,223 @@
+display:
+  color_displays:
+    - title: "cross-section"
+      fn_name: "cross_section"
+      background_color: [135, 206, 235]
+      screen_height: 128
+      section_idx: 4
+      section_dim: "x"
+      levels:
+        - key: "${key:terrain,elevation}"
+          color: [130, 110, 127]
+          scale: 100.0
+        - key: "${key:terrain,soil_volume}"
+          color: [180, 160, 127]
+          color_mod_key: "${key:terrain,soil_water_saturation}"
+#          color_mod: [150, 130, 127]
+          color_mod: [0, 0, 255]
+          scale: 1.0
+        - key: "${key:terrain,surface_water_volume}"
+          color: [100, 140, 200]
+          scale: 1.0
+    - title: "layers"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,elevation}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [127, 127, 127]
+          input_range: [0, 1]
+        - key: "${key:terrain,surface_water_volume}"
+          threshold: 0.5
+          color_min: [0, 0, 128]
+          color_max: [0, 0, 255]
+          input_range: [0, 20]
+        - key: "${key:hydrodynamicplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 16]
+          color_max: [0, 255, 127]
+          input_range: [0, 255]
+        - key: "${key:herbivore,energy}"
+          threshold: 1
+          color_min: [0, 0, 32]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,energy}"
+          threshold: 1
+          color_min: [32, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+    - title: "biomass"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,nutrients}"
+          threshold: 1
+          color_min: [32, 16, 0]
+          color_max: [139, 69, 19]
+          input_range: [0, 100]
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 32]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,biomass}"
+          threshold: 1
+          color_min: [32, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+    - title: "plant_scent"
+      fn_name: "layered"
+      layers:
+        - key: "${key:hydrodynamicplant,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+    - title: "soil_sat_coefficient"
+      fn_name: "layered"
+      layers:
+        - key: "${key:hydrodynamicplant,soil_sat_coeff}"
+          threshold: -3
+          color_min: [255, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [-2.5, 2.5]
+    - title: "soil_water_saturation"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,soil_water_saturation}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [255, 255, 255]
+          input_range: [0, 1]
+    - title: "available_sat"
+      fn_name: "layered"
+      layers:
+        - key: "${key:terrain,surface_water_volume}"
+          threshold: 0.0
+          color_min: [0, 0, 0]
+          color_max: [255, 255, 255]
+          input_range: [0, 0.5]
+
+world:
+  device: auto
+  running: True
+  max_ups: 0
+  size: [512, 512]  # [Height, Width]
+
+  entities:
+    Terrain:
+      elevation:
+        ramp:
+      surface_water_volume:
+        rainfall_rate: 5.7e-5
+        flow_rate: 0.15
+        relaxation_factor: 1.0
+        steps: 1
+      soil_water_volume:
+        field_capacity: 0.55
+        infiltration_rate: 2e-7
+        flow_rate: 0.1
+        saturation_gradient_coeff: 0.3
+      soil_volume:
+        erosion_rate: 0.05
+        init_scale: 10.0
+      nutrients:
+        initial_nutrients: 50.0
+        diffusion_rate: 0.01
+
+    HydrodynamicPlant:
+      initial_energy: 32
+      init_prob: 0.02
+      nutrients_key: "terrain:nutrients"
+      nutrient_consumption_rate: 0.5
+      seed:
+        energy_key: "${key:hydrodynamicplant,energy}"
+        crowding_key: "${key:hydrodynamicplant,crowding}"
+        germination_prob: 0.005
+        seed_prob: 0.05
+      crowding:
+        energy_key: "${key:hydrodynamicplant,energy}"
+
+    Herbivore:
+      # Initialization
+      initial_energy: 50
+      initial_biomass: 120
+      init_prob: 0.001
+      toy_init: False
+
+      # Eating
+      eat_max: 5
+      food_keys:
+        - "hydrodynamicplant:energy"
+
+      # Perception
+      perception:
+        - key: "hydrodynamicplant:scent"
+          kernel_size: 1
+        - key: "herbivore:scent"
+          kernel_size: 1
+
+      # Navigation weights: positive = attract, negative = repel
+      navigation_weights:
+        "hydrodynamicplant:scent": 0.5
+        "herbivore:scent": -0.5
+
+      # Metabolism - gradient-based
+      basal_rate: 2
+      max_metabolic_rate: 4
+      gradient_ema_alpha: 0.1
+
+      # Dissipation
+      dissipation_rate: 0.02
+      dissipation_floor: 1
+
+      # Movement cost
+      base_movement_cost: 0
+      mass_cost_factor: 0.0005
+
+      # Death & Reproduction
+      survival_threshold: 10
+      nutrients_key: "terrain:nutrients"
+      reproduction_threshold: 200
+
+    Predator:
+      # Initialization
+      initial_energy: 60
+      initial_biomass: 180
+      init_prob: 0.001
+      toy_init: False
+
+      # Eating
+      eat_max: 8
+      food_keys:
+        - "herbivore:biomass"
+
+      # Perception
+      perception:
+        - key: "herbivore:scent"
+          kernel_size: 1
+        - key: "predator:scent"
+          kernel_size: 1
+
+      # Navigation weights: positive = attract, negative = repel
+      navigation_weights:
+        "herbivore:scent": 0.5
+        "predator:scent": -0.5
+
+      # Metabolism - gradient-based
+      basal_rate: 2
+      max_metabolic_rate: 6
+      gradient_ema_alpha: 0.1
+
+      # Dissipation
+      dissipation_rate: 0.04
+      dissipation_floor: 1
+
+      # Movement cost
+      base_movement_cost: 0
+      mass_cost_factor: 0.001
+
+      # Death & Reproduction
+      survival_threshold: 15
+      nutrients_key: "terrain:nutrients"
+      reproduction_threshold: 220

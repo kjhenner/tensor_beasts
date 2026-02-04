@@ -32,7 +32,7 @@ display:
           color_min: [0, 0, 128]
           color_max: [0, 0, 255]
           input_range: [0, 20]
-        - key: "${key:plant,energy}"
+        - key: "${key:hydrodynamicplant,energy}"
           threshold: 1
           color_min: [0, 32, 16]
           color_max: [0, 255, 127]
@@ -40,7 +40,7 @@ display:
     - title: "soil_sat_coefficient"
       fn_name: "layered"
       layers:
-        - key: "${key:plant,soil_sat_coeff}"
+        - key: "${key:hydrodynamicplant,soil_sat_coeff}"
           threshold: -3
           color_min: [255, 0, 0]
           color_max: [0, 255, 0]
@@ -71,8 +71,6 @@ world:
   entities:
     Terrain:
       elevation:
-        perlin:
-          scale: [4, 4]
         ramp:
       surface_water_volume:
         rainfall_rate: 5.7e-6
@@ -88,22 +86,13 @@ world:
         erosion_rate: 0.05
         init_scale: 10.0
 
-    Plant:
+    HydrodynamicPlant:
       initial_energy: 32
       init_prob: 0.02
-      growth_prob: 10.0
-      germination_prob: 0.005
-      seed_prob: 0.05
-
-    Herbivore:
-      initial_energy: 240
-      init_odds: 255
-      eat_max: 16
-      energy_loss: 2
-      divide_threshold: 250
-      toy_init: False
-      target_key: plant
-      target_weights: [0.5]
-      opposite_key: [herbivore, predator]
-      opposite_weights: [0.1, 5.0]
-      food_key: plant
+      seed:
+        energy_key: "${key:hydrodynamicplant,energy}"
+        crowding_key: "${key:hydrodynamicplant,crowding}"
+        germination_prob: 0.005
+        seed_prob: 0.05
+      crowding:
+        energy_key: "${key:hydrodynamicplant,energy}"

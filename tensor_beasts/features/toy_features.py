@@ -4,9 +4,11 @@ import torch
 from omegaconf import DictConfig
 
 from tensor_beasts.features.feature import Feature
+from tensor_beasts.registry import register_feature
 from tensor_beasts.util import flow_gradient, flow
 
 
+@register_feature
 class FluidDensity(Feature):
     name = "fluid_density"
     dtype = torch.float32
@@ -27,5 +29,5 @@ class FluidDensity(Feature):
     def update(self, step: int):
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale
         gradient = flow_gradient(self.data + elevation)
-        self.data, _, _ = flow(self.data, gradient, self.config.flow_rate)
+        self.data, _, _ = flow(self.data, gradient, flow_rate=self.config.flow_rate)
         self.data += self.config.rainfall_rate

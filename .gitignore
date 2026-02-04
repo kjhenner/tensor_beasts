@@ -7,11 +7,17 @@
 *.pyz
 __pycache__/
 
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
 # Tests and coverage
 .tox/
 .coverage
 .coverage.*
-.pytest_cache
+.pytest_cache/
 pytest_cache/
 nosetests.xml
 coverage.xml
@@ -21,20 +27,20 @@ coverage.xml
 htmlcov/
 
 # Jupyter notebook
-.ipynb_checkpoints
+.ipynb_checkpoints/
 
-# Flit
+# Packaging
 *.egg-info/
 dist/
 build/
 flit/
 flit-*.toml
 .pydistutils.cfg
+*.egg
 
-# Cython
+# Cython / C extensions
 *.so
 *.so.*
-# C files
 *.c
 *.cpp
 
@@ -50,13 +56,30 @@ target/
 
 # Environment variables
 .env
+.envrc
 
-# Pycharm
+# IDEs
 .idea/
-
-# VS Code
 .vscode/
+*.swp
+*.swo
+*~
 
-# wandb logs
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# wandb / ML experiment logs
 outputs/
 wandb/
+logs/
+runs/
+checkpoints/
+
+# Grid search / experiment results (uncomment if you want to track these)
+# grid_search_results.json
+
+# Hydra outputs
+multirun/

@@ -1,20 +1,24 @@
+import logging
 import math
 
 import torch
 from omegaconf import DictConfig
 
 from tensor_beasts.features.feature import Feature
+from tensor_beasts.registry import register_feature
 from tensor_beasts.util import (
     perlin_noise, pyramid_elevation, range_elevation,
     unfold_neighbors, flow_gradient, flow
 )
 
 
+@register_feature
 class Elevation(Feature):
     name = "elevation"
     dtype = torch.float32
     default_tags = {"observable"}
     default_config = DictConfig({})
+    depends_on = {}  # No dependencies - base feature
 
     def render(self) -> torch.Tensor:
         return self.data.unsqueeze(-1).expand(-1, -1, 3) * 255
@@ -39,6 +43,7 @@ class Elevation(Feature):
         unfold_neighbors(self.td, self.key, (3, 3))
 
 
+@register_feature
 class AquiferElevation(Feature):
     name = "aquifer_elevation"
     dtype = torch.float32
@@ -46,6 +51,10 @@ class AquiferElevation(Feature):
         "elevation_key": "${key:terrain,elevation}",
         "scale": 0.9,
     })
+    # Dependencies for initialization ordering
+    depends_on = {
+        "elevation": "elevation",  # Needs elevation data to compute aquifer level
+    }
 
     def render(self) -> torch.Tensor:
         return self.data.unsqueeze(-1).expand(-1, -1, 3) * 255
@@ -55,6 +64,7 @@ class AquiferElevation(Feature):
         self.data = (elevation * self.config.scale).type(self.dtype)
 
 
+@register_feature
 class SoilVolume(Feature):
     name = "soil_volume"
     dtype = torch.float32
@@ -67,6 +77,12 @@ class SoilVolume(Feature):
         "init_scale": 8.0,
         "epsilon": 1e-8
     })
+    # Dependencies for initialization and update ordering
+    depends_on = {
+        "elevation": "elevation",  # Needs elevation for initialization
+        # Note: surface_outflow is a computed feature from surface_water_volume.update()
+        # so update depends on surface_water_volume running first
+    }
 
     def render(self) -> torch.Tensor:
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale
@@ -88,6 +104,7 @@ class SoilVolume(Feature):
         self.data = torch.clamp(result, min=self.config.epsilon)
 
 
+@register_feature
 class SoilWaterVolume(Feature):
     name = "soil_water_volume"
     dtype = torch.float32
@@ -99,11 +116,18 @@ class SoilWaterVolume(Feature):
         "soil_porosity": 0.4,
         "surface_water_volume_key": "${key:terrain,surface_water_volume}",
         "soil_water_saturation_key": "${key:terrain,soil_water_saturation}",
-        "infiltation_rate": 0.001,
+        "infiltration_rate": 0.001,
         "flow_rate": 0.1,
         "saturation_gradient_coeff": 0.2,
-        "evaporation_rate": 1e-5
+        "evaporation_rate": 1e-5,
+        "field_capacity": 0.5
     })
+    # Dependencies for initialization and update ordering
+    depends_on = {
+        "soil_volume": "soil_volume",  # Needs soil_volume for init and update
+        "elevation": "elevation",  # Needs elevation for flow calculations
+        "surface_water_volume": "surface_water_volume",  # Needs surface water for infiltration
+    }
 
     def initialize_data(self):
         self.data = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity * self.config.field_capacity * 0.5
@@ -126,7 +150,7 @@ class SoilWaterVolume(Feature):
             torch.stack([
                 surface_water_volume,
                 soil_capacity - self.data,
-                torch.ones_like(surface_water_volume) * self.config.infiltation_rate
+                torch.ones_like(surface_water_volume) * self.config.infiltration_rate
             ]),
             dim=0
         ).values
@@ -153,17 +177,18 @@ class SoilWaterVolume(Feature):
         self.data = torch.clamp(torch.clamp(self.data, max=soil_capacity), min=0)
         soil_saturation = torch.nan_to_num(self.data / soil_capacity, 1.0, 1.0, 1.0)
         self.td.set(self.config.soil_water_saturation_key, soil_saturation, inplace=True)
-        print(gradient.sum(dim=(-1, -2)).max())
-        print(gradient.shape)
-        # self.td.set(self.config.soil_water_saturation_key, gradient.sum(dim=(-1, -2)) * 150, inplace=True)
+        logger = logging.getLogger(__name__)
+        logger.debug("SoilWaterVolume gradient max: %s", gradient.sum(dim=(-1, -2)).max())
+        logger.debug("SoilWaterVolume gradient shape: %s", gradient.shape)
         assert torch.isclose(surface_water_volume.sum() + self.data.sum(), original_total)
 
         evaporation = self.config.evaporation_rate * torch.sigmoid(soil_saturation + 1)
-        print(f"Evaporation total: {torch.sum(evaporation)}")
+        logger.debug("SoilWaterVolume evaporation total: %s", torch.sum(evaporation))
         self.data -= evaporation
         self.data = torch.clamp(self.data, min=0)
 
 
+@register_feature
 class SurfaceWaterVolume(Feature):
     name = "surface_water_volume"
     dtype = torch.float32
@@ -177,6 +202,11 @@ class SurfaceWaterVolume(Feature):
         "relaxation_factor": 0.5,
         "steps": 1
     })
+    # Dependencies for update ordering
+    depends_on = {
+        "elevation": "elevation",  # Needs elevation for flow gradient
+        # Note: this feature produces surface_outflow which soil_volume needs
+    }
 
     def render(self) -> torch.Tensor:
         return (self.data.unsqueeze(-1).expand(-1, -1, 3) / 10) * 255
@@ -194,5 +224,139 @@ class SurfaceWaterVolume(Feature):
         self.td.set(self.config.outflow_key, outflow)
         if step % 1000 < 500:
             self.data += self.config.rainfall_rate
-        print(f"Surface water min and max: {torch.min(self.data)}, {torch.max(self.data)}")
-        print(f"Rainfall total: {torch.sum(torch.ones_like(self.data) * self.config.rainfall_rate)}")
+        logger = logging.getLogger(__name__)
+        logger.debug("Surface water min/max: %s/%s", torch.min(self.data), torch.max(self.data))
+        logger.debug(
+            "Surface water rainfall total: %s",
+            torch.sum(torch.ones_like(self.data) * self.config.rainfall_rate),
+        )
+
+
+@register_feature
+class SimpleWater(Feature):
+    """
+    A simple water feature initialized with multi-scale Perlin noise.
+
+    Optionally modulated by an oscillator for dynamic water level changes.
+    A phase map (larger-scale Perlin noise) controls spatial correlation with the oscillator:
+    - High phase values: positive correlation (water rises when oscillator rises)
+    - Low phase values: negative correlation (water falls when oscillator rises)
+    - Mid phase values: unaffected by oscillator
+
+    Output is clamped to [0, 1] range.
+    """
+    name = "simple_water"
+    dtype = torch.float32
+    default_tags = {"observable"}
+    default_config = DictConfig({
+        "perlin_scale": [4, 4],       # Base scale for Perlin noise
+        "perlin_octaves": 4,          # Number of octaves for multi-scale
+        "perlin_persistence": 0.5,    # Amplitude decay per octave
+        "oscillator_key": "${key:simpleterrain,oscillator}",  # Reference to oscillator feature
+        "oscillator_amplitude": 0.1,  # How much oscillator affects water level
+        "phase_scale_multiplier": 128,  # Phase map grid divisor (larger = coarser regions, 128 gives ~4x4 domains)
+    })
+    depends_on = {}
+
+    def render(self) -> torch.Tensor:
+        # Render as blue intensity
+        blue = (self.data * 255).clamp(0, 255)
+        return torch.stack([
+            torch.zeros_like(blue),
+            torch.zeros_like(blue),
+            blue
+        ], dim=-1)
+
+    def initialize_data(self):
+        # Initialize with multi-scale Perlin noise normalized to [0, 1]
+        try:
+            noise = perlin_noise(
+                self.shape,
+                self.config.perlin_scale,
+                octaves=self.config.perlin_octaves,
+                persistence=self.config.perlin_persistence
+            )
+            # Normalize to [0, 1]
+            noise_min, noise_max = noise.min(), noise.max()
+            self.data = ((noise - noise_min) / (noise_max - noise_min + 1e-8)).type(self.dtype)
+        except (IndexError, RuntimeError):
+            # Fallback to uniform random if perlin fails
+            self.data = torch.rand(self.shape, dtype=self.dtype)
+        # Store base pattern for oscillator modulation
+        self._base_pattern = self.data.clone()
+
+        # Generate phase map at larger scale for oscillator correlation
+        # Phase map determines how each location responds to the oscillator
+        # Use downsampled random noise + bilinear upscale for smooth large regions
+        phase_divisor = self.config.phase_scale_multiplier
+        small_shape = (max(1, self.shape[0] // phase_divisor), max(1, self.shape[1] // phase_divisor))
+        small_noise = torch.rand(small_shape, dtype=self.dtype)
+        # Upsample with bilinear interpolation for smooth transitions
+        phase_noise = torch.nn.functional.interpolate(
+            small_noise.unsqueeze(0).unsqueeze(0),
+            size=self.shape,
+            mode='bilinear',
+            align_corners=True
+        ).squeeze(0).squeeze(0)
+        # Normalize to [-1, 1] so mid values = 0 (no effect)
+        phase_min, phase_max = phase_noise.min(), phase_noise.max()
+        self._phase_map = ((phase_noise - phase_min) / (phase_max - phase_min + 1e-8) - 0.5) * 2.0
+
+    def update(self, step: int):
+        if self.config.oscillator_key is not None:
+            oscillator_value = self.td.get(self.config.oscillator_key)
+            # Phase-modulated oscillation:
+            # - Where phase_map > 0: positive correlation with oscillator
+            # - Where phase_map < 0: negative correlation (anti-phase)
+            # - Where phase_map = 0: no effect
+            modulation = oscillator_value * self.config.oscillator_amplitude * self._phase_map
+            self.data = torch.clamp(self._base_pattern + modulation, 0.0, 1.0)
+
+
+@register_feature
+class Nutrients(Feature):
+    """
+    Terrain nutrients feature for nutrient cycling.
+
+    Receives biomass from dead animals and is consumed by plant growth.
+    Uses float32 for precision in conservation calculations.
+    """
+    name = "nutrients"
+    dtype = torch.float32
+    default_tags = {"observable"}
+    default_config = DictConfig({
+        "initial_nutrients": 50.0,
+        "diffusion_rate": 0.01,
+    })
+    depends_on = {}
+
+    def render(self) -> torch.Tensor:
+        # Render as brown intensity
+        normalized = torch.clamp(self.data / 100.0, 0, 1)
+        return (normalized * 255).unsqueeze(-1).expand(-1, -1, 3)
+
+    def initialize_data(self):
+        self.data = torch.full(
+            self.shape,
+            self.config.initial_nutrients,
+            dtype=self.dtype
+        )
+
+    def update(self, step: int):
+        # Optional slow diffusion to spread nutrients
+        if self.config.diffusion_rate > 0:
+            kernel = torch.tensor([
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0]
+            ], dtype=torch.float32) * self.config.diffusion_rate / 4.0
+            kernel[1, 1] = 1.0 - self.config.diffusion_rate
+
+            padded = torch.nn.functional.pad(
+                self.data.unsqueeze(0).unsqueeze(0),
+                (1, 1, 1, 1),
+                mode='replicate'
+            )
+            self.data = torch.nn.functional.conv2d(
+                padded, kernel.unsqueeze(0).unsqueeze(0)
+            ).squeeze(0).squeeze(0)

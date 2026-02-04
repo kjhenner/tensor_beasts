@@ -5,7 +5,7 @@ import pygame
 import threading
 import time
 
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from pygame import mouse
 import sys
 
@@ -13,10 +13,10 @@ from tensor_beasts.display.display_manager import DisplayManager
 
 from tensor_beasts.display.rendering import dispatch_render
 from tensor_beasts.util import get_mean_execution_times
+from tensor_beasts.config import load_config
 from tensor_beasts.world import World
 
 PAN_SPEED = 0.1
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the tensor beasts simulation")
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
         "--config_path",
         type=str,
         help="The path to the config file.",
-        default="beast_config.yaml"
+        default="conf/beast_config.yaml"
     )
     return parser.parse_args()
 
@@ -65,6 +65,8 @@ class WorldThread(threading.Thread):
         while not self.done:
             if self.running:
                 self.step()
+            else:
+                time.sleep(0.01)  # Don't busy-wait when paused
 
 
 def main(config: DictConfig):
@@ -104,6 +106,11 @@ def main(config: DictConfig):
             'hour': step // 60,
             'day': step // 1440
         }
+        # Add oscillator state if present
+        for entity_key in world.td.keys():
+            entity_td = world.td.get(entity_key)
+            if hasattr(entity_td, 'keys') and 'oscillator' in entity_td.keys():
+                runtime_stats['oscillator'] = float(entity_td.get('oscillator'))
         if not config.display.get("headless", False):
             render_config = config.display.color_displays[color_display_idx]
             screen_data = dispatch_render(world.td, render_config)
@@ -188,5 +195,6 @@ def main(config: DictConfig):
 
 if __name__ == "__main__":
     args = parse_args()
-    config = OmegaConf.load(args.config_path)
+    config = load_config(args.config_path)
+    print(config)
     main(config)

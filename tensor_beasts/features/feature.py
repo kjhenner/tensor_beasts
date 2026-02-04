@@ -1,16 +1,11 @@
 import abc
-from typing import Tuple, Set, Optional
+from typing import Dict, Tuple, Set, Optional, Union
 
 import torch
 from omegaconf import DictConfig, OmegaConf
 from rich.console import Console
 from rich.table import Table
 from tensordict import TensorDict, NestedKey
-
-OmegaConf.register_new_resolver(
-    "key",
-    lambda *args: tuple(args)
-)
 
 
 class Feature(abc.ABC):
@@ -19,6 +14,7 @@ class Feature(abc.ABC):
     dtype: torch.dtype = None
     default_tags: Set[str] = None
     default_config: DictConfig = None
+    depends_on: Dict[str, str] = {}  # Maps dependency name -> feature name or (entity, feature) tuple
 
     def __init__(
         self,
@@ -28,15 +24,23 @@ class Feature(abc.ABC):
         additional_tags: Optional[Tuple[str, ...]] = None,
         config: Optional[DictConfig] = None
     ):
-        self.config = self.default_config
-        if config:
-            self.config.update(config)
+        # Build merged default config from class hierarchy (parent configs first)
+        # This allows subclasses to inherit and override parent defaults
+        merged_default = {}
+        for cls in reversed(self.__class__.__mro__):
+            if hasattr(cls, 'default_config') and cls.default_config is not None:
+                parent_config = OmegaConf.to_container(cls.default_config, resolve=False)
+                merged_default.update(parent_config)
+
+        # Merge with instance config
+        self.config = OmegaConf.merge(OmegaConf.create(merged_default), config or {})
         self.td = td
         if key_prefix not in td:
             td[key_prefix] = TensorDict({}, batch_size=[])
         self.shape = tuple(shape_prefix + tuple(self.shape or ()))
         self.key = (*key_prefix, self.name) if isinstance(key_prefix, tuple) else (key_prefix, self.name)
-        self.tags = set(additional_tags or ()).update(self.default_tags or set())
+        self.tags = set(additional_tags or ())
+        self.tags.update(self.default_tags or set())
 
     def render(self):
         if self.data.ndim == 2:
@@ -45,7 +49,9 @@ class Feature(abc.ABC):
             return self.data
 
     def inspect(self, x: int, y: int):
-        if self.data.ndim == 2:
+        if self.data.ndim == 0:
+            return f"{self.name}: {self.data.item():.4f}"
+        elif self.data.ndim == 2:
             return f"{self.name}: {self.data[y, x]}"
         else:
             data = self.data[y, x]
@@ -99,7 +105,6 @@ class Feature(abc.ABC):
         self.data = torch.zeros(self.shape, dtype=self.dtype)
 
     def initialize_data(self, *args, **kwargs):
-        print(f"Initializing {self.name} with args: {args} and kwargs: {kwargs}")
         self.zero_init()
 
     @property
@@ -112,10 +117,47 @@ class Feature(abc.ABC):
 
 
 class SharedFeature(Feature, abc.ABC):
-    _count = 0
-    _is_parent = False
-    _shared_key_prefix = None
-    _shared_key = None
+    """
+    A feature that shares a backing tensor across multiple entities.
+
+    Multiple entities can have SharedFeatures of the same family (determined by
+    `shared_name`). Each entity gets its own 2D slice of a shared 3D tensor.
+
+    The registry is scoped to the TensorDict, so multiple Worlds can coexist
+    without interference.
+
+    Class attributes:
+        name: The feature name used for entity-specific TensorDict keys
+        shared_name: The name used for the shared tensor (defaults to name).
+                     Override this in subclasses to share a tensor with a
+                     different feature class (e.g., CarrionScent shares with Scent)
+        shared_config_keys: List of config keys that must be identical across
+                           all instances sharing a tensor (e.g., diffusion params)
+
+    Example:
+        class Scent(SharedFeature):
+            name = "scent"
+            shared_config_keys = ["kernel_size", "kernel_sigma", "diffusion_steps"]
+            # shared_name defaults to "scent"
+
+        class CarrionScent(Scent):
+            name = "carrion_scent"
+            shared_name = "scent"  # Share tensor with Scent family
+            # Inherits shared_config_keys - diffusion params must match Scent
+    """
+    # Registry key in TensorDict metadata
+    _REGISTRY_KEY = ("__meta__", "shared_feature_registry")
+
+    # Instance attributes (set in __init__)
+    _is_parent: bool = False
+    _shared_key: Tuple = None
+    idx: int = None
+
+    # Override in subclass to share tensor with another feature family
+    shared_name: str = None  # Defaults to self.name if not set
+
+    # Config keys that must be identical across all instances sharing a tensor
+    shared_config_keys: Tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -131,19 +173,67 @@ class SharedFeature(Feature, abc.ABC):
         if shared_key_prefix not in td:
             td[shared_key_prefix] = TensorDict({}, batch_size=[])
 
+        # Get or create the registry scoped to this TensorDict
+        registry = self._get_registry(td)
+
+        # Determine the shared tensor name (defaults to feature name)
+        effective_shared_name = self.shared_name or self.name
+
+        # Initialize registry entry for this shared_name if needed
+        if effective_shared_name not in registry:
+            registry[effective_shared_name] = {
+                "count": 0,
+                "shared_key_prefix": shared_key_prefix,
+                "shared_key": (*shared_key_prefix, effective_shared_name) if isinstance(shared_key_prefix, tuple) else (shared_key_prefix, effective_shared_name),
+                "shared_config": None,  # Will be set by first instance
+            }
+
+        reg = registry[effective_shared_name]
+
+        # Validate consistent shared_key_prefix
+        assert reg["shared_key_prefix"] == shared_key_prefix, \
+            f"SharedFeature '{effective_shared_name}' shared_key_prefix must be consistent"
+
+        # Handle shared config (first instance sets it, others must match)
+        if self.shared_config_keys and not is_parent:
+            my_shared_config = {k: getattr(self.config, k, None) for k in self.shared_config_keys}
+            if reg["shared_config"] is None:
+                # First instance - set the shared config
+                reg["shared_config"] = my_shared_config
+            else:
+                # Subsequent instance - use the shared config (override local)
+                for key, shared_val in reg["shared_config"].items():
+                    local_val = my_shared_config.get(key)
+                    if local_val != shared_val:
+                        # Use shared value, could log warning here
+                        if hasattr(self.config, key):
+                            OmegaConf.update(self.config, key, shared_val)
+
         self._is_parent = is_parent
+        self._shared_key = reg["shared_key"]
+        self._effective_shared_name = effective_shared_name
+        self._registry_ref = registry  # Keep reference for later access
+
         if not self._is_parent:
-            self.idx = type(self)._count
-            type(self)._count += 1
-        if not self._shared_key_prefix:
-            self._shared_key_prefix = shared_key_prefix
-        else:
-            assert self._shared_key_prefix == shared_key_prefix, "SharedFeature shared_key_prefix must be the same for all instances."
-        if not self._shared_key:
-            self._shared_key = (*shared_key_prefix, self.name) if isinstance(shared_key_prefix, tuple) else (shared_key_prefix, self.name)
+            self.idx = reg["count"]
+            reg["count"] += 1
+
+    @classmethod
+    def _get_registry(cls, td: TensorDict) -> Dict:
+        """Get or create the SharedFeature registry scoped to this TensorDict."""
+        # Store registry in a regular dict attached to the TensorDict
+        # We use object attribute to avoid TensorDict key restrictions
+        if not hasattr(td, '_shared_feature_registry'):
+            td._shared_feature_registry = {}
+        return td._shared_feature_registry
+
+    def _get_shared_count(self) -> int:
+        """Get the current count of instances sharing this tensor."""
+        return self._registry_ref[self._effective_shared_name]["count"]
 
     def zero_init(self):
-        self.shape = self.shape + (type(self)._count,)
+        count = self._get_shared_count()
+        self.shape = self.shape + (count,)
         if self._shared_key not in self.td:
             self.td[self._shared_key] = torch.zeros(self.shape, dtype=self.dtype)
         if self.key not in self.td:

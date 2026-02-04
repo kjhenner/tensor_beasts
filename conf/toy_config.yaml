@@ -1,0 +1,24 @@
+display:
+  color_displays:
+    - title: "fluid_density"
+      fn_name: "default"
+      key: "${key:diffusiontoy,fluid_density}"
+      input_range: [0.0, 1.0]
+    - title: "elevation"
+      fn_name: "default"
+      key: "${key:diffusiontoy,elevation}"
+      input_range: [0.0, 1.0]
+
+world:
+  device: auto
+  running: True
+  max_ups: 0
+  size: [256, 256]  # [Height, Width]
+
+  entities:
+    DiffusionToy:
+      fluid_density:
+        flow_rate: 0.01
+        rainfall_rate: 5.7e-7
+      elevation:
+        ramp:

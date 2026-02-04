@@ -1,16 +1,25 @@
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, ListConfig
 
 from tensor_beasts.features.feature import Feature
+from tensor_beasts.registry import register_feature
 from tensor_beasts.util import generate_diffusion_kernel, safe_add, safe_sub
 
 
+def _to_tuple(key):
+    """Convert a key to tuple for TensorDict compatibility."""
+    if isinstance(key, (list, ListConfig)):
+        return tuple(key)
+    return key
+
+
+@register_feature
 class Seed(Feature):
     name = "seed"
     dtype = torch.uint8
     default_config = DictConfig({
-        "energy_key": "${key:plant,energy}",
-        "crowding_key": "${key:plant,crowding}",
+        "energy_key": None,     # Must be set by entity config
+        "crowding_key": None,   # Must be set by entity config
         "random_key": "${key:random}",
         "seed_prob": 0.01,
         "germination_prob": 0.01,
@@ -19,11 +28,11 @@ class Seed(Feature):
 
     def update(self, step: int):
         seed = self.data
-        crowding = self.td.get(self.config.crowding_key)
-        rand = self.td.get(self.config.random_key)
+        crowding = self.td.get(_to_tuple(self.config.crowding_key))
+        rand = self.td.get(_to_tuple(self.config.random_key))
         self.data = seed | (rand < self.config.seed_prob * crowding ** 2 * 255).type(seed.dtype)
 
-        energy = self.td.get(self.config.energy_key)
+        energy = self.td.get(_to_tuple(self.config.energy_key))
 
         seed_germination = (
             seed & ~(energy > 0) & (rand < ((1 - crowding) ** 2 * self.config.germination_prob * 255))
@@ -32,16 +41,17 @@ class Seed(Feature):
         safe_sub(seed, seed_germination)
 
 
+@register_feature
 class Crowding(Feature):
     name = "crowding"
     dtype = torch.float32
     default_config = DictConfig({
-        "energy_key": "${key:plant,energy}",
+        "energy_key": None,  # Must be set by entity config
         "scale": 0.9,
     })
 
     def update(self, step: int):
-        energy = self.td.get(self.config.energy_key)
+        energy = self.td.get(_to_tuple(self.config.energy_key))
         kernel = generate_diffusion_kernel(size=5)
         self.data = torch.conv2d(
             energy.unsqueeze(0).unsqueeze(0).type(torch.float32),

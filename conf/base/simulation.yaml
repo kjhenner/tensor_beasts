@@ -1,0 +1,222 @@
+# Base simulation configuration
+# Contains shared behavioral parameters - inherit and override size/init params
+
+display:
+  color_displays:
+    - title: "predator_scent"
+      fn_name: "default"
+      key: "${key:predator,scent}"
+      input_range: [0, 255]
+
+    - title: "herbivore_scent"
+      fn_name: "default"
+      key: "${key:herbivore,scent}"
+      input_range: [0, 255]
+
+    - title: "plant_scent"
+      fn_name: "default"
+      key: "${key:simpleplant,scent}"
+      input_range: [0, 255]
+
+    - title: "carrion_scent"
+      fn_name: "default"
+      key: "${key:simpleterrain,carrion_scent}"
+      input_range: [0, 255]
+
+    - title: "layers"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 16]
+          color_max: [0, 255, 127]
+          input_range: [0, 255]
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,biomass}"
+          threshold: 1
+          color_min: [64, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+        - key: "${key:simpleterrain,carrion}"
+          threshold: 1
+          color_min: [32, 16, 0]
+          color_max: [128, 64, 0]
+          input_range: [0, 255]
+
+    - title: "water_level"
+      fn_name: "default"
+      key: "${key:simpleterrain,simple_water}"
+      input_range: [0, 1]
+
+    - title: "carrion"
+      fn_name: "default"
+      key: "${key:simpleterrain,carrion}"
+      input_range: [0, 255]
+
+world:
+  device: auto
+  running: True
+  max_ups: 0
+  size: [256, 256]  # Default size, override in child configs
+
+  # Global shared feature parameters
+  # These are shared across all instances of each feature type
+  shared_features:
+    scent:
+      diffusion_steps: 3
+      kernel_size: 9
+      kernel_sigma: 2.5
+      max_decay: 0.15
+      decay_half: 50.0
+
+  entities:
+    SimpleTerrain:
+      oscillator:
+        frequency: 0.00005
+        amplitude: 0.5
+        offset: 0.0
+        phase: 0.0
+      simple_water:
+        perlin_scale: [8, 8]
+        perlin_octaves: 4
+        oscillator_amplitude: 1.0
+      carrion:
+        decay_rate: 0.01  # 1% decay per step - persists longer for scavenging
+      carrion_scent:
+        # Diffusion params inherited from world.shared_features.scent
+        energy_key: "${key:simpleterrain,carrion}"
+        emission_rate: 5.0  # Very strong scent from rotting meat
+
+    SimplePlant:
+      initial_energy: 128
+      init_prob: 0.1
+      ideal_water_level: 0.5
+      water_tolerance: 0.2
+      ideal_growth_rate: 0.08
+      seed:
+        energy_key: "${key:simpleplant,energy}"
+        crowding_key: "${key:simpleplant,crowding}"
+        germination_prob: 0.01
+        seed_prob: 0.01
+      crowding:
+        energy_key: "${key:simpleplant,energy}"
+      scent:
+        energy_key: "${key:simpleplant,energy}"
+        emission_rate: 1.0
+
+    Herbivore:
+      # Initialization - override in child configs
+      initial_energy: 40  # Lower for less consistent movement
+      initial_biomass: 100  # Lower so predators can kill faster
+      init_prob: 0.005
+      toy_init: False
+
+      # Scent based on biomass - higher emission for predator tracking
+      scent:
+        energy_key: "${key:herbivore,biomass}"
+        emission_rate: 6.0
+
+      # Eating - food sources tried in order until satiated
+      eat_max: 10
+      food_keys:
+        - "simpleplant:energy"
+
+      # Perception
+      perception:
+        - key: "simpleplant:scent"
+          kernel_size: 1
+        - key: "predator:scent"
+          kernel_size: 1
+
+      # Navigation weights
+      navigation_weights:
+        "simpleplant:scent": 1.0
+        "predator:scent": -1.0  # Reduced flee weight for better predator balance
+
+      # Perception processing
+      log_scale: 50.0
+
+      # Metabolism
+      basal_rate: 2
+      metabolic_sensitivity: 2.5
+      max_metabolic_rate: 6
+      gradient_ema_alpha: 0.9
+
+      # Efficiency curve
+      min_efficiency: 2.5
+      max_efficiency: 3.5
+
+      # Dissipation
+      dissipation_rate: 0.08
+      dissipation_floor: 1
+
+      # Movement cost
+      base_movement_cost: 1
+
+      # Death & Reproduction
+      survival_threshold: 32  # Below this, animal dies and becomes carrion
+      carrion_key: "simpleterrain:carrion"
+      reproduction_threshold: 200
+
+    Predator:
+      # Initialization - override in child configs
+      initial_energy: 250  # Near-max for very consistent movement
+      initial_biomass: 220
+      init_prob: 0.0008  # Slightly more predators
+      toy_init: False
+
+      # Scent based on biomass
+      scent:
+        energy_key: "${key:predator,biomass}"
+        emission_rate: 2.0
+
+      # Eating - predators eat herbivore biomass, carrion
+      eat_max: 35  # Higher damage when catching prey
+      food_keys:
+        - "herbivore:biomass"
+        - "simpleterrain:carrion"
+
+      # Perception - can smell prey and carrion
+      perception:
+        - key: "herbivore:scent"
+          kernel_size: 1
+        - key: "simpleterrain:carrion_scent"
+          kernel_size: 1
+        - key: "predator:scent"
+          kernel_size: 1
+
+      # Navigation weights - carrion more attractive than live prey
+      # (easier meal, strong smell)
+      navigation_weights:
+        "herbivore:scent": 1.0
+        "simpleterrain:carrion_scent": 1.0  # Prefer carrion over chase
+        "predator:scent": -0.5
+
+      # Perception processing - higher sensitivity for tracking prey
+      log_scale: 100.0
+
+      # Metabolism
+      basal_rate: 2
+      metabolic_sensitivity: 2.5
+      max_metabolic_rate: 6
+      gradient_ema_alpha: 0.3  # Faster response to scent changes
+
+      # Efficiency curve - higher max for better endurance at rest
+      min_efficiency: 2.5
+      max_efficiency: 7.0
+
+      # Dissipation - very low for predator endurance
+      dissipation_rate: 0.005
+      dissipation_floor: 1
+
+      # Movement cost
+      base_movement_cost: 1
+
+      # Death & Reproduction
+      survival_threshold: 32  # Below this, animal dies and becomes carrion
+      carrion_key: "simpleterrain:carrion"
+      reproduction_threshold: 220

@@ -2,8 +2,12 @@ import pytest
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 
+from tensor_beasts.config.load import register_resolvers
 from tensor_beasts.entities import Terrain
 from tensor_beasts.world import World
+
+# Register OmegaConf resolvers (e.g., ${key:...}) at module load time
+register_resolvers()
 
 
 @pytest.fixture
@@ -20,17 +24,22 @@ def default_config(config_overrides) -> DictConfig:
         "size": [3, 3],
         "device": "cpu",
         "entities": {
-            "terrain": {
-                "elevation": {},
+            "Terrain": {
+                "elevation": {"ramp": {}},
                 "aquifer_elevation": {},
                 "soil_volume": {},
-                "soil_water_volume": {},
-                "surface_water_volume": {},
-                "neighbor_distances": {},
-                "slopes": {},
-                "soil_saturation_gradient": {},
-                "surface_outflow": {},
-                "subsurface_outflow": {}
+                "soil_water_volume": {
+                    "field_capacity": 0.5,
+                    "infiltration_rate": 0.0,
+                    "flow_rate": 0.0,
+                    "evaporation_rate": 0.0
+                },
+                "surface_water_volume": {
+                    "rainfall_rate": 0.0,
+                    "flow_rate": 0.0,
+                    "steps": 1,
+                    "relaxation_factor": 1.0
+                }
             }
         }
     })
