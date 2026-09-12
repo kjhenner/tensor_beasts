@@ -204,6 +204,34 @@ class MultiAgentWorldEnv:
         self.observation_channels = self._build_observation().shape[0]
         self.channel_names = self._channel_names()
 
+    @classmethod
+    def attach(cls, world: World, entity_name: str = DEFAULT_ENTITY) -> "MultiAgentWorldEnv":
+        """Wrap an already-built World, for driving it with a learned policy.
+
+        The interactive viewer in tensor_beasts/main.py owns its World and its
+        display thread; this gives it the same observation encoding a trained
+        network expects, without constructing a second world. Transition
+        tracking is not enabled here: acting needs only the observation.
+        """
+        env = cls.__new__(cls)
+        env.config_path = None
+        env.entity_name = entity_name
+        env.survival_reward = 0.0
+        env.reproduction_reward = 0.0
+        env.foraging_reward = 0.0
+        env.world_config = world.config
+        env.size = tuple(world.size)
+        env.world = world
+        if entity_name not in world.entity_dict:
+            raise ValueError(
+                f"Entity {entity_name!r} is not in this world. Available: {sorted(world.entity_dict)}"
+            )
+        env.device = world.entity_dict[entity_name].biomass.data.device
+        env._flat_index = torch.arange(env.size[0] * env.size[1], device=env.device).reshape(*env.size)
+        env.observation_channels = env._build_observation().shape[0]
+        env.channel_names = env._channel_names()
+        return env
+
     # ------------------------------------------------------------------
     # Entity access
     # ------------------------------------------------------------------

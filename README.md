@@ -122,6 +122,19 @@ population goes extinct and the three-species dynamic degenerates, so a small
 world is a different problem rather than a cheap version of this one. Use 256
 for iteration and 512 for results.
 
+To watch a learned policy in the interactive viewer instead of reading numbers
+about it:
+
+```bash
+python -m tensor_beasts --policy outputs/rl/conv_imitation2/checkpoint.pt
+python -m tensor_beasts --policy <checkpoint> --deterministic   # its clearest intent
+```
+
+Herbivores are then driven by the checkpoint and everything else runs as
+normal; the stats printed each frame say which policy is in charge. Use the
+config the policy was trained on, which for the checkpoints here is the default
+`conf/basic_config.yaml`.
+
 `tensor_beasts/rl/envs/world_environment.py` is a separate, single-controller
 Gymnasium environment, kept for off-the-shelf algorithms that expect that API.
 

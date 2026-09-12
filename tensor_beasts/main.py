@@ -24,15 +24,34 @@ def parse_args() -> argparse.Namespace:
         "--config_path",
         type=str,
         help="The path to the config file.",
-        default="conf/beast_config.yaml"
+        default="conf/basic_config.yaml"
+    )
+    parser.add_argument(
+        "--policy",
+        type=str,
+        default=None,
+        help=(
+            "Path to a train_rl.py checkpoint. Herbivores are then driven by the "
+            "learned policy instead of the rule-based one, so its behaviour can be "
+            "watched. Use the config the policy was trained on."
+        ),
+    )
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="With --policy, take the most likely direction instead of sampling.",
     )
     return parser.parse_args()
 
 
 class WorldThread(threading.Thread):
-    def __init__(self, world, update_screen_cb, clock, device, running=True, max_ups=None):
+    def __init__(self, world, update_screen_cb, clock, device, running=True, max_ups=None, action_fn=None):
         super().__init__(daemon=True)
         self.world = world
+        # Optional callable returning the action TensorDict for this step, used
+        # to drive an entity with a learned policy. None means the simulation's
+        # own rule-based policies decide everything.
+        self.action_fn = action_fn
         self.update_screen_cb = update_screen_cb
         self.clock = clock
         self.done = False
@@ -49,7 +68,7 @@ class WorldThread(threading.Thread):
 
     def step(self):
         start = time.time()
-        self.world.update()
+        self.world.update(self.action_fn() if self.action_fn is not None else None)
         end = time.time()
         if self.max_ups:
             step_time = 1 / self.max_ups
@@ -69,7 +88,7 @@ class WorldThread(threading.Thread):
                 time.sleep(0.01)  # Don't busy-wait when paused
 
 
-def main(config: DictConfig):
+def main(config: DictConfig, policy_path: str = None, deterministic: bool = False):
     if config.world.device == 'auto' or not config.world.device:
         if torch.cuda.is_available():
             config.world.device = "cuda"
@@ -85,6 +104,13 @@ def main(config: DictConfig):
 
     world = World(config.world)
     world.initialize()
+
+    controller = None
+    if policy_path is not None:
+        from tensor_beasts.rl.controller import LearnedController
+
+        controller = LearnedController(world, policy_path, deterministic=deterministic)
+        print(f"Driving with {controller.describe()}")
 
     clock = pygame.time.Clock()
 
@@ -103,6 +129,7 @@ def main(config: DictConfig):
     def update_screen(step, world_stats):
         runtime_stats = {
             'fps': clock.get_fps(),
+            'policy': controller.describe() if controller is not None else 'rule-based',
             'step': step,
             'hour': step // 60,
             'day': step // 1440
@@ -132,7 +159,8 @@ def main(config: DictConfig):
         clock,
         device=config.world.device,
         running=config.world.running,
-        max_ups=config.world.max_ups
+        max_ups=config.world.max_ups,
+        action_fn=controller.action if controller is not None else None,
     )
     world_thread.start()
 
@@ -198,4 +226,4 @@ if __name__ == "__main__":
     args = parse_args()
     config = load_config(args.config_path)
     print(config)
-    main(config)
+    main(config, policy_path=args.policy, deterministic=args.deterministic)

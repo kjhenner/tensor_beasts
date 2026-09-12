@@ -42,6 +42,8 @@ import torch.nn.functional as F
 from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.rollout import Rollout
 
+NUM_ACTIONS = 5
+
 
 def iter_minibatches_with_value(
     rollout: Rollout,
@@ -324,12 +326,19 @@ class PPO:
             kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
             imitation_loss = masked_mean(kl, mask)
             with torch.no_grad():
-                # Conformance to the scoring regime: the Bhattacharyya
-                # coefficient between the two distributions. It is 1 exactly
-                # when they match, including where the rule is unsure, and 0
-                # when they share no support. (A first attempt normalized the
-                # overlap by the target's self-overlap, which can exceed 1.)
-                conformance = float(masked_mean((target * log_probs.exp()).sqrt().sum(dim=1), mask))
+                # Conformance to the scoring regime, as progress from a uniform
+                # policy toward an exact match. The raw Bhattacharyya coefficient
+                # between the policy and the target is 1 at an exact match, but
+                # because the targets are themselves diffuse a uniform policy
+                # already scores about 0.77 against them; a cross-fade keyed on
+                # the raw value let go of the anchor within two updates while
+                # argmax agreement was still at chance. Rescaling so that the
+                # uniform policy sits at 0 and an exact match at 1 makes the
+                # target comparable to the hard-imitation scale it replaced.
+                overlap = (target * log_probs.exp()).sqrt().sum(dim=1)
+                uniform_overlap = (target / NUM_ACTIONS).sqrt().sum(dim=1)
+                progress = (overlap - uniform_overlap) / (1.0 - uniform_overlap).clamp(min=1e-6)
+                conformance = float(masked_mean(progress.clamp(-1.0, 1.0), mask))
         elif rule_action is not None:
             rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
             imitation_loss = -masked_mean(rule_log_prob, mask)

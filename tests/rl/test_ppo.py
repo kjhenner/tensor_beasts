@@ -542,8 +542,9 @@ def test_soft_distillation_raises_scoring_conformance():
     first = ppo.update(network, rollout, optimizer)
     for _ in range(40):
         last = ppo.update(network, rollout, optimizer)
-    assert last["conformance"] > first["conformance"] + 0.15
-    assert last["conformance"] > 0.9
+    assert first["conformance"] < 0.3, "a near-uniform policy should start near zero progress"
+    assert last["conformance"] > first["conformance"] + 0.3
+    assert last["conformance"] > 0.7
     assert last["imitation_loss"] < first["imitation_loss"] * 0.5
     assert 0.0 <= last["conformance"] <= 1.0 + 1e-6
 
@@ -629,3 +630,23 @@ def test_soft_imitation_is_masked_to_acting_cells():
     batch[8] = scores
     after = float(ppo.minibatch_loss(network, tuple(batch)))
     assert before == pytest.approx(after)
+
+
+
+def test_uniform_policy_has_zero_soft_conformance():
+    """The calibration bug this guards against: the raw overlap of a uniform
+    policy with a diffuse target is already high, and a cross-fade keyed on it
+    released the anchor at chance-level agreement."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    rollout = _rollout_with_rule_scores(gap=0.5)
+    network = build_network("linear", 6)
+    with torch.no_grad():
+        network.policy_head.weight.zero_()
+        network.policy_head.bias.zero_()
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1))
+    batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
+    _, diagnostics = ppo._losses(network, *batch)
+    assert diagnostics["conformance"] == pytest.approx(0.0, abs=1e-4)
