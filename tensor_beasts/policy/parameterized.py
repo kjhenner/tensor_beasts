@@ -11,6 +11,7 @@ import torch
 from omegaconf import DictConfig
 
 from tensor_beasts.policy.base import Action
+from tensor_beasts.policy.metabolism import effective_max_metabolic_rate
 
 if TYPE_CHECKING:
     from tensor_beasts.observations import Observation
@@ -248,13 +249,8 @@ class ParameterizedPolicy:
         max_rate = self._max_metabolic_rate.item()
         threshold = self._survival_threshold
 
-        # Biomass fraction above survival threshold
-        biomass_range = 255.0 - threshold
-        biomass_above = (biomass.float() - threshold).clamp(min=0)
-        biomass_fraction = (biomass_above / biomass_range).clamp(0, 1)
-
-        # Effective max rate based on biomass
-        effective_max = basal + (max_rate - basal) * biomass_fraction
+        # Biomass-limited maximum, shared with every other rate setter.
+        effective_max = effective_max_metabolic_rate(biomass, basal, max_rate, threshold)
 
         # Rate from gradient
         rate = basal + gradient_ema * sensitivity

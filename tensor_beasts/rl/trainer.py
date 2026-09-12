@@ -64,6 +64,10 @@ class TrainerConfig:
             shaping; evaluation stays herbivore-steps survived either way.
         arch: Network name from ``tensor_beasts.rl.networks.ARCHITECTURES``.
         arch_kwargs: Extra constructor arguments for that network.
+        metabolic_levels: Number of discrete metabolic levels the policy
+            controls through a second network head, or 0 to leave the
+            metabolic rate to the simulation's rules and learn movement only.
+            Zero is the default so existing runs reproduce.
         device: "auto", "cpu", "mps", "cuda".
         seed: Seed for the training world and the torch RNG.
         total_world_steps: Length of the run, in world steps.
@@ -95,6 +99,7 @@ class TrainerConfig:
 
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
+    metabolic_levels: int = 0
     device: str = "auto"
     seed: int = 0
 
@@ -266,6 +271,7 @@ class Trainer:
             network = build_network(
                 self.config.arch,
                 self.observation_channels,
+                num_metabolic_levels=self.config.metabolic_levels,
                 **dict(self.config.arch_kwargs),
             )
         self.network: ActorCritic = network.to(self.device)
@@ -306,6 +312,7 @@ class Trainer:
             reproduction_reward=config.reproduction_reward,
             foraging_reward=config.foraging_reward,
             device=str(self.device),
+            num_metabolic_levels=config.metabolic_levels,
         )
 
     def _init_wandb(self) -> None:
@@ -322,29 +329,48 @@ class Trainer:
     # ------------------------------------------------------------------
     # Acting
     # ------------------------------------------------------------------
+    @staticmethod
+    def _sample(logits: torch.Tensor, deterministic: bool) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Sample (or argmax) one categorical per cell from ``(1, K, H, W)`` logits.
+
+        Returns (action, log_prob), both ``(1, H, W)``.
+        """
+        log_probs = torch.log_softmax(logits, dim=1)
+        if deterministic:
+            action = log_probs.argmax(dim=1)
+        else:
+            flat = log_probs.permute(0, 2, 3, 1).reshape(-1, logits.shape[1])
+            action = torch.multinomial(flat.exp(), 1).reshape(logits.shape[0], *logits.shape[2:])
+        log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+        return action, log_prob
+
     @torch.no_grad()
     def act(
         self, observation: torch.Tensor, deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Sample a direction for every cell. Returns (action, log_prob, value).
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """Sample an action for every cell.
+
+        Returns (action, log_prob, value, metabolic_action). ``metabolic_action``
+        is None unless the network has a metabolic head, in which case both
+        heads are sampled independently and ``log_prob`` is the joint
+        log-probability, the quantity the PPO ratio is defined over.
 
         Actions are produced for the whole grid, empty cells included. The
         simulation ignores directions at cells with nobody in them, and the loss
         masks those entries out, so the wasted work is a few hundred thousand
         multiply-adds that the convolution was doing anyway.
         """
-        logits, value = self.network(observation.unsqueeze(0))
-        log_probs = torch.log_softmax(logits, dim=1)
-        if deterministic:
-            action = log_probs.argmax(dim=1)
-        else:
-            flat = log_probs.permute(0, 2, 3, 1).reshape(-1, NUM_ACTIONS)
-            action = torch.multinomial(flat.exp(), 1).reshape(logits.shape[0], *logits.shape[2:])
-        log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+        out = self.network.forward_all(observation.unsqueeze(0))
+        action, log_prob = self._sample(out["logits"], deterministic)
+        metabolic_action = None
+        if "metabolic_logits" in out:
+            metabolic_action, metabolic_log_prob = self._sample(out["metabolic_logits"], deterministic)
+            log_prob = log_prob + metabolic_log_prob
+            metabolic_action = metabolic_action.squeeze(0)
         # The advantage recursion mixes rewards and bootstrapped values, so it
         # has to run in real return units, not normalized ones.
-        value = self.value_normalizer.denormalize(value)
-        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0)
+        value = self.value_normalizer.denormalize(out["value"])
+        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0), metabolic_action
 
     # ------------------------------------------------------------------
     # Collection
@@ -360,8 +386,8 @@ class Trainer:
 
         for _ in range(steps):
             observation = policy_input(_observe(self.env))
-            action, log_prob, value = self.act(observation)
-            batch = self.env.step(action)
+            action, log_prob, value, metabolic_action = self.act(observation)
+            batch = self.env.step(action, metabolic_action)
             # The env rebuilt the observation itself; overwrite it with the
             # exact tensor the network saw, so stored and recomputed
             # log-probabilities agree bit for bit.
@@ -418,10 +444,10 @@ class Trainer:
                 batch = env.rule_based_step()
             else:
                 observation = policy_input(_observe(env))
-                action, _, _ = self.act(
+                action, _, _, metabolic_action = self.act(
                     observation, deterministic=self.config.eval_deterministic
                 )
-                batch = env.step(action)
+                batch = env.step(action, metabolic_action)
 
             tracker.update(batch)
             total_reward += float(batch.reward.sum())
@@ -489,6 +515,10 @@ class Trainer:
             "trainer_config": self.config.to_dict(),
             "ppo_config": self.ppo_config.to_dict(),
             "observation_channels": self.observation_channels,
+            # Recorded on its own as well as inside trainer_config, so the
+            # viewer's controller rebuilds the right head without knowing the
+            # trainer's field names.
+            "num_metabolic_levels": self.config.metabolic_levels,
             "world_steps": self.world_steps,
             "agent_steps": self.agent_steps,
             "updates": self.updates,
@@ -508,6 +538,12 @@ class Trainer:
                 f"Checkpoint was trained on {payload['observation_channels']} observation "
                 f"channels, this environment has {self.observation_channels}. The config or "
                 "the entity's perception changed."
+            )
+        levels = int(payload.get("num_metabolic_levels", 0))
+        if levels != self.config.metabolic_levels:
+            raise ValueError(
+                f"Checkpoint was trained with {levels} metabolic levels, this trainer "
+                f"has {self.config.metabolic_levels}. Pass --metabolic-levels {levels}."
             )
         self.network.load_state_dict(payload["network"])
         if load_optimizer:
@@ -537,11 +573,14 @@ class Trainer:
             ("entropy", "H"),
             ("approx_kl", "kl"),
             ("explained_variance", "ev"),
+            ("argmax_agreement", "agree"),
+            ("metabolic_agreement", "m_agree"),
+            ("metabolic_level_mean", "m_lvl"),
             ("world_steps_per_sec", "w/s"),
             ("agent_steps_per_sec", "a/s"),
         ):
             value = record.get(key)
-            if isinstance(value, (int, float)):
+            if isinstance(value, (int, float)) and value == value:  # skip NaN
                 parts.append(f"{label}={value:.3g}")
         return "  ".join(parts)
 

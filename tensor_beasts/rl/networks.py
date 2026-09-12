@@ -18,10 +18,18 @@ The interface is::
 
 with ``observation`` of shape ``(B, C, H, W)``, ``logits`` of shape
 ``(B, 5, H, W)`` over [stay, up, down, left, right], and ``value`` of shape
-``(B, H, W)``.
+``(B, H, W)``. That two-tuple is fixed: other algorithms and the tests depend
+on it. A network built with ``num_metabolic_levels > 0`` carries a second
+policy head over discrete metabolic levels, reachable through::
+
+    out = network.forward_all(observation)
+    out["logits"], out["value"], out["metabolic_logits"]  # (B, L, H, W)
+
+so a learner that controls both levers asks for everything and one that
+controls only movement keeps calling the network as before.
 """
 
-from typing import Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
@@ -48,15 +56,34 @@ class ActorCritic(nn.Module):
 
     The policy head uses a small gain so the initial distribution over the five
     directions is close to uniform. Starting near-deterministic is a common and
-    hard-to-diagnose cause of on-policy collapse.
+    hard-to-diagnose cause of on-policy collapse. The optional metabolic head
+    is initialized the same way, for the same reason.
+
+    Args:
+        in_channels: Observation channels.
+        trunk_channels: Channels the subclass's trunk produces.
+        num_metabolic_levels: If positive, add a second 1x1 policy head over
+            this many discrete metabolic levels. Zero means the network
+            controls movement only and the simulation's rules set the rate.
     """
 
-    def __init__(self, in_channels: int, trunk_channels: int):
+    def __init__(self, in_channels: int, trunk_channels: int, num_metabolic_levels: int = 0):
         super().__init__()
         self.in_channels = in_channels
         self.trunk_channels = trunk_channels
+        self.num_metabolic_levels = int(num_metabolic_levels)
         self.policy_head = orthogonal_init(nn.Conv2d(trunk_channels, NUM_ACTIONS, 1), gain=0.01)
         self.value_head = orthogonal_init(nn.Conv2d(trunk_channels, 1, 1), gain=1.0)
+        if self.num_metabolic_levels > 0:
+            self.metabolic_head = orthogonal_init(
+                nn.Conv2d(trunk_channels, self.num_metabolic_levels, 1), gain=0.01
+            )
+        else:
+            self.metabolic_head = None
+
+    @property
+    def has_metabolic_head(self) -> bool:
+        return self.metabolic_head is not None
 
     def features(self, observation: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
@@ -66,6 +93,23 @@ class ActorCritic(nn.Module):
         logits = self.policy_head(features)
         value = self.value_head(features).squeeze(1)
         return logits, value
+
+    def forward_all(self, observation: torch.Tensor) -> Dict[str, torch.Tensor]:
+        """Every head at once, from a single pass through the trunk.
+
+        Returns ``logits`` and ``value`` exactly as :meth:`forward` does, plus
+        ``metabolic_logits`` of shape ``(B, L, H, W)`` when the network has a
+        metabolic head. The key is absent otherwise, so a caller can tell the
+        two kinds of network apart without inspecting the module.
+        """
+        features = self.features(observation)
+        out = {
+            "logits": self.policy_head(features),
+            "value": self.value_head(features).squeeze(1),
+        }
+        if self.metabolic_head is not None:
+            out["metabolic_logits"] = self.metabolic_head(features)
+        return out
 
     @property
     def receptive_field(self) -> int:
@@ -90,8 +134,8 @@ class LinearPolicy(ActorCritic):
     everything below is a waste of time until that is fixed.
     """
 
-    def __init__(self, in_channels: int):
-        super().__init__(in_channels, in_channels)
+    def __init__(self, in_channels: int, num_metabolic_levels: int = 0):
+        super().__init__(in_channels, in_channels, num_metabolic_levels)
         self.trunk = nn.Identity()
 
     def features(self, observation: torch.Tensor) -> torch.Tensor:
@@ -107,8 +151,10 @@ class ConvActorCritic(ActorCritic):
     is whether a learner can exploit structure the hand-written rules cannot.
     """
 
-    def __init__(self, in_channels: int, hidden_channels: int = 64, depth: int = 3):
-        super().__init__(in_channels, hidden_channels)
+    def __init__(
+        self, in_channels: int, hidden_channels: int = 64, depth: int = 3, num_metabolic_levels: int = 0
+    ):
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
         layers = []
         channels = in_channels
         for _ in range(depth):
@@ -171,8 +217,10 @@ class ResidualActorCritic(ActorCritic):
     downsampling, since every cell needs its own output at full resolution.
     """
 
-    def __init__(self, in_channels: int, hidden_channels: int = 64, blocks: int = 4):
-        super().__init__(in_channels, hidden_channels)
+    def __init__(
+        self, in_channels: int, hidden_channels: int = 64, blocks: int = 4, num_metabolic_levels: int = 0
+    ):
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
         self.stem = orthogonal_init(nn.Conv2d(in_channels, hidden_channels, 3, padding=1), gain=2.0**0.5)
         self.blocks = nn.Sequential(*[ResidualBlock(hidden_channels) for _ in range(blocks)])
         self.out_norm = ChannelNorm(hidden_channels)
@@ -192,8 +240,14 @@ class DilatedActorCritic(ActorCritic):
     31x31 field from four layers.
     """
 
-    def __init__(self, in_channels: int, hidden_channels: int = 48, dilations: Tuple[int, ...] = (1, 2, 4, 8)):
-        super().__init__(in_channels, hidden_channels)
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int = 48,
+        dilations: Tuple[int, ...] = (1, 2, 4, 8),
+        num_metabolic_levels: int = 0,
+    ):
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
         layers = []
         channels = in_channels
         for dilation in dilations:
@@ -219,8 +273,13 @@ ARCHITECTURES = {
 }
 
 
-def build_network(name: str, in_channels: int, **kwargs) -> ActorCritic:
+def build_network(
+    name: str, in_channels: int, num_metabolic_levels: int = 0, **kwargs
+) -> ActorCritic:
     """Construct a network by name. See ARCHITECTURES for the options.
+
+    ``num_metabolic_levels`` adds the metabolic head (see :class:`ActorCritic`)
+    and is passed through to every architecture.
 
     Always built on the CPU, whatever the default device is, and moved by the
     caller. Orthogonal initialization needs a QR decomposition, which Metal does
@@ -231,4 +290,4 @@ def build_network(name: str, in_channels: int, **kwargs) -> ActorCritic:
     if name not in ARCHITECTURES:
         raise ValueError(f"Unknown architecture {name!r}. Options: {sorted(ARCHITECTURES)}")
     with torch.device("cpu"):
-        return ARCHITECTURES[name](in_channels, **kwargs)
+        return ARCHITECTURES[name](in_channels, num_metabolic_levels=num_metabolic_levels, **kwargs)

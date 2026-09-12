@@ -86,6 +86,7 @@ survival?** The rule-based policy is not a strawman, so this is a real question.
 python train_rl.py                          # train, then score against the baseline
 python train_rl.py --arch dilated --size 512
 python train_rl.py --eval-only outputs/rl/checkpoint.pt
+python train_rl.py --metabolic-levels 4     # learn the metabolic rate as well as the direction
 python sweep_rl.py --trials 16              # parallel hyperparameter search
 python evaluate_policy.py --size 512        # score the baseline on its own
 ```

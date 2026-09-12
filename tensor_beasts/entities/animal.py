@@ -10,6 +10,7 @@ from tensor_beasts.entities.helpers.animal_helpers import move
 from tensor_beasts.features.shared_features import Energy, Scent
 from tensor_beasts.observations import get_observation
 from tensor_beasts.policy.base import Action, AnimalPolicy
+from tensor_beasts.policy.metabolism import clamp_metabolic_rate, effective_max_metabolic_rate
 from tensor_beasts.policy.rule_based import RuleBasedPolicy
 from tensor_beasts.policy.parameterized import ParameterizedPolicy
 
@@ -236,14 +237,8 @@ class Animal(Entity):
         max_rate = self.config.max_metabolic_rate
         threshold = self.config.survival_threshold
 
-        # Biomass modulates the maximum achievable metabolic rate
-        # Scale from survival_threshold (0% capacity) to 255 (100% capacity)
-        biomass_range = 255.0 - threshold
-        biomass_above_threshold = (biomass.float() - threshold).clamp(min=0)
-        biomass_fraction = biomass_above_threshold / biomass_range
-        biomass_fraction = biomass_fraction.clamp(0, 1)
-
-        effective_max_rate = basal + (max_rate - basal) * biomass_fraction
+        # Biomass-limited maximum, shared with the policies and the override.
+        effective_max_rate = effective_max_metabolic_rate(biomass, basal, max_rate, threshold)
 
         # Direct sensitivity: each unit of gradient adds to metabolic rate
         rate = basal + gradient_ema * sensitivity
@@ -333,18 +328,40 @@ class Animal(Entity):
             vals = ", ".join(fmt_val(k, v) for k, v in values.items())
             print(f"  [{self.__class__.__name__}@({x},{y})] {label}: {vals}")
 
-    def update(self, action: Optional[torch.Tensor] = None):
+    @staticmethod
+    def _split_external_action(action):
+        """Return (direction, metabolic_rate) from an external action override.
+
+        Two forms are accepted. A bare (H, W) int64 tensor is a direction
+        override and nothing else, which is what the first learned policies
+        sent and what must keep working unchanged. A mapping (dict or
+        TensorDict) with key ``"direction"`` and optionally ``"metabolic_rate"``
+        overrides the throttle as well. Either entry may be None.
+        """
+        if action is None:
+            return None, None
+        if isinstance(action, torch.Tensor):
+            return action, None
+        return action.get("direction", None), action.get("metabolic_rate", None)
+
+    def update(self, action: Optional[Union[torch.Tensor, Dict[str, torch.Tensor]]] = None):
         """
         Main update loop for animal entities.
 
         Uses the policy to make all decisions, then executes them.
 
         Args:
-            action: Optional external action override (for RL). If provided,
-                   overrides the policy's move_direction output.
+            action: Optional external action override (for RL). Either a bare
+                (H, W) int64 direction tensor, which overrides only the
+                policy's move_direction, or a mapping with ``"direction"``
+                (H, W) int64 and optionally ``"metabolic_rate"`` (H, W)
+                float32, the desired biomass to burn this step. A learned rate
+                is clamped to ``[basal_rate, effective_max(biomass)]`` through
+                the same biomass cap the rule-based policy applies: an animal
+                cannot burn what it does not carry, whoever sets the throttle.
         """
         # Capture external action before policy call produces local 'action' variable
-        external_action = action
+        external_action, external_rate = self._split_external_action(action)
         biomass = self.biomass.data
         energy = self.energy.data
         gradient_ema = self.gradient_ema.data
@@ -382,16 +399,29 @@ class Animal(Entity):
         # Step 4: Write back updated gradient EMA from policy
         gradient_ema[:] = action.gradient_ema
 
+        # External metabolic rate overrides the policy's, subject to the same
+        # biomass cap the policy applies to itself (see policy/metabolism.py).
+        # obs.biomass is what the policy capped against, so the two agree.
+        metabolic_rate = action.metabolic_rate
+        if external_rate is not None:
+            metabolic_rate = clamp_metabolic_rate(
+                external_rate.reshape(biomass.shape),
+                obs.biomass,
+                self.config.basal_rate,
+                self.config.max_metabolic_rate,
+                self.config.survival_threshold,
+            )
+
         if verbose and positions:
             self._log_metabolism(
                 positions, "GRADIENT",
                 gradient_ema=action.gradient_ema,
-                metabolic_rate=action.metabolic_rate,
-                efficiency=self._compute_efficiency(action.metabolic_rate)
+                metabolic_rate=metabolic_rate,
+                efficiency=self._compute_efficiency(metabolic_rate)
             )
 
-        # Step 5: Execute metabolism using action's metabolic_rate
-        self._execute_metabolism(action.metabolic_rate, verbose, positions if verbose else None)
+        # Step 5: Execute metabolism using the chosen metabolic_rate
+        self._execute_metabolism(metabolic_rate, verbose, positions if verbose else None)
 
         # Step 6: Execute energy dissipation
         self._execute_dissipation(verbose, positions if verbose else None)

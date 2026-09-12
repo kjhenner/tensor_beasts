@@ -26,6 +26,10 @@ trainer:
 
   arch: conv
   arch_kwargs: {}
+  # Second policy head over this many discrete metabolic levels, from basal to
+  # max_metabolic_rate, still capped by carried biomass. 0 leaves the rate to
+  # the rules and learns movement only; existing runs reproduce with 0.
+  metabolic_levels: 0
   device: auto
   seed: 0
 

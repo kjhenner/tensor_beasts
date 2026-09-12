@@ -18,6 +18,21 @@ entropy bonus, which is defined at every cell whether or not anybody is standing
 there; masking it is what keeps the entropy number interpretable as
 "entropy of a real agent's action distribution".
 
+Two levers, one anchor
+----------------------
+
+When the network carries a metabolic head (see
+:class:`~tensor_beasts.rl.networks.ActorCritic`) the per-cell policy is the
+product of two independent categoricals, one over directions and one over
+metabolic levels. The joint log-probability is the sum of the two, the entropy
+bonus is the sum of the two entropies, and the clipped ratio is taken over the
+joint, so ``rollout.log_prob`` must hold the joint log-prob at collection
+time. The imitation anchor gains a second term, hard cross-entropy of the
+metabolic level toward the rule's own level on the same observation, weighted
+by the *same* cross-fade weight as the direction term: there is one anchor
+with two levers, and it releases as a whole when direction conformance
+reaches the target.
+
 Slotting in other algorithms
 ----------------------------
 
@@ -63,7 +78,8 @@ def iter_minibatches_with_value(
 
     Yields:
         (observation, acted, action, log_prob, value, advantage, ret, rule_action,
-        rule_scores), the last two None if the rollout does not carry them.
+        rule_scores, metabolic_action, rule_metabolic_level), the last four None
+        if the rollout does not carry them.
     """
     if shuffle:
         order = torch.randperm(rollout.steps, generator=generator)
@@ -81,6 +97,8 @@ def iter_minibatches_with_value(
             rollout.ret[index],
             rollout.rule_action[index] if rollout.rule_action is not None else None,
             rollout.rule_scores[index].float() if rollout.rule_scores is not None else None,
+            rollout.metabolic_action[index] if rollout.metabolic_action is not None else None,
+            rollout.rule_metabolic_level[index] if rollout.rule_metabolic_level is not None else None,
         )
 
 
@@ -254,23 +272,73 @@ class PPO:
     # Evaluation of a batch of grids under the current policy
     # ------------------------------------------------------------------
     @staticmethod
-    def evaluate_actions(
+    def _heads(
         network: nn.Module,
         observation: torch.Tensor,
         action: torch.Tensor,
+        metabolic_action: Optional[torch.Tensor] = None,
     ):
-        """Return (log_prob, entropy, value), each grid shaped ``(B, H, W)``.
+        """One forward pass, every per-cell quantity the losses need.
+
+        Returns a dict with ``logits``, ``log_probs`` (direction, (B,5,H,W)),
+        ``log_prob`` (joint, (B,H,W)), ``entropy`` (joint), ``value``, and when
+        the network has a metabolic head also ``metabolic_logits``,
+        ``metabolic_log_probs`` and ``metabolic_log_prob``.
 
         Written by hand rather than through ``torch.distributions.Categorical``
         because that would need a permute to put the action axis last on a
         four-dimensional tensor, which is both a copy of the largest tensor in
         the loop and an easy place to transpose height and width by accident.
         """
-        logits, value = network(observation)
+        has_head = bool(getattr(network, "has_metabolic_head", False))
+        if has_head:
+            out = network.forward_all(observation)
+            logits, value = out["logits"], out["value"]
+        else:
+            logits, value = network(observation)
         log_probs = F.log_softmax(logits, dim=1)
         log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
         entropy = -(log_probs.exp() * log_probs).sum(dim=1)
-        return log_prob, entropy, value
+        result = {
+            "logits": logits,
+            "log_probs": log_probs,
+            "log_prob": log_prob,
+            "entropy": entropy,
+            "value": value,
+        }
+        if has_head:
+            if metabolic_action is None:
+                raise ValueError(
+                    "The network has a metabolic head but the rollout carries no "
+                    "metabolic_action. Build the environment with the same "
+                    "num_metabolic_levels as the network."
+                )
+            metabolic_log_probs = F.log_softmax(out["metabolic_logits"], dim=1)
+            metabolic_log_prob = metabolic_log_probs.gather(1, metabolic_action.unsqueeze(1)).squeeze(1)
+            metabolic_entropy = -(metabolic_log_probs.exp() * metabolic_log_probs).sum(dim=1)
+            # Independent heads: the joint log-prob and entropy are sums.
+            result["log_prob"] = log_prob + metabolic_log_prob
+            result["entropy"] = entropy + metabolic_entropy
+            result["metabolic_logits"] = out["metabolic_logits"]
+            result["metabolic_log_probs"] = metabolic_log_probs
+            result["metabolic_log_prob"] = metabolic_log_prob
+            result["metabolic_entropy"] = metabolic_entropy
+        return result
+
+    @staticmethod
+    def evaluate_actions(
+        network: nn.Module,
+        observation: torch.Tensor,
+        action: torch.Tensor,
+        metabolic_action: Optional[torch.Tensor] = None,
+    ):
+        """Return (log_prob, entropy, value), each grid shaped ``(B, H, W)``.
+
+        With a metabolic head on the network, ``log_prob`` and ``entropy`` are
+        the joint quantities over both levers; see the module docstring.
+        """
+        heads = PPO._heads(network, observation, action, metabolic_action)
+        return heads["log_prob"], heads["entropy"], heads["value"]
 
     # ------------------------------------------------------------------
     # One minibatch
@@ -287,12 +355,17 @@ class PPO:
         ret: torch.Tensor,
         rule_action: Optional[torch.Tensor] = None,
         rule_scores: Optional[torch.Tensor] = None,
+        metabolic_action: Optional[torch.Tensor] = None,
+        rule_metabolic_level: Optional[torch.Tensor] = None,
     ):
         config = self.config
-        logits, value = network(observation)
-        log_probs = F.log_softmax(logits, dim=1)
-        log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
-        entropy = -(log_probs.exp() * log_probs).sum(dim=1)
+        heads = self._heads(network, observation, action, metabolic_action)
+        logits, value = heads["logits"], heads["value"]
+        log_probs = heads["log_probs"]
+        # Joint over both levers when the network has a metabolic head; the
+        # stored old_log_prob is the joint too, so the ratio is well defined.
+        log_prob = heads["log_prob"]
+        entropy = heads["entropy"]
 
         mask = acted.float()
         log_ratio = (log_prob - old_log_prob) * mask
@@ -356,10 +429,33 @@ class PPO:
         if rule_action is not None:
             with torch.no_grad():
                 argmax_agreement = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
+        # The metabolic lever's anchor: hard cross-entropy toward the level the
+        # rule would have chosen, under the same cross-fade weight. Agreement
+        # and the mean chosen level are logged whether or not the term is
+        # active, so the log shows whether the learner runs hot or cold.
+        metabolic_imitation_loss = torch.zeros((), device=loss.device)
+        metabolic_agreement = float("nan")
+        metabolic_level_mean = float("nan")
+        metabolic_entropy = float("nan")
+        if "metabolic_log_probs" in heads:
+            metabolic_log_probs = heads["metabolic_log_probs"]
+            with torch.no_grad():
+                metabolic_level_mean = float(masked_mean(metabolic_action.float(), mask))
+                metabolic_entropy = float(masked_mean(heads["metabolic_entropy"], mask))
+            if rule_metabolic_level is not None:
+                rule_level_log_prob = metabolic_log_probs.gather(
+                    1, rule_metabolic_level.unsqueeze(1)
+                ).squeeze(1)
+                metabolic_imitation_loss = -masked_mean(rule_level_log_prob, mask)
+                with torch.no_grad():
+                    metabolic_agreement = float(
+                        masked_mean((metabolic_log_probs.argmax(dim=1) == rule_metabolic_level).float(), mask)
+                    )
+
         if soft or rule_action is not None:
             weight = self.imitation_weight()
             if weight > 0.0:
-                loss = loss + weight * imitation_loss
+                loss = loss + weight * (imitation_loss + metabolic_imitation_loss)
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
@@ -381,16 +477,16 @@ class PPO:
             "imitation_weight": self.imitation_weight(),
             "conformance": conformance,
             "argmax_agreement": argmax_agreement,
+            "metabolic_imitation_loss": float(metabolic_imitation_loss.detach()),
+            "metabolic_agreement": metabolic_agreement,
+            "metabolic_level_mean": metabolic_level_mean,
+            "metabolic_entropy": metabolic_entropy,
         }
         return loss, diagnostics
 
     def minibatch_loss(self, network: nn.Module, batch) -> torch.Tensor:
         """Loss for one :func:`iter_minibatches_with_value` tuple. For tests."""
-        observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action, rule_scores = batch
-        loss, _ = self._losses(
-            network, observation, acted, action, old_log_prob, old_value, advantage, ret,
-            rule_action, rule_scores,
-        )
+        loss, _ = self._losses(network, *batch)
         return loss
 
     # ------------------------------------------------------------------
@@ -437,17 +533,14 @@ class PPO:
             for batch in iter_minibatches_with_value(
                 rollout, config.minibatch_steps, shuffle=True, generator=generator
             ):
-                observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action, rule_scores = batch
+                acted = batch[1]
                 agent_steps = float(acted.sum())
                 if agent_steps == 0:
                     # No individuals in these timesteps. Nothing to learn from,
                     # and every masked mean would be a structural zero.
                     continue
 
-                loss, diagnostics = self._losses(
-                    network, observation, acted, action, old_log_prob, old_value, advantage, ret,
-                    rule_action, rule_scores,
-                )
+                loss, diagnostics = self._losses(network, *batch)
 
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()

@@ -22,7 +22,13 @@ NUM_ACTIONS = 5
 
 
 class LearnedController:
-    """Chooses every controlled individual's direction from a checkpoint.
+    """Chooses every controlled individual's action from a checkpoint.
+
+    A checkpoint trained with a metabolic head drives both levers: the action
+    sent to the world is then a mapping with ``direction`` and
+    ``metabolic_rate``, which ``Animal.update`` clamps to what each
+    individual's biomass allows. A direction-only checkpoint sends the bare
+    direction tensor, exactly as before.
 
     Args:
         world: The live world to observe and act in.
@@ -48,7 +54,15 @@ class LearnedController:
         self.entity_name = entity_name or trainer_config.get("entity", "Herbivore")
         self.deterministic = deterministic
 
-        self.env = MultiAgentWorldEnv.attach(world, self.entity_name)
+        # Recorded explicitly by newer checkpoints; older ones predate the
+        # metabolic head and mean zero.
+        self.num_metabolic_levels = int(
+            payload.get("num_metabolic_levels", trainer_config.get("metabolic_levels", 0))
+        )
+
+        self.env = MultiAgentWorldEnv.attach(
+            world, self.entity_name, num_metabolic_levels=self.num_metabolic_levels
+        )
         self.device = device or self.env.device
 
         expected = payload.get("observation_channels", self.env.observation_channels)
@@ -62,6 +76,7 @@ class LearnedController:
         self.network = build_network(
             trainer_config["arch"],
             self.env.observation_channels,
+            num_metabolic_levels=self.num_metabolic_levels,
             **(trainer_config.get("arch_kwargs") or {}),
         )
         self.network.load_state_dict(payload["network"])
@@ -70,19 +85,40 @@ class LearnedController:
         self.trained_world_steps = payload.get("world_steps")
         self.arch = trainer_config["arch"]
 
+    def _sample(self, logits: torch.Tensor) -> torch.Tensor:
+        """One categorical per cell from ``(1, K, H, W)`` logits, as ``(H, W)``."""
+        if self.deterministic:
+            return logits.argmax(dim=1).squeeze(0)
+        flat = torch.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, logits.shape[1])
+        return torch.multinomial(flat.exp(), 1).reshape(*self.env.size)
+
     @torch.no_grad()
     def action(self) -> TensorDict:
-        """Directions for every cell, as the TensorDict World.update expects."""
+        """The action for every cell, as the TensorDict World.update expects.
+
+        Direction-only checkpoints map the entity to a bare (H, W) direction
+        tensor. Two-lever checkpoints map it to a nested TensorDict with
+        ``direction`` and ``metabolic_rate``; the level chosen by the network
+        is turned into a rate here, and the simulation applies the biomass cap.
+        """
         observation = self.env._build_observation().to(self.device)
-        logits, _ = self.network(observation.unsqueeze(0))
-        if self.deterministic:
-            direction = logits.argmax(dim=1)
-        else:
-            flat = torch.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, NUM_ACTIONS)
-            direction = torch.multinomial(flat.exp(), 1).reshape(1, *self.env.size)
-        return TensorDict({self.entity_name: direction.squeeze(0).to(self.env.device)}, batch_size=[])
+        out = self.network.forward_all(observation.unsqueeze(0))
+        direction = self._sample(out["logits"]).to(self.env.device)
+        if "metabolic_logits" not in out:
+            return TensorDict({self.entity_name: direction}, batch_size=[])
+        level = self._sample(out["metabolic_logits"]).to(self.env.device)
+        entity_action = TensorDict(
+            {"direction": direction, "metabolic_rate": self.env.metabolic_level_to_rate(level)},
+            batch_size=[],
+        )
+        return TensorDict({self.entity_name: entity_action}, batch_size=[])
 
     def describe(self) -> str:
         steps = f", trained for {self.trained_world_steps} world steps" if self.trained_world_steps else ""
         mode = "deterministic" if self.deterministic else "sampled"
-        return f"learned {self.arch} policy on {self.entity_name} ({mode}{steps})"
+        levers = (
+            f", movement + {self.num_metabolic_levels}-level metabolism"
+            if self.num_metabolic_levels
+            else ", movement only"
+        )
+        return f"learned {self.arch} policy on {self.entity_name} ({mode}{levers}{steps})"

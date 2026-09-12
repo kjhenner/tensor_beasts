@@ -77,6 +77,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--arch", default=None, choices=["linear", "conv", "residual", "dilated"]
     )
     model.add_argument("--hidden-channels", type=int, default=None)
+    model.add_argument(
+        "--metabolic-levels",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Let the policy set its own metabolic rate through a second head over "
+            "N discrete levels from basal to max_metabolic_rate, still capped by "
+            "carried biomass. 0 (the default) leaves the rate to the rules and "
+            "learns movement only, so existing runs reproduce. --eval-only and "
+            "--resume take the value from the checkpoint when this is not given."
+        ),
+    )
     model.add_argument("--device", default=None, help="auto, cpu, mps or cuda")
 
     loop = parser.add_argument_group("loop")
@@ -152,6 +165,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "foraging_reward": args.foraging_reward,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
+        "metabolic_levels": args.metabolic_levels,
         "device": args.device,
         "seed": args.seed,
         "total_world_steps": args.steps,
@@ -186,6 +200,18 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})
     ppo.update({k: v for k, v in ppo_flags.items() if v is not None})
+
+    # A checkpoint fixes the network's shape. When loading one and the flag was
+    # not given, take the head configuration from the checkpoint rather than
+    # refusing to load it.
+    checkpoint = args.eval_only or args.resume
+    if checkpoint and args.metabolic_levels is None:
+        import torch
+
+        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        trainer["metabolic_levels"] = int(
+            payload.get("num_metabolic_levels", payload["trainer_config"].get("metabolic_levels", 0))
+        )
 
     if args.hidden_channels is not None:
         arch_kwargs = dict(trainer.get("arch_kwargs") or {})
@@ -242,7 +268,8 @@ def main(argv: Optional[list] = None) -> int:
         f"arch={trainer_config.arch} params={trainer.network.num_parameters()} "
         f"receptive_field={trainer.network.receptive_field} "
         f"channels={trainer.observation_channels} device={trainer.device} "
-        f"size={trainer_config.size}x{trainer_config.size}"
+        f"size={trainer_config.size}x{trainer_config.size} "
+        f"metabolic_levels={trainer_config.metabolic_levels}"
     )
 
     if args.eval_only:

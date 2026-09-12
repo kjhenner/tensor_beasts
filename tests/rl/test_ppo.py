@@ -115,7 +115,7 @@ def test_losses_ignore_non_acting_cells():
     rollout = make_rollout(network)
     ppo = PPO(PPOConfig(minibatch_steps=STEPS))
 
-    observation, acted, action, log_prob, value, advantage, ret, _rule, _scores = single_batch(rollout)
+    observation, acted, action, log_prob, value, advantage, ret, *_ = single_batch(rollout)
     _, clean = ppo._losses(
         network, observation, acted, action, log_prob, value, advantage, ret
     )
@@ -236,7 +236,7 @@ def test_value_clipping_runs_and_changes_the_value_loss():
 
     unclipped = PPO(PPOConfig(minibatch_steps=STEPS))
     clipped = PPO(PPOConfig(minibatch_steps=STEPS, value_clip_range=1e-4))
-    observation, acted, action, log_prob, value, advantage, ret, _rule, _scores = batch
+    observation, acted, action, log_prob, value, advantage, ret, *_ = batch
     # Stand the recorded value away from the current prediction, the way it
     # would be part way through an update. With them equal, clipping is a no-op
     # by construction and the test would prove nothing.
@@ -294,7 +294,7 @@ def test_minibatch_iteration_covers_every_timestep_once():
     seen = 0
     for batch in iter_minibatches_with_value(rollout, 4):
         seen += batch[0].shape[0]
-        assert len(batch) == 9
+        assert len(batch) == 11
     assert seen == STEPS
 
 
