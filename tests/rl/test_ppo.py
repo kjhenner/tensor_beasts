@@ -669,3 +669,35 @@ def test_imitation_floor_keeps_a_permanent_pull():
     released = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8, imitation_floor=0.0))
     released.conformance = 0.9
     assert released.imitation_weight() == 0.0
+
+
+
+def test_metabolic_imitation_scale_zero_removes_the_throttle_anchor():
+    """The rule rests 90% of the time, so anchoring the throttle to it teaches
+    cold. Scale zero must leave the direction anchor intact and drop the
+    metabolic one, which the loss shows as independence from the rule level."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    torch.manual_seed(0)
+    rollout = _rollout_with_rule_actions()
+    steps, size = rollout.steps, rollout.observation.shape[-1]
+    rollout.metabolic_action = torch.randint(0, 4, (steps, size, size))
+    rollout.rule_metabolic_level = torch.zeros(steps, size, size, dtype=torch.long)
+    network = build_network("linear", 6, num_metabolic_levels=4)
+    batch = list(next(iter_minibatches_with_value(rollout, steps, shuffle=False)))
+
+    anchored = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, metabolic_imitation_scale=1.0))
+    unanchored = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, metabolic_imitation_scale=0.0))
+    with_rule = tuple(batch)
+    flipped = list(batch)
+    flipped[-1] = (flipped[-1] + 3) % 4  # a different rule level everywhere
+    flipped = tuple(flipped)
+
+    assert float(anchored.minibatch_loss(network, with_rule)) != pytest.approx(
+        float(anchored.minibatch_loss(network, flipped)), abs=1e-6
+    ), "with the anchor on, the rule level must matter"
+    assert float(unanchored.minibatch_loss(network, with_rule)) == pytest.approx(
+        float(unanchored.minibatch_loss(network, flipped)), abs=1e-6
+    ), "with scale zero the rule level must not matter"

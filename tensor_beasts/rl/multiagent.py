@@ -44,7 +44,7 @@ Three terms, all per individual:
 
 * ``survival_reward`` for each step the individual is still alive afterwards.
 * ``reproduction_reward`` when it divides.
-* ``foraging_reward`` times the change in its own biomass across the step.
+* ``foraging_reward`` times the biomass it ate this step.
 * Its episode ends when it dies.
 
 The metric this is a surrogate for is the one the project actually cares about,
@@ -192,8 +192,8 @@ class MultiAgentWorldEnv:
         entity_name: Which entity the policy controls.
         survival_reward: Reward per step an individual remains alive.
         reproduction_reward: Reward for dividing.
-        foraging_reward: Reward per unit of biomass gained across the step,
-            measured at the individual's own new cell. Dense and strongly
+        foraging_reward: Reward per unit of biomass eaten this step, read at
+            the individual's own new cell. Dense and strongly
             action-dependent, unlike the other two. Zero by default because it
             is reward shaping; see the module docstring.
         device: Torch device for the simulation.
@@ -511,13 +511,13 @@ class MultiAgentWorldEnv:
         )
 
         if self.foraging_reward:
-            # Follow the individual: it started at this cell and its biomass now
-            # lives at its successor cell, so the difference is its own change,
-            # not the change of whatever is standing here afterwards.
-            gained = (
-                biomass_flat[successor].reshape(*self.size).float() - biomass_before.float()
-            )
-            reward = reward + alive_after.float() * gained * self.foraging_reward
+            # What the individual ATE, read at its successor cell since eating
+            # happens after the move. Net biomass change was the first version
+            # and it punished the metabolic lever: burning biomass into energy
+            # is what metabolism does, so every unit burned cost reward and the
+            # learned throttle collapsed onto the coldest setting.
+            eaten = transition.eaten.reshape(-1)[successor].reshape(*self.size)
+            reward = reward + alive_after.float() * eaten * self.foraging_reward
 
         return reward, alive_after, successor, acted
 

@@ -194,6 +194,12 @@ class PPOConfig:
     # already know is good while leaving RL free to improve on it. Zero
     # preserves the earlier behaviour exactly.
     imitation_floor: float = 0.0
+    # Multiplier on the metabolic-level imitation term relative to the
+    # direction term. The rule burns at basal 90% of the time and never uses
+    # the top levels, so anchoring the throttle to it teaches "rest", and the
+    # first two-lever run collapsed onto the coldest level. Zero anchors
+    # direction only and lets the reward decide the throttle.
+    metabolic_imitation_scale: float = 1.0
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
@@ -455,7 +461,7 @@ class PPO:
         if soft or rule_action is not None:
             weight = self.imitation_weight()
             if weight > 0.0:
-                loss = loss + weight * (imitation_loss + metabolic_imitation_loss)
+                loss = loss + weight * (imitation_loss + config.metabolic_imitation_scale * metabolic_imitation_loss)
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.

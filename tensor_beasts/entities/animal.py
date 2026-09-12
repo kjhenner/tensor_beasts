@@ -43,6 +43,11 @@ class TransitionInfo:
     acted: torch.Tensor
     successor: torch.Tensor
     reproduced: torch.Tensor
+    # (H, W) float32, biomass gained by eating this step, indexed by the cell
+    # the individual occupies AFTER moving, i.e. its successor cell. What
+    # foraging actually is, as distinct from net biomass change, which also
+    # counts what metabolism burned and would punish using the throttle.
+    eaten: Optional[torch.Tensor] = None
 
 
 @register_entity
@@ -472,7 +477,10 @@ class Animal(Entity):
 
         # Step 8: Eating (fills biomass, not energy)
         biomass_before_eat = biomass.clone() if verbose else None
+        biomass_before_eat = biomass.clone() if self.config.track_transitions else None
         self._eat()
+        if self.last_transition is not None and biomass_before_eat is not None:
+            self.last_transition.eaten = (biomass.float() - biomass_before_eat.float()).clamp(min=0)
 
         if verbose and positions:
             eaten = biomass - biomass_before_eat

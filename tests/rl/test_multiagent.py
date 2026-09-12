@@ -181,30 +181,33 @@ def test_unknown_entity_is_rejected():
         MultiAgentWorldEnv(size=SIZE, entity_name="Dragon")
 
 
-def test_foraging_reward_tracks_the_individuals_own_biomass_change():
-    """The dense term must follow the individual, not the cell it left.
-
-    A cell-indexed version would credit an individual with the biomass of
-    whichever animal moved in behind it, which is the same class of mistake the
-    advantage recursion has to avoid.
+def test_foraging_reward_is_what_the_individual_ate_at_its_new_cell():
+    """The dense term rewards eating, read at the successor cell because eating
+    happens after the move. It is not net biomass change: that punished the
+    metabolic lever, since burning biomass is exactly what metabolism does.
     """
     env = build(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0)
     env.reset(seed=0)
 
+    total_eaten = 0.0
     for _ in range(12):
-        entity = env.entity
-        before = entity.biomass.data.clone()
         batch = env.step(torch.randint(0, 5, SIZE))
-
-        after_flat = entity.biomass.data.reshape(-1)
         survived = batch.acted & ~batch.done
         if not bool(survived.any()):
             continue
+        eaten = env.entity.last_transition.eaten.reshape(-1)[batch.successor[survived]]
+        assert torch.all(eaten >= 0)
+        assert torch.allclose(batch.reward[survived], eaten, atol=1e-4)
+        total_eaten += float(eaten.sum())
+    assert total_eaten > 0, "over twelve steps somebody should have eaten something"
 
-        expected = (
-            after_flat[batch.successor].reshape(*SIZE).float() - before.float()
-        )[survived]
-        assert torch.allclose(batch.reward[survived], expected, atol=1e-4)
+
+def test_foraging_reward_ignores_what_metabolism_burned():
+    """Burning biomass into energy must not cost foraging reward."""
+    env = build(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0)
+    env.reset(seed=0)
+    batch = env.step(torch.zeros(SIZE, dtype=torch.long))
+    assert torch.all(batch.reward >= 0), "net-change reward went negative when animals burned; eaten cannot"
 
 
 def test_foraging_reward_is_off_by_default():
