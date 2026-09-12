@@ -46,6 +46,19 @@ def build_parser() -> argparse.ArgumentParser:
     world.add_argument("--entity", default=None)
     world.add_argument("--survival-reward", type=float, default=None)
     world.add_argument("--reproduction-reward", type=float, default=None)
+    world.add_argument(
+        "--no-normalize-values",
+        dest="normalize_values",
+        action="store_const",
+        const=False,
+        default=None,
+        help=(
+            "Ablation. Predict raw returns instead of normalized ones. Expect the "
+            "policy to stop moving: the value term becomes the whole gradient norm "
+            "and global clipping scales the policy's share away with it. See "
+            "tensor_beasts/rl/normalization.py."
+        ),
+    )
 
     model = parser.add_argument_group("model")
     model.add_argument(
@@ -108,6 +121,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "entity": args.entity,
         "survival_reward": args.survival_reward,
         "reproduction_reward": args.reproduction_reward,
+        "normalize_values": args.normalize_values,
         "arch": args.arch,
         "device": args.device,
         "seed": args.seed,
