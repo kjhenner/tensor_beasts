@@ -12,12 +12,15 @@ This is cool because:
 
 ## Setup
 
-Set up [Poetry](https://python-poetry.org/docs/) if you haven't already.
+The repository ships a virtualenv. Everything below assumes it:
 
-From the root of this repository, run:
 ```bash
-poetry install tensor-beasts
+source venv/bin/activate
 ```
+
+To build one from scratch instead, set up
+[Poetry](https://python-poetry.org/docs/) and run `poetry install` from the
+repository root.
 
 ## Usage
 
@@ -57,6 +60,38 @@ Display renderers must be explicit:
 - `fn_name: cross_section` requires `background_color`, `screen_height`, `section_idx`, `section_dim`, `levels`
 
 
+## Development tools
+
+Three scripts at the repository root, all of which take `--help`:
+
+```bash
+python sim_bench.py golden        # hash world state; proves a change is behaviour-preserving
+python sim_bench.py bench         # steps per second by world size and device
+python evaluate_policy.py         # score a policy on herbivore survival
+python sim_diagnostics.py         # per-step ecosystem stats
+```
+
+`sim_bench.py golden --check baseline_golden.json` exits non-zero if simulation
+behaviour has drifted. Run it before and after any change meant to be a pure
+refactor or optimization. When a hash is *supposed* to move, re-capture the
+baseline in its own commit and say why, so behaviour changes stay visible in
+review.
+
+## Reinforcement learning
+
+```python
+from tensor_beasts.rl.envs import make_env, make_vector_env
+
+env = make_env("conf/base/simulation.yaml", size=(128, 128))
+vec = make_vector_env(8, size=(128, 128))   # eight worlds, eight processes
+```
+
+The observation, action, reward and termination contract is documented at the
+top of `tensor_beasts/rl/envs/world_environment.py`. The current rule-based
+baseline, which a learned policy has to beat, is about 25,500 herbivore-steps
+over a 600 step episode at 128x128; random scores about 14,200 and standing
+still goes extinct. See `planning/03-performance-and-rl-foundation.md`.
+
 ## TODO
 
 **UI**
@@ -69,6 +104,11 @@ Display renderers must be explicit:
     more species in the future.
 
 **Simulation**
+- [ ] Make the herbivore population sustain rather than decline. It falls from
+    91 to roughly 40 over a few hundred steps at 128x128 even under the
+    rule-based policy.
+- [ ] Keep predators alive. They go extinct by roughly step 200 on
+    `basic_config.yaml`.
 - [ ] Add obstacles.
 - [ ] Non-linear scent diffusion. It should be hard to accumulate maximum scent,
     but also hard for it to completely dissapate.
