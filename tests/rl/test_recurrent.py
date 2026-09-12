@@ -3,6 +3,7 @@
 Small worlds for speed; this is bookkeeping, not ecology.
 """
 
+import pytest
 import torch
 
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
@@ -213,3 +214,28 @@ def test_a_task_that_needs_memory_is_only_learned_recurrently():
     recurrent = agreement_after_training(window=T)
     assert recurrent > stage_one + 0.25, f"recurrent {recurrent:.3f} vs stage one {stage_one:.3f}"
     assert recurrent > 0.7
+
+
+
+def test_recurrent_diagnostics_are_not_diluted_by_window_gradient_norms():
+    """A fresh policy's first update must report entropy near ln(5), and the
+    recurrent path must report the same diagnostics as the plain path on the
+    same rollout with the same weights. The bug this pins: the per-window
+    gradient norm was added to the shared accumulator with the window's whole
+    weight, which halved every other diagnostic, including the conformance the
+    anchor's cross-fade is keyed on."""
+    import math
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    trainer, rollout = _collect(memory_size=2)
+    plain = PPO(PPOConfig(recurrent_window=0, epochs=1, minibatch_steps=rollout.steps),
+                value_normalizer=trainer.value_normalizer)
+    recurrent = PPO(PPOConfig(recurrent_window=3, epochs=1, minibatch_steps=rollout.steps),
+                    value_normalizer=trainer.value_normalizer)
+    frozen = torch.optim.Adam(trainer.network.parameters(), lr=1e-12)
+    a = plain.update(trainer.network, rollout, frozen)
+    b = recurrent.update(trainer.network, rollout, frozen)
+    assert abs(b["entropy"] - math.log(5)) < 0.05, f"first-update entropy {b['entropy']:.3f}"
+    for key in ("entropy", "policy_loss", "value_loss", "approx_kl"):
+        assert b[key] == pytest.approx(a[key], abs=2e-2), key
+    assert "grad_norm" in b and b["grad_norm"] > 0

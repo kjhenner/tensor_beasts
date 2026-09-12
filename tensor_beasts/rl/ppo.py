@@ -628,6 +628,11 @@ class PPO:
         window = int(config.recurrent_window)
         steps = rollout.steps
         accumulator = _Accumulator()
+        # Gradient norms arrive once per window, not once per step. Feeding them
+        # into the same accumulator added the window's whole weight to the
+        # shared denominator and halved every other diagnostic, including the
+        # conformance that drives the anchor's cross-fade. They get their own.
+        gradient_accumulator = _Accumulator()
         epochs_run = 0
         write_magnitudes: List[float] = []
 
@@ -678,7 +683,7 @@ class PPO:
                         (pending_loss / pending_weight).backward()
                         grad_norm = torch.nn.utils.clip_grad_norm_(network.parameters(), config.max_grad_norm)
                         optimizer.step()
-                        accumulator.add({"grad_norm": float(grad_norm)}, pending_weight)
+                        gradient_accumulator.add({"grad_norm": float(grad_norm)}, pending_weight)
                     pending_loss = None
                     pending_weight = 0.0
                     # Truncate: the next window starts from a constant read.
@@ -690,6 +695,7 @@ class PPO:
                     break
 
         result = accumulator.mean()
+        result.update(gradient_accumulator.mean())
         measured = result.get("conformance", float("nan"))
         if measured == measured:
             self.conformance = measured
