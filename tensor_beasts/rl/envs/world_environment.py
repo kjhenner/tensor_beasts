@@ -5,6 +5,17 @@ The environment exposes *herbivore* control: on every step the agent supplies a
 movement direction for every cell of the grid, the simulation advances one tick,
 and the agent is rewarded for keeping herbivores alive.
 
+This is the *single-controller* view: one agent receives the whole world and
+emits one direction per cell, rewarded by total population. It is a valid
+Gymnasium environment and is kept for comparison and for off-the-shelf
+algorithms that expect the Gymnasium API, but it is **not** the framing the
+project trains against. A single scalar reward against a per-cell action field
+makes credit assignment close to hopeless.
+
+For the framing that is actually trained, where every herbivore is its own
+agent with its own reward and its own episode, see
+``tensor_beasts/rl/multiagent.py``.
+
 Contract
 --------
 

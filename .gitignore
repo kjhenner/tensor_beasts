@@ -86,3 +86,7 @@ multirun/
 
 # Claude Code agent worktrees
 .claude/worktrees/
+
+# Local experiment output
+rl_baseline_512.txt
+runs/
