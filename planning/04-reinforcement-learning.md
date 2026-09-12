@@ -373,6 +373,35 @@ do not; that it transferred is encouraging but a policy trained at 512 may do
 better still. And this used hard argmax imitation; the soft distillation
 committed alongside it has not yet been run head to head.
 
+### Soft versus hard anchoring, head to head
+
+Same recipe, same seeds, differing only in the imitation target. Argmax
+agreement with the rules over training, and the paired evaluation at step 1664
+on the 256 world:
+
+| Step | Hard imitation | Soft distillation |
+|---|---|---|
+| 448 | 0.40 (conformance) | 0.65 |
+| 832 | 0.75 | 0.86 |
+| 1664 evaluation | **1.075x** | 0.988x |
+| 3200 (final agreement) | 0.76 | 0.78 |
+
+Soft distillation learns the rules faster and better, 0.86 agreement by step
+832 where hard imitation plateaued near 0.76, which confirms the reasoning:
+matching how the rule decides is a cleaner target than matching what it
+decided. It did not translate into a better policy on this pair of seeds.
+
+The training log shows the reason, and it is a problem with the cross-fade
+rather than with either target. Once the anchor released, reinforcement
+learning pulled the policy steadily away from the rules: agreement fell from
+0.87 to 0.78, conformance from 0.77 to 0.40, and the anchor re-engaged to 0.43
+and oscillated for the rest of the run. The hard-anchored run drifted less,
+sitting near its target with the anchor barely engaged. A gate that releases
+on conformance alone releases into a gradient that immediately lowers
+conformance. Options, untested: a floor on the anchor weight rather than zero,
+a release keyed on the *evaluation ratio* rather than on agreement, or simply
+a slower fade.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
