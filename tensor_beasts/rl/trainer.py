@@ -469,9 +469,13 @@ class Trainer:
         summary = {
             key: (sum(values) / len(values)) for key, values in results.items()
         }
-        baseline = summary.get("rule_based_total_reward", 0.0)
+        # The headline ratio is defined on herbivore-steps survived, never on
+        # total reward. Reward may be shaped (foraging_reward makes it signed),
+        # and a sweep once reported ratios of -0.72 because this divided shaped
+        # rewards. What is optimized may change; what is judged must not.
+        baseline = summary.get("rule_based_survived_agent_steps", 0.0)
         summary["learned_over_rule_based"] = (
-            summary.get("learned_total_reward", 0.0) / baseline if baseline else float("nan")
+            summary.get("learned_survived_agent_steps", 0.0) / baseline if baseline else float("nan")
         )
         return summary
 

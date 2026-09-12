@@ -260,3 +260,27 @@ def test_every_architecture_constructs_and_collects(tmp_path):
             trainer.network, rollout, trainer.optimizer
         )
         assert diagnostics["loss"] == diagnostics["loss"], arch
+
+
+def test_headline_ratio_is_survival_not_shaped_reward():
+    """A sweep once reported a ratio of -0.72. That is impossible for a ratio of
+    survival counts and was the sign that the ratio was dividing shaped
+    rewards, which foraging_reward makes negative. What is optimized may change;
+    what is judged must not."""
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+    from tensor_beasts.rl.ppo import PPOConfig
+
+    # Tiny world for speed; not a valid ecology, only a bookkeeping check.
+    config = TrainerConfig(
+        size=32, arch="linear", warmup_steps=5, total_world_steps=0,
+        eval_interval=0, eval_steps=8, eval_seeds=1, checkpoint_interval=0,
+        foraging_reward=5.0, survival_reward=0.0, reproduction_reward=0.0,
+        device="cpu",
+    )
+    trainer = Trainer(config, PPOConfig())
+    summary = trainer.evaluate()
+
+    baseline = summary["rule_based_survived_agent_steps"]
+    expected = summary["learned_survived_agent_steps"] / baseline
+    assert summary["learned_over_rule_based"] == pytest.approx(expected)
+    assert summary["learned_over_rule_based"] >= 0.0

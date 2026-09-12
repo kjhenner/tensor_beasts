@@ -50,7 +50,7 @@ def estimate_activation_bytes(
     minibatch_steps: int,
     height: int,
     width: int,
-    safety_factor: float = 1.5,
+    safety_factor: float = 2.0,
 ) -> int:
     """Peak bytes the backward pass will hold for one minibatch.
 
@@ -114,6 +114,35 @@ def total_system_bytes() -> Optional[int]:
         return None
 
 
+def available_system_bytes() -> Optional[int]:
+    """Memory actually free right now, or None if unknown.
+
+    Total physical RAM is the wrong budget. A sweep sized against it drove a
+    machine that already had other things resident six gigabytes into swap,
+    throughput fell 20 to 100 fold, and the main process was killed. On macOS
+    this reads vm_stat and counts free plus inactive pages.
+    """
+    try:
+        import re
+        import subprocess
+
+        out = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            page = re.search(r"page size of (\d+) bytes", out.stdout)
+            free = re.search(r"Pages free:\s+(\d+)", out.stdout)
+            inactive = re.search(r"Pages inactive:\s+(\d+)", out.stdout)
+            if page and free and inactive:
+                return (int(free.group(1)) + int(inactive.group(1))) * int(page.group(1))
+    except Exception:  # noqa: BLE001 - best effort only
+        pass
+    try:
+        import os
+
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_AVPHYS_PAGES")
+    except (AttributeError, ValueError, OSError):
+        return None
+
+
 def format_bytes(value: int) -> str:
     gigabytes = value / 1e9
     if gigabytes >= 1.0:
@@ -126,13 +155,15 @@ def workers_that_fit(
     requested: int,
     budget_fraction: float = 0.5,
 ) -> int:
-    """How many parallel trials fit, given a fraction of physical RAM.
+    """How many parallel trials fit, given a fraction of memory free right now.
 
-    Half the machine by default. The other half is the operating system, the
-    page cache, and whatever else is running; a sweep that takes the whole
-    machine gets killed rather than finishing slowly.
+    Budgeted against available memory, not physical RAM, and half of that by
+    default. Overshooting does not fail loudly: it pushes the machine into swap,
+    every worker slows by an order of magnitude or more, and eventually the
+    parent is killed and the workers are orphaned. Finishing slowly is not the
+    failure mode; not finishing is.
     """
-    total = total_system_bytes()
+    total = available_system_bytes() or total_system_bytes()
     if total is None or per_worker_bytes <= 0:
         return requested
     affordable = max(1, int((total * budget_fraction) // per_worker_bytes))

@@ -246,7 +246,7 @@ def main() -> int:
         "--memory-fraction",
         type=float,
         default=0.5,
-        help="fraction of physical RAM the sweep may use (default 0.5)",
+        help="fraction of currently available memory the sweep may use (default 0.5)",
     )
     parser.add_argument(
         "--no-memory-guard",
@@ -283,7 +283,7 @@ def main() -> int:
             print(
                 f"Reducing workers {workers} -> {allowed}: the largest sampled trial "
                 f"needs about {format_bytes(worst_case)} and the budget is "
-                f"{int(args.memory_fraction * 100)}% of RAM."
+                f"{int(args.memory_fraction * 100)}% of the memory free right now."
             )
             workers = allowed
     threads = max(1, cores // max(workers, 1))

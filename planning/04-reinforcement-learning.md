@@ -237,6 +237,32 @@ and the part that depends on its actions is buried in that. A policy can reduce
 immediate risk in ways that are fatal over a longer horizon, and with a critic
 that explains only 20% of return variance there is nothing to catch it.
 
+### The first sweep, and what it taught about this machine
+
+Twelve trials at 256 with three workers ran for six hours, completed five, and
+then the parent process was killed and its workers were left orphaned at full
+CPU. Two lessons.
+
+**The memory budget has to be against memory that is free, not memory that
+exists.** The guard sized three workers against half of 17 GB of physical RAM.
+The machine already had other things resident, the sweep pushed it 6 GB into
+swap, per-trial throughput fell from about 8 world-steps per second to between
+0.06 and 0.4, and the parent was eventually killed. Budgeting against available
+memory with a larger safety factor now says one worker fits on this machine as
+it stands, which is the honest answer: a parallel sweep at 256 needs the small
+minibatch and the cheaper architectures, or a bigger box.
+
+**The headline ratio was dividing the wrong thing.** Two salvaged trials
+reported ratios of -0.72 and -0.47, which is impossible for a ratio of survival
+counts. Adding the foraging reward had made the training reward signed, and the
+evaluation's ratio was built on total reward. It is now built on herbivore-steps
+survived, with a test that pins it. What is optimized may change; what is
+judged must not.
+
+None of the five completed trials beat the baseline. Their survival ratios,
+computed after the fix, are not worth tabulating: the runs were starved and the
+budget of 4000 world steps was never reached by three of them.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
