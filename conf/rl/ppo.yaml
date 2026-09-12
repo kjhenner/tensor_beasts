@@ -1,0 +1,59 @@
+# PPO on per-individual herbivore survival.
+#
+# The two blocks map one-to-one onto TrainerConfig and PPOConfig in
+# tensor_beasts/rl/, so anything you can set in code you can set here, and
+# train_rl.py flags override whatever is written below.
+#
+# Size is the setting to be careful with. Below roughly 256 the predator
+# population collapses and the three-species dynamic degenerates, so a result
+# from a 64x64 world is not a result about this ecology. 256 is for iteration,
+# 512 is for anything meant to mean something.
+
+trainer:
+  config_path: conf/basic_config.yaml
+  size: 256
+  entity: Herbivore
+
+  # survival_reward 1.0 makes the summed reward literally "herbivore-steps
+  # survived", which is the number evaluate_policy.py reports for the baseline.
+  survival_reward: 1.0
+  reproduction_reward: 10.0
+
+  arch: conv
+  arch_kwargs: {}
+  device: auto
+  seed: 0
+
+  total_world_steps: 20000
+  segment_steps: 64
+  # Train on a settled ecology, not on the transient right after seeding.
+  warmup_steps: 100
+
+  eval_interval: 2000
+  eval_steps: 500
+  eval_seeds: 2
+  eval_deterministic: false
+
+  checkpoint_interval: 2000
+  output_dir: outputs/rl
+  log_name: train_log.jsonl
+
+  wandb: false
+  wandb_project: tensor-beasts-rl
+
+ppo:
+  learning_rate: 3.0e-4
+  clip_range: 0.2
+  # Null disables value clipping. Worth trying here because returns drift with
+  # the population, which is exactly the case value clipping is meant for.
+  value_clip_range: null
+  entropy_coef: 0.01
+  value_coef: 0.5
+  epochs: 4
+  minibatch_steps: 16
+  max_grad_norm: 0.5
+  gamma: 0.99
+  gae_lambda: 0.95
+  normalize_advantage: true
+  # Null disables the early stop. Set to ~0.02 if updates start diverging.
+  target_kl: null

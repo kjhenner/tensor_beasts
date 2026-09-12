@@ -55,6 +55,11 @@ class Rollout:
     successor: torch.Tensor  # (T, H, W) int64
     advantage: Optional[torch.Tensor] = None  # (T, H, W) float32
     ret: Optional[torch.Tensor] = None  # (T, H, W) float32
+    # (H, W) value of the state after the final step, set by compute_gae.
+    # Algorithms need this to bootstrap individuals that are still alive when
+    # the segment ends. Without it they have to reuse the last step's own value,
+    # which is a step stale and biases every segment boundary the same way.
+    last_value: Optional[torch.Tensor] = None
 
     @property
     def steps(self) -> int:
@@ -173,6 +178,7 @@ def compute_gae(
 
     rollout.advantage = advantage
     rollout.ret = advantage + rollout.value
+    rollout.last_value = last_value
 
     if normalize:
         mask = rollout.acted
@@ -199,8 +205,13 @@ def iter_minibatches(
     convolution repeatedly. Each yielded element is a stack of complete grids,
     and the loss masks out cells where nothing acted.
 
+    The collection-time ``value`` is included because a clipped value loss needs
+    it and it cannot be recovered from the rest: ``ret`` was formed as
+    ``advantage + value`` *before* ``compute_gae`` standardized the advantages
+    in place, so ``ret - advantage`` is no longer the original value.
+
     Yields:
-        (observation, acted, action, log_prob, advantage, ret) tuples.
+        (observation, acted, action, log_prob, advantage, ret, value) tuples.
     """
     order = torch.randperm(rollout.steps, generator=generator) if shuffle else torch.arange(rollout.steps)
     for start in range(0, rollout.steps, minibatch_steps):
@@ -212,4 +223,5 @@ def iter_minibatches(
             rollout.log_prob[index],
             rollout.advantage[index],
             rollout.ret[index],
+            rollout.value[index],
         )

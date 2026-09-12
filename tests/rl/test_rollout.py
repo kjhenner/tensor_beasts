@@ -162,7 +162,21 @@ def test_minibatches_cover_every_step_once():
     compute_gae(rollout, torch.zeros(HEIGHT, WIDTH), normalize=False)
 
     seen = 0
-    for observation, acted, action, log_prob, advantage, ret in iter_minibatches(rollout, minibatch_steps=4):
+    for observation, acted, action, log_prob, advantage, ret, value in iter_minibatches(rollout, minibatch_steps=4):
         assert observation.dtype == torch.float32, "observations are stored as half and must come back as float"
         seen += observation.shape[0]
     assert seen == 6
+
+
+def test_last_value_is_recorded_for_boundary_bootstrapping():
+    """Algorithms need the post-segment value; reusing the last step's own value
+    is a step stale and biases every segment boundary the same way."""
+    buffer = RolloutBuffer(steps=2)
+    for _ in range(2):
+        batch = make_batch((1, 1), reward=1.0, successor_cell=(1, 1))
+        buffer.add(batch, log_prob=torch.zeros(HEIGHT, WIDTH), value=torch.zeros(HEIGHT, WIDTH))
+    rollout = buffer.build()
+    last_value = value_grid((1, 1), 7.0)
+    compute_gae(rollout, last_value, normalize=False)
+    assert rollout.last_value is not None
+    assert torch.equal(rollout.last_value, last_value)
