@@ -165,6 +165,93 @@ reported was taken at 128, where predators are extinct for most of the run.
 Any result meant to mean something must be measured at 512. Small sizes are for
 iteration speed only, and every test that uses one says so in a comment.
 
+## What actually happened when we trained
+
+### The baseline, measured at 512
+
+Five episodes of 600 steps on `conf/basic_config.yaml`, return in
+herbivore-steps survived:
+
+| Policy | Return | Spread | Final population |
+|---|---|---|---|
+| Rule-based | 1,082,723 | 6% | 4,634 |
+| Random | 309,589 | 16% | 1,475 |
+| Stay put | 60,539 | 3% | 0 by step 202 |
+
+At the native size the baseline is 3.5x better than random and the spread is 6%
+of the mean, so the comparison is clean. At 128 the same comparison was 1.8x
+with a 35% spread, which is why the earlier measurement was worthless.
+
+### The pipeline is sound: a hand-set linear policy reaches 0.92x
+
+Setting the linear policy's weights by hand, to approximate what the rule-based
+controller computes, scores 0.92x of the baseline through the environment's own
+evaluation. That is the single most useful number here. It says the
+observation carries enough information, the action plumbing works, the reward
+bookkeeping works, and the evaluation is fair. Anything that fails from here
+fails at optimization, not at setup.
+
+### Value targets needed normalizing, but not for the reason I first claimed
+
+Measured on a real segment, the value term was 100% of the gradient norm: 14.02
+against the policy's 0.027, with `max_grad_norm` at 0.5. I concluded the policy
+was being starved by clipping and that fixing it would give a 28x larger policy
+step.
+
+**That overstated it.** Gradient clipping rescales every gradient by the same
+scalar, and Adam largely absorbs a uniform rescaling. The matched ablation, same
+seed, same learning rate, tells the real story:
+
+| Step | Entropy off | Entropy on | Explained variance off | on | Grad norm off | on |
+|---|---|---|---|---|---|---|
+| 640 | 1.6092 | 1.6090 | +0.002 | +0.011 | 19.7 | 0.89 |
+| 1280 | 1.6087 | 1.6079 | +0.003 | +0.024 | 19.0 | 0.46 |
+
+The real benefit is critic conditioning: explained variance improves about
+eightfold. The policy moves only marginally faster. Normalization is still
+clearly worth keeping, and gradients now sit below the clip threshold instead of
+28 times above it, but it did not unfreeze the policy, because the policy was
+never frozen by clipping in the first place.
+
+### The actual blocker: learning happens, and it makes things worse
+
+At the default learning rate of 3e-4, approximate KL sits near 5e-06 and the
+policy barely changes over thousands of steps. Raise it to 1e-2 and the policy
+does move, and the result is worse than doing nothing:
+
+| Step | Entropy | Explained variance | Population |
+|---|---|---|---|
+| 64 | 1.6057 | +0.001 | 110 |
+| 768 | 1.5032 | +0.056 | 1,469 |
+| 2176 | 1.2212 | +0.144 | 614 |
+| 3584 | 1.2079 | +0.214 | 18 |
+
+The critic improves steadily while the policy becomes more deterministic and
+the population collapses. This is the finding that matters, and it is a
+statement about the problem rather than about the code.
+
+The likely cause is the reward's own structure. Herbivores survive about 99.4%
+of steps, so per-step reward is nearly constant at 1.0 with a standard deviation
+of 0.076. Almost all of an individual's return is fixed no matter what it does,
+and the part that depends on its actions is buried in that. A policy can reduce
+immediate risk in ways that are fatal over a longer horizon, and with a critic
+that explains only 20% of return variance there is nothing to catch it.
+
+## What to try next, in order
+
+1. **A denser, more action-dependent reward.** Energy gained by eating is the
+   obvious candidate: it responds immediately to moving well, whereas survival
+   barely responds at all. Train on that and keep *evaluating* on
+   herbivore-steps survived, which is legitimate and standard.
+2. **Sweep the reproduction-to-survival ratio.** Reproduction is rare, around
+   0.7% of agent-steps, and is the only part of the current reward with real
+   variance. `sweep_rl.py` varies it from 0 to 30.
+3. **Fix the critic before blaming the policy.** Explained variance peaks around
+   0.2. Until the critic can predict return, every advantage is mostly noise and
+   no policy-gradient method will do better than drift.
+4. **Longer horizons.** Episode lengths run to a hundred-odd steps while gamma
+   is 0.99. Try 0.997 and a longer GAE lambda.
+
 ## Open questions
 
 - **Reward ratio.** Survival to reproduction is currently 1 to 10, chosen by
