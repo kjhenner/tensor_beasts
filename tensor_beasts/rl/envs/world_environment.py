@@ -1,98 +1,266 @@
-from typing import Dict, Tuple
+"""
+Gymnasium environment wrapping the tensor-beasts :class:`~tensor_beasts.world.World`.
 
-import gymnasium as gym
-from gymnasium import spaces
-import torch
+The environment exposes *herbivore* control: on every step the agent supplies a
+movement direction for every cell of the grid, the simulation advances one tick,
+and the agent is rewarded for keeping herbivores alive.
+
+Contract
+--------
+
+**Observation** -- ``Box(-inf, inf, (H, W, C), float32)``.
+
+    This is exactly ``World.observable``: every feature tagged ``"observable"``
+    on every entity, concatenated along a trailing channel axis (see
+    ``tensor_beasts.observations.build_observation``). ``C`` depends on the
+    entities in the config and is measured once at construction time. Values are
+    *not* normalised -- terrain features are unbounded floats, energy/biomass/
+    scent live in ``[0, 255]`` -- hence the infinite bounds. This is the
+    simulation's existing "what can be seen" surface, so using it avoids
+    inventing a second, divergent notion of observability.
+
+    Note this is a *global* view, not a per-animal egocentric view. The world is
+    fully observed; partial observability is not modelled here.
+
+**Action** -- ``MultiDiscrete(nvec=5, shape=(H, W))``, dtype ``int64``.
+
+    One movement direction per grid cell, using the simulation's own encoding:
+    ``0 = stay, 1 = up, 2 = down, 3 = left, 4 = right``. The action is handed to
+    ``World.update`` as ``TensorDict({entity_name: action})``, which routes it to
+    ``Animal.update(action=...)`` where it *overrides* the rule-based policy's
+    movement direction (metabolism, eating, death and reproduction still run
+    normally). Cells with no herbivore in them simply have their action ignored,
+    so the action space is deliberately dense and position-indexed: it matches
+    the tensor the simulation already consumes, with no packing/unpacking layer
+    that could silently mis-map cells.
+
+**Reward** -- ``float``: the number of living herbivore cells after the step.
+
+    "Living" means ``biomass >= survival_threshold``, the same test the
+    simulation uses to kill animals. The undiscounted return is therefore the
+    total number of herbivore-steps survived during the episode, which is the
+    quantity we actually want to maximise when asking "can a learned policy beat
+    the rule-based policy at herbivore survival?". It needs no tuning constants
+    and is directly comparable between a learned policy and the rule-based
+    baseline run through the same env.
+
+**Termination** -- the herbivore population reaches zero (no cell has
+``biomass >= survival_threshold``). There is nothing left to control and the
+population can never recover, so the episode ends.
+
+**Truncation** -- after ``max_steps`` simulation steps. A tensor-beasts world
+otherwise runs forever.
+
+**Info** -- ``{"population": int, "step": int}``.
+
+Caveats
+-------
+
+* ``World.reset()`` is currently broken for shared features (``td.clear()``
+  leaves the shared-feature slice registry populated, so every reset grows the
+  shared ``scent``/``energy`` tensors by an extra slice dimension). This env
+  therefore builds a *fresh* ``World`` on every ``reset()``. If ``World.reset()``
+  is fixed, ``_build_world`` can be simplified.
+* The env does not touch ``torch.set_default_device``. If you want the
+  simulation on a non-CPU device, set the default device yourself before
+  constructing the env, the way ``tensor_beasts/main.py`` does.
+"""
+
+from typing import Any, Dict, Optional, Tuple
+
 import numpy as np
+import torch
 from omegaconf import DictConfig
 from tensordict import TensorDict
 
-from tensor_beasts.entities import Plant, Herbivore, Predator
+try:  # gymnasium is an optional import so this module can be imported without it
+    import gymnasium as gym
+    from gymnasium import spaces
+
+    _GYM_IMPORT_ERROR: Optional[Exception] = None
+    _EnvBase = gym.Env
+except ImportError as exc:  # pragma: no cover - exercised only without gymnasium
+    gym = None
+    spaces = None
+    _GYM_IMPORT_ERROR = exc
+    _EnvBase = object
+
 from tensor_beasts.world import World
 
+# Direction encoding used by tensor_beasts.entities.helpers.animal_helpers.
+NUM_ACTIONS = 5
+DIRECTIONS = ("stay", "up", "down", "left", "right")
 
-class TensorBeastsEnv(gym.Env):
+DEFAULT_ENTITY = "Herbivore"
+DEFAULT_MAX_STEPS = 1000
+
+
+class TensorBeastsEnv(_EnvBase):
+    """Single-agent Gymnasium view of a tensor-beasts world (herbivore control).
+
+    See the module docstring for the observation/action/reward/termination
+    contract.
+
+    Args:
+        world_config: The ``world`` subtree of a loaded config, i.e.
+            ``load_config(path).world``.
+        entity_name: Registry name of the controlled entity. Defaults to
+            ``"Herbivore"``.
+        max_steps: Episode length before truncation.
+    """
+
+    metadata: Dict[str, Any] = {"render_modes": []}
 
     def __init__(
         self,
-        num_actions: int = 5,
-        world_cfg: DictConfig = None,
+        world_config: DictConfig,
+        entity_name: str = DEFAULT_ENTITY,
+        max_steps: int = DEFAULT_MAX_STEPS,
     ):
-        super(TensorBeastsEnv, self).__init__()
-        self.world_cfg = world_cfg
-        self.world = World([Predator, Plant, Herbivore], config=world_cfg)
+        if gym is None:  # pragma: no cover - exercised only without gymnasium
+            raise ImportError(
+                "TensorBeastsEnv requires gymnasium. Install it with "
+                "`pip install gymnasium`."
+            ) from _GYM_IMPORT_ERROR
 
-        self.obs_shape = self.world.observable.shape
-        self.num_actions = num_actions
+        super().__init__()
 
-        # Define the observation space:
+        self.world_config = world_config
+        self.entity_name = entity_name
+        self.max_steps = max_steps
+        self.size: Tuple[int, int] = tuple(world_config.size)
 
-        # Define a compound observation space
-        self.observation_space = spaces.Dict({
-            "observation": spaces.Box(
-                low=0,
-                high=255,
-                shape=self.obs_shape,
-                dtype=np.uint8
-            ),
-            "mask": spaces.Box(
-                low=0,
-                high=1,
-                shape=self.obs_shape,
-                dtype=bool
-            ),
-            "rgb_array": spaces.Box(
-                low=0,
-                high=255,
-                shape=(self.obs_shape[1] * 3, self.obs_shape[0] * 3, 3),
-                dtype=np.uint8
-            ),
-            # "info": spaces.Dict({
-            #     k: spaces.Box(low=0, high=np.infty, shape=(1,), dtype=np.int32) for k in self.world.collect_info().keys()
-            #  })
-        })
+        self.world = self._build_world()
+        if entity_name not in self.world.entity_dict:
+            raise ValueError(
+                f"Entity '{entity_name}' is not present in the world config. "
+                f"Available entities: {sorted(self.world.entity_dict)}"
+            )
 
-        self.reward_range = (-np.inf, np.inf)
-
-        # Define the action space:
-        # self.action_space = spaces.Box(
-        #     low=0,
-        #     high=num_actions,
-        #     shape=(self.world.width * self.world.height,),
-        #     dtype=np.float32
-        # )
-        self.action_space = spaces.MultiDiscrete(
-            nvec=[num_actions] * (self.world_cfg.size[0] * self.world_cfg.size[1]),
-            dtype=np.int32
+        obs = self._observation()
+        self.observation_space = spaces.Box(
+            low=-np.inf,
+            high=np.inf,
+            shape=obs.shape,
+            dtype=np.float32,
         )
+        self.action_space = spaces.MultiDiscrete(
+            np.full(self.size, NUM_ACTIONS, dtype=np.int64),
+            dtype=np.int64,
+        )
+        self.reward_range = (0.0, float(self.size[0] * self.size[1]))
 
-    def reset(self, *args, **kwargs) -> Tuple[Dict, Dict]:
-        # Reset the world state and return the initial observation
-        self.world.reset()  # Reinitialize the world
-        # TorchRL expects info to be packed with the observation rather than as a separate return value
-        terminated = not bool(torch.sum(self.world.herbivore.get_feature("energy")))
-        assert not terminated, "The world should not be terminated after a reset"
-        observation = {
-            "observation": self.world.observable.clone(),
-            "mask": self.world.herbivore.get_feature("energy") > 0,
-            "rgb_array": self.world.td["shared_features", "energy"],
-            # "info": self.world.collect_info()
-        }
-        return observation, {}
+        self._elapsed_steps = 0
 
-    def step(self, action: np.ndarray) -> Tuple[Dict, torch.Tensor, bool, bool, Dict]:
-        if action.shape[-1] == self.num_actions:
-            action = action.argmax(-1)
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+    def _build_world(self) -> World:
+        """Construct and initialize a fresh World.
 
-        action = action.reshape(*self.world.size)
-        self.world.update(TensorDict({"herbivore": action}, batch_size=[]))
-        reward = self.world.entity_scores('herbivore', reward_mode=self.world_cfg.get("reward_mode", "default"))
-        # TorchRL expects info to be packed with the observation rather than as a separate return value
-        observation = {
-            "observation": self.world.observable.clone(),
-            "mask": self.world.herbivore.get_feature("energy") > 0,
-            "rgb_array": self.world.td["shared_features", "energy"],
-        }
-        terminated = not bool(torch.sum(self.world.herbivore.get_feature("energy")))
-        # observation, reward, terminated, truncated, info
-        return observation, reward, terminated, False, {}
+        A new World is built per reset rather than calling ``World.reset()``,
+        which currently corrupts shared-feature shapes (see module docstring).
+        """
+        world = World(self.world_config)
+        world.initialize()
+        return world
+
+    @property
+    def entity(self):
+        return self.world.entity_dict[self.entity_name]
+
+    def _alive_mask(self) -> torch.Tensor:
+        entity = self.entity
+        return entity.biomass.data >= entity.config.survival_threshold
+
+    def population(self) -> int:
+        """Number of living cells of the controlled entity."""
+        return int(self._alive_mask().sum().item())
+
+    def _observation(self) -> np.ndarray:
+        obs = self.world.observable
+        return obs.detach().to("cpu", torch.float32).numpy()
+
+    def _info(self) -> Dict[str, Any]:
+        return {"population": self.population(), "step": self._elapsed_steps}
+
+    def _to_action_tensor(self, action) -> torch.Tensor:
+        """Coerce a sampled action into the (H, W) int64 tensor World expects."""
+        if isinstance(action, torch.Tensor):
+            tensor = action.detach()
+        else:
+            tensor = torch.as_tensor(np.asarray(action))
+
+        tensor = tensor.reshape(*self.size).to(
+            device=self.entity.biomass.data.device, dtype=torch.long
+        )
+        return tensor
+
+    # ------------------------------------------------------------------
+    # Gymnasium API
+    # ------------------------------------------------------------------
+    def reset(
+        self,
+        *,
+        seed: Optional[int] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+        super().reset(seed=seed)
+        if seed is not None:
+            # World initialization and every simulation step draw from torch's
+            # global RNG, so this is what actually makes an episode reproducible.
+            torch.manual_seed(seed)
+
+        self.world = self._build_world()
+        self._elapsed_steps = 0
+        return self._observation(), self._info()
+
+    def step(
+        self, action
+    ) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        action_tensor = self._to_action_tensor(action)
+        self.world.update(
+            TensorDict({self.entity_name: action_tensor}, batch_size=[])
+        )
+        self._elapsed_steps += 1
+
+        population = self.population()
+        reward = float(population)
+        terminated = population == 0
+        truncated = (not terminated) and self._elapsed_steps >= self.max_steps
+
+        return self._observation(), reward, terminated, truncated, self._info()
+
+    def close(self):
+        return None
+
+
+def make_env(
+    config_path: str = "conf/base/simulation.yaml",
+    size: Optional[Tuple[int, int]] = None,
+    entity_name: str = DEFAULT_ENTITY,
+    max_steps: int = DEFAULT_MAX_STEPS,
+    device: Optional[str] = None,
+) -> TensorBeastsEnv:
+    """Load a simulation config from disk and wrap it in a TensorBeastsEnv.
+
+    Args:
+        config_path: Path to a config file (validated by
+            ``tensor_beasts.config.load_config``).
+        size: Optional ``(height, width)`` override for the world.
+        entity_name: Registry name of the controlled entity.
+        max_steps: Episode length before truncation.
+        device: Optional override for ``world.device``. This only sets the
+            config value; set ``torch.set_default_device`` yourself if you want
+            tensors allocated somewhere other than the process default.
+    """
+    from tensor_beasts.config import load_config
+
+    config = load_config(config_path)
+    if size is not None:
+        config.world.size = list(size)
+    if device is not None:
+        config.world.device = device
+    return TensorBeastsEnv(
+        config.world, entity_name=entity_name, max_steps=max_steps
+    )
