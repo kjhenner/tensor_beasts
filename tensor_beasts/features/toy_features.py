@@ -21,10 +21,10 @@ class FluidDensity(Feature):
 
     def initialize_data(self):
         self.zero_init()
-        self.data[self.shape[0]//2, self.shape[1]//2] = 1.0
+        self.data[..., self.data.shape[-2] // 2, self.data.shape[-1] // 2] = 1.0
 
     def render(self) -> torch.Tensor:
-        return self.data.unsqueeze(-1).expand(-1, -1, 3) * 255
+        return self.data.unsqueeze(-1).expand(*self.data.shape, 3) * 255
 
     def update(self, step: int):
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale

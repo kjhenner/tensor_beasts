@@ -15,7 +15,14 @@ def get_direction_masks(
     clearance_kernel_size: Optional[int] = 5,
     move_mask: Optional[torch.Tensor] = None,
 ) -> Dict[int, torch.Tensor]:
-    # If we get batched directions, we need to squeeze the batch dimension
+    # If we get batched directions, we need to squeeze the batch dimension.
+    #
+    # PHASE 1 NOTE: this is the one spot that CANNOT be made rank-agnostic. It
+    # dispatches on rank to strip the RL agent's leading singleton batch, so a
+    # real (B, H, W) world batch is indistinguishable from it. Adding the batch
+    # dimension will require the RL path to hand over directions already shaped
+    # like the world instead of being normalized here. Left alone on purpose:
+    # only the agent_action path in move() ever supplies a 3D tensor.
     if len(directions.shape) == 3:
         directions = directions.squeeze(0)
 
@@ -44,8 +51,10 @@ def get_direction_masks(
         directional_kernel_bank(clearance_kernel_size),
         cval=1,
     ).detach().type(torch.bool)
+    # blocked is (..., 4, H, W): the kernel axis sits just before the spatial
+    # axes, so index it from the end rather than positionally.
     for d in range(1, 5):
-        direction_masks[d] *= ~blocked[d - 1]
+        direction_masks[d] *= ~blocked[..., d - 1, :, :]
     return direction_masks
 
 

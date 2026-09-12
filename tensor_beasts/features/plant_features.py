@@ -3,7 +3,7 @@ from omegaconf import DictConfig, ListConfig
 
 from tensor_beasts.features.feature import Feature
 from tensor_beasts.registry import register_feature
-from tensor_beasts.util import generate_diffusion_kernel, safe_add, safe_sub
+from tensor_beasts.util import as_conv_batch, generate_diffusion_kernel, safe_add, safe_sub
 
 
 def _to_tuple(key):
@@ -53,8 +53,12 @@ class Crowding(Feature):
     def update(self, step: int):
         energy = self.td.get(_to_tuple(self.config.energy_key))
         kernel = generate_diffusion_kernel(size=5)
-        self.data = torch.conv2d(
-            energy.unsqueeze(0).unsqueeze(0).type(torch.float32),
+        # Fold any leading dims into the conv batch instead of unsqueeze/squeeze,
+        # which is only correct for an exactly-2D input.
+        energy_4d, leading = as_conv_batch(energy.type(torch.float32))
+        out = torch.conv2d(
+            energy_4d,
             kernel.unsqueeze(0).unsqueeze(0),
-            padding=(kernel.shape[0] // 2)
-        ).squeeze(0).squeeze(0)
+            padding=(kernel.shape[-2] // 2)
+        )
+        self.data = out.reshape(*leading, *out.shape[-2:])

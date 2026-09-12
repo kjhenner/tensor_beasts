@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 from tensor_beasts.features.feature import Feature
 from tensor_beasts.registry import register_feature
 from tensor_beasts.util import (
-    perlin_noise, pyramid_elevation, range_elevation,
+    as_conv_batch, perlin_noise, pyramid_elevation, range_elevation,
     unfold_neighbors, flow_gradient, flow
 )
 
@@ -21,7 +21,7 @@ class Elevation(Feature):
     depends_on = {}  # No dependencies - base feature
 
     def render(self) -> torch.Tensor:
-        return self.data.unsqueeze(-1).expand(-1, -1, 3) * 255
+        return self.data.unsqueeze(-1).expand(*self.data.shape, 3) * 255
 
     def initialize_data(self):
         self.data = torch.ones(self.shape, dtype=self.dtype)
@@ -34,7 +34,7 @@ class Elevation(Feature):
             elif key == "ramp":
                 self.data *= torch.linspace(
                     0,
-                    1, self.shape[0]
+                    1, self.shape[-2]
                 ).unsqueeze(1).expand(*self.shape)
             elif key == "range":
                 self.data *= range_elevation(self.shape)
@@ -57,7 +57,7 @@ class AquiferElevation(Feature):
     }
 
     def render(self) -> torch.Tensor:
-        return self.data.unsqueeze(-1).expand(-1, -1, 3) * 255
+        return self.data.unsqueeze(-1).expand(*self.data.shape, 3) * 255
 
     def initialize_data(self):
         elevation = self.td.get(self.config.elevation_key)
@@ -88,7 +88,7 @@ class SoilVolume(Feature):
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale
         total_elevation = elevation + self.data
         total_min, total_max = total_elevation.min(), total_elevation.max()
-        return total_elevation.unsqueeze(-1).expand(-1, -1, 3) / total_max * 255
+        return total_elevation.unsqueeze(-1).expand(*self.data.shape, 3) / total_max * 255
 
     def initialize_data(self):
         elevation = self.td.get(self.config.elevation_key)
@@ -146,6 +146,8 @@ class SoilWaterVolume(Feature):
         field_capacity = soil_capacity * self.config.field_capacity
 
         # Infiltration of surface water into soil
+        # dim=0 below is the leading *stacked candidate* axis created by
+        # torch.stack (3 candidates), not a spatial axis: already rank-agnostic.
         infiltration = torch.min(
             torch.stack([
                 surface_water_volume,
@@ -209,7 +211,7 @@ class SurfaceWaterVolume(Feature):
     }
 
     def render(self) -> torch.Tensor:
-        return (self.data.unsqueeze(-1).expand(-1, -1, 3) / 10) * 255
+        return (self.data.unsqueeze(-1).expand(*self.data.shape, 3) / 10) * 255
 
     def update(self, step: int):
         elevation = self.td.get(self.config.elevation_key) * self.config.elevation_scale
@@ -289,15 +291,17 @@ class SimpleWater(Feature):
         # Phase map determines how each location responds to the oscillator
         # Use downsampled random noise + bilinear upscale for smooth large regions
         phase_divisor = self.config.phase_scale_multiplier
-        small_shape = (max(1, self.shape[0] // phase_divisor), max(1, self.shape[1] // phase_divisor))
+        leading, spatial = self.shape[:-2], self.shape[-2:]
+        small_shape = (*leading, max(1, spatial[0] // phase_divisor), max(1, spatial[1] // phase_divisor))
         small_noise = torch.rand(small_shape, dtype=self.dtype)
         # Upsample with bilinear interpolation for smooth transitions
+        small_4d, _ = as_conv_batch(small_noise)
         phase_noise = torch.nn.functional.interpolate(
-            small_noise.unsqueeze(0).unsqueeze(0),
-            size=self.shape,
+            small_4d,
+            size=tuple(spatial),
             mode='bilinear',
             align_corners=True
-        ).squeeze(0).squeeze(0)
+        ).reshape(*leading, *spatial)
         # Normalize to [-1, 1] so mid values = 0 (no effect)
         phase_min, phase_max = phase_noise.min(), phase_noise.max()
         self._phase_map = ((phase_noise - phase_min) / (phase_max - phase_min + 1e-8) - 0.5) * 2.0
@@ -333,7 +337,7 @@ class Nutrients(Feature):
     def render(self) -> torch.Tensor:
         # Render as brown intensity
         normalized = torch.clamp(self.data / 100.0, 0, 1)
-        return (normalized * 255).unsqueeze(-1).expand(-1, -1, 3)
+        return (normalized * 255).unsqueeze(-1).expand(*self.data.shape, 3)
 
     def initialize_data(self):
         self.data = torch.full(
@@ -352,11 +356,13 @@ class Nutrients(Feature):
             ], dtype=torch.float32) * self.config.diffusion_rate / 4.0
             kernel[1, 1] = 1.0 - self.config.diffusion_rate
 
+            data_4d, leading = as_conv_batch(self.data)
             padded = torch.nn.functional.pad(
-                self.data.unsqueeze(0).unsqueeze(0),
+                data_4d,
                 (1, 1, 1, 1),
                 mode='replicate'
             )
-            self.data = torch.nn.functional.conv2d(
+            out = torch.nn.functional.conv2d(
                 padded, kernel.unsqueeze(0).unsqueeze(0)
-            ).squeeze(0).squeeze(0)
+            )
+            self.data = out.reshape(*leading, *out.shape[-2:])

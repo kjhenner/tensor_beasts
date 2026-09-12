@@ -48,7 +48,7 @@ class Feature(abc.ABC):
 
     def render(self):
         if self.data.ndim == 2:
-            return self.data.unsqueeze(-1).expand(-1, -1, 3)
+            return self.data.unsqueeze(-1).expand(*self.data.shape, 3)
         else:
             return self.data
 
@@ -245,7 +245,9 @@ class SharedFeature(Feature, abc.ABC):
         if self._shared_key not in self.td:
             self.td[self._shared_key] = torch.zeros(shared_shape, dtype=self.dtype)
         if self.key not in self.td:
-            self.td[self.key] = self.td[self._shared_key][:, :, self.idx]
+            # Channel axis is trailing; index it from the end so any leading
+            # (e.g. world-batch) dims pass through untouched.
+            self.td[self.key] = self.td[self._shared_key][..., self.idx]
         self.data = torch.zeros_like(self.td[self.key])
 
     @property

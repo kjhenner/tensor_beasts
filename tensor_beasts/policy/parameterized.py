@@ -191,11 +191,11 @@ class ParameterizedPolicy:
                 abs_current = abs_current + abs_weighted_cur
 
         if combined_directional is None:
-            h, w = obs.energy.shape
+            shape = obs.energy.shape
             device = obs.energy.device
             return (
-                torch.zeros(h, w, device=device),
-                torch.zeros(h, w, dtype=torch.long, device=device)
+                torch.zeros(shape, device=device),
+                torch.zeros(shape, dtype=torch.long, device=device)
             )
 
         # Clamp signed values for direction calculation
@@ -216,6 +216,9 @@ class ParameterizedPolicy:
         directional: torch.Tensor
     ) -> torch.Tensor:
         """Compute movement direction with random tie-breaking."""
+        # dim 0 is the stacked direction axis (5 candidates), not a spatial
+        # axis. It stays leading at any input rank, so the reductions over
+        # dim=0 here and in _compute_gradient are already rank-agnostic.
         stacked = torch.cat([current.unsqueeze(0), directional], dim=0)
         max_values = stacked.max(dim=0).values
         masks = (stacked == max_values.unsqueeze(0))

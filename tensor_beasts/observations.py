@@ -22,24 +22,27 @@ def get_directional_values(
     Compute values in each of 4 directions.
 
     Args:
-        matrix: (H, W) tensor of values (e.g., scent field)
+        matrix: (..., H, W) tensor of values (e.g., scent field)
         kernel_size: 1 = immediate neighbors (fast roll), >1 = wedge kernels (convolution)
 
     Returns:
-        (4, H, W) tensor of values for [up, down, left, right]
+        (4, ..., H, W) tensor of values for [up, down, left, right].
+        dim 0 is the *stacked direction* axis, not a spatial axis; it stays
+        leading at any input rank, so every downstream .max(dim=0) over it
+        remains correct.
     """
     if kernel_size == 1:
         # Fast path: simple roll for immediate neighbors
-        up = torch.roll(matrix, shifts=1, dims=0)
-        down = torch.roll(matrix, shifts=-1, dims=0)
-        left = torch.roll(matrix, shifts=1, dims=1)
-        right = torch.roll(matrix, shifts=-1, dims=1)
+        up = torch.roll(matrix, shifts=1, dims=-2)
+        down = torch.roll(matrix, shifts=-1, dims=-2)
+        left = torch.roll(matrix, shifts=1, dims=-1)
+        right = torch.roll(matrix, shifts=-1, dims=-1)
 
         # Zero boundaries to avoid wraparound
-        up[-1, :] = 0
-        down[0, :] = 0
-        left[:, -1] = 0
-        right[:, 0] = 0
+        up[..., -1, :] = 0
+        down[..., 0, :] = 0
+        left[..., :, -1] = 0
+        right[..., :, 0] = 0
 
         return torch.stack([up, down, left, right], dim=0)
     else:
@@ -59,14 +62,17 @@ def compute_gradient_and_direction(
     Compute gradient strength and movement direction from directional values.
 
     Args:
-        current: (H, W) current cell values
-        directional_values: (4, H, W) from get_directional_values
+        current: (..., H, W) current cell values
+        directional_values: (4, ..., H, W) from get_directional_values
 
     Returns:
-        gradient: (H, W) max_neighbor - current, clamped >= 0
-        direction: (H, W) indices 0=stay, 1=up, 2=down, 3=left, 4=right
+        gradient: (..., H, W) max_neighbor - current, clamped >= 0
+        direction: (..., H, W) indices 0=stay, 1=up, 2=down, 3=left, 4=right
+
+    Every dim=0 below refers to the leading stacked direction axis (4 or 5
+    candidates), NOT a spatial axis, so they are already rank-agnostic.
     """
-    # Stack: [current, up, down, left, right] -> (5, H, W)
+    # Stack: [current, up, down, left, right] -> (5, ..., H, W)
     stacked = torch.cat([current.unsqueeze(0), directional_values], dim=0)
 
     # Gradient: best neighbor minus current (neighbors only, not current)
@@ -223,10 +229,13 @@ def process_observation(
             abs_current = abs_current + abs_weighted_cur
 
     if combined_directional is None:
-        # No features configured - return zeros
-        h, w = obs.energy.shape
+        # No features configured - return zeros shaped like the state we were given
+        shape = obs.energy.shape
         device = obs.energy.device
-        return torch.zeros(h, w, device=device), torch.zeros(h, w, dtype=torch.long, device=device)
+        return (
+            torch.zeros(shape, device=device),
+            torch.zeros(shape, dtype=torch.long, device=device),
+        )
 
     # Clamp signed values for direction calculation
     combined_directional = combined_directional.clamp(min=0)
@@ -247,6 +256,10 @@ def process_observation(
 # =============================================================================
 
 def _flatten_feature(feature: Feature) -> List[torch.Tensor]:
+    # NOT rank-agnostic, and cannot be made so from shape alone: this dispatches
+    # on ndim to tell an unchannelled (H, W) feature from a channelled (H, W, C)
+    # one, and a batched (B, H, W) is indistinguishable from (H, W, C) by rank.
+    # Adding a batch dimension will need an explicit channel flag on Feature.
     data = feature.data
     if data.ndim == 2:
         return [data.unsqueeze(-1)]

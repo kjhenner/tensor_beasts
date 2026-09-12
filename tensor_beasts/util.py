@@ -89,6 +89,9 @@ def safe_add(a, b, inplace=True):
 
 
 def safe_sum(matrices: List[torch.Tensor]):
+    # dim=0 here is the *stacked* axis created by torch.stack (one entry per
+    # input matrix), not a spatial axis. It stays leading at any input rank, so
+    # this is already rank-agnostic.
     original_dtype = matrices[0].dtype
     return torch.stack(matrices).type(torch.int16).sum(dim=0).clamp(0, 255).type(original_dtype)
 
@@ -148,39 +151,47 @@ def generate_direction_kernel(size, direction):
 
 
 def pad_matrix(mat, direction):
+    """Shift (..., H, W) by one cell in `direction`, zero-filling the vacated edge.
+
+    F.pad counts from the last dimension backwards, so the pad tuples below are
+    already rank-agnostic; only the slicing needed to move off the leading axes.
+    """
     if direction == 1:  # Up
-        return torch.nn.functional.pad(mat[1:], (0, 0, 0, 1), value=0)
+        return torch.nn.functional.pad(mat[..., 1:, :], (0, 0, 0, 1), value=0)
     elif direction == 2:  # Down
-        return torch.nn.functional.pad(mat[:-1], (0, 0, 1, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :-1, :], (0, 0, 1, 0), value=0)
     elif direction == 3:  # Left
-        return torch.nn.functional.pad(mat[:, 1:], (0, 1, 0, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :, 1:], (0, 1, 0, 0), value=0)
     elif direction == 4:  # Right
-        return torch.nn.functional.pad(mat[:, :-1], (1, 0, 0, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :, :-1], (1, 0, 0, 0), value=0)
 
 
 @device_lru_cache
 def get_edge_mask(shape: tuple):
     mask = torch.zeros(shape, dtype=torch.float32)
-    mask[0, :] = 1
-    mask[-1, :] = 1
-    mask[:, 0] = 1
-    mask[:, -1] = 1
+    mask[..., 0, :] = 1
+    mask[..., -1, :] = 1
+    mask[..., :, 0] = 1
+    mask[..., :, -1] = 1
     return mask
 
 
 def get_direction_matrix(matrix, random_choices=None):
-    down = torch.roll(matrix, shifts=-1, dims=0)
-    up = torch.roll(matrix, shifts=1, dims=0)
-    right = torch.roll(matrix, shifts=-1, dims=1)
-    left = torch.roll(matrix, shifts=1, dims=1)
+    down = torch.roll(matrix, shifts=-1, dims=-2)
+    up = torch.roll(matrix, shifts=1, dims=-2)
+    right = torch.roll(matrix, shifts=-1, dims=-1)
+    left = torch.roll(matrix, shifts=1, dims=-1)
 
     # Setting the boundaries to 0 to avoid wrapping around behavior
-    up[-1, :] = 0
-    down[0, :] = 0
-    left[:, -1] = 0
-    right[:, 0] = 0
+    up[..., -1, :] = 0
+    down[..., 0, :] = 0
+    left[..., :, -1] = 0
+    right[..., :, 0] = 0
 
-    # Stack matrices to work with all directions together
+    # Stack matrices to work with all directions together. dim=-1 here is the
+    # *stacked* direction axis (5 candidates), not a spatial axis; it is trailing
+    # and stays trailing at any input rank, so the reductions below are already
+    # rank-agnostic.
     stacked = torch.stack([matrix, up, down, left, right], dim=-1)
 
     # Step 2: Compute the maximum values across the stacked axis
@@ -201,27 +212,44 @@ def get_direction_matrix(matrix, random_choices=None):
     return direction_indices
 
 
+def as_conv_batch(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Size]:
+    """Collapse every leading dimension of a (..., H, W) tensor into conv2d's N.
+
+    Returns the (N, 1, H, W) view and the leading shape needed to restore it.
+    Using reshape rather than unsqueeze/squeeze keeps this correct at any rank,
+    including the degenerate cases where a leading dimension happens to be 1 --
+    a bare .squeeze() would silently drop those.
+    """
+    if input.dim() < 2:
+        raise ValueError(f"Expected at least 2 dimensions (..., H, W), got shape {tuple(input.shape)}")
+    leading = input.shape[:-2]
+    return input.reshape(-1, 1, *input.shape[-2:]), leading
+
+
 def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     """
     Mimic scipy.ndimage.correlate using PyTorch's conv2d.
 
+    Rank-agnostic: any leading dimensions are folded into the conv batch and
+    restored afterwards.
+
     Parameters:
-    - input: 2D torch tensor, the input.
+    - input: (..., H, W) torch tensor, the input.
     - kernel: 2D torch tensor, the kernel for correlation.
     - mode: str, boundary mode (only 'constant' mode implemented similar to scipy.ndimage.correlate).
     - cval: float, value to fill pad when mode is 'constant'.
 
     Returns:
-    - result: 2D torch tensor, result of correlation.
+    - result: (..., H, W) torch tensor, result of correlation.
     """
+    if mode != 'constant':
+        raise ValueError("Only 'constant' mode is implemented.")
+
     input_dtype = input.dtype
     input = input.type(torch.float32)
     kernel = kernel.type(torch.float32)
-    # Ensure kernel and input are in the right format
-    if input.dim() == 2:
-        input = input.unsqueeze(0).unsqueeze(0)
-    elif input.dim() == 3:
-        input = input.unsqueeze(1)
+
+    input_4d, leading = as_conv_batch(input)
 
     if kernel.dim() == 2:
         kernel = kernel.unsqueeze(0).unsqueeze(0)
@@ -230,15 +258,12 @@ def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     pad_size = (kernel.shape[-1] // 2, kernel.shape[-2] // 2)
     pad = (pad_size[0], pad_size[0], pad_size[1], pad_size[1])
 
-    if mode == 'constant':
-        input_padded = F.pad(input, pad=pad, mode='constant', value=cval)
-    else:
-        raise ValueError("Only 'constant' mode is implemented.")
+    input_padded = F.pad(input_4d, pad=pad, mode='constant', value=cval)
 
     result = F.conv2d(input_padded, kernel)
 
-    # Remove the extra dimensions added earlier
-    result = result.squeeze()
+    # Restore the original leading dimensions.
+    result = result.reshape(*leading, *result.shape[-2:])
     return result.type(input_dtype)
 
 
@@ -258,53 +283,66 @@ def torch_correlate_2d_bank(input: torch.Tensor, kernels: torch.Tensor, cval: fl
     Equivalent to stacking torch_correlate_2d(input, k) over each kernel in the
     bank, but pays the pad and dispatch cost once rather than once per kernel.
 
+    Rank-agnostic: the kernel axis is inserted just before the spatial axes, so a
+    (H, W) input still gives (K, H, W) while a (B, H, W) input gives (B, K, H, W).
+    Index it as result[..., d, :, :] rather than result[d].
+
     Parameters:
-    - input: (H, W) tensor.
+    - input: (..., H, W) tensor.
     - kernels: (K, 1, kh, kw) conv2d weights.
     - cval: constant boundary fill value.
 
     Returns:
-    - (K, H, W) tensor.
+    - (..., K, H, W) tensor.
     """
     pad_h, pad_w = kernels.shape[-2] // 2, kernels.shape[-1] // 2
+    input_4d, leading = as_conv_batch(input.type(torch.float32))
     input_padded = F.pad(
-        input.type(torch.float32).unsqueeze(0).unsqueeze(0),
+        input_4d,
         pad=(pad_w, pad_w, pad_h, pad_h),
         mode='constant',
         value=cval,
     )
-    return F.conv2d(input_padded, kernels).squeeze(0)
+    result = F.conv2d(input_padded, kernels)
+    return result.reshape(*leading, *result.shape[-3:])
 
 
 def torch_correlate_3d(input_tensor, weights):
     """
-    Apply a batched 2D convolution to a (H, W, C) tensor using (H, W) weights and return (H, W, C) tensor.
-    Each channel in the input tensor is treated as a separate batch for 2D convolution.
+    Apply a batched 2D convolution to a (..., H, W, C) tensor using (K, K) weights.
+
+    Each channel is convolved independently with the same kernel.
+
+    NOTE: unlike most tensors in the simulation, this one is *channel-trailing* --
+    the spatial axes are -3 and -2, not -2 and -1. Any leading dimensions (e.g. a
+    world batch) are folded into the conv batch and restored afterwards.
 
     Parameters:
-    - input_tensor: torch.Tensor of shape (H, W, C)
+    - input_tensor: torch.Tensor of shape (..., H, W, C)
     - weights: torch.Tensor of shape (K, K)
 
     Returns:
-    - output_tensor: torch.Tensor of shape (H, W, C)
+    - output_tensor: torch.Tensor of shape (..., H, W, C)
     """
-    # Ensure input_tensor is of shape (H, W, C)
-    assert len(input_tensor.shape) == 3, "input_tensor must be of shape (H, W, C)"
+    assert input_tensor.dim() >= 3, "input_tensor must be of shape (..., H, W, C)"
 
     # Ensure weights is of shape (K, K)
     assert len(weights.shape) == 2, "weights must be 2D"
 
-    # Convert input_tensor to shape (C, 1, H, W) to treat channels as separate batches
-    input_4d = input_tensor.permute(2, 0, 1).unsqueeze(1)
+    leading = input_tensor.shape[:-3]
+    H, W, C = input_tensor.shape[-3:]
+
+    # Move the channel axis in front of the spatial axes and fold everything
+    # before H, W into the conv batch: (..., C, H, W) -> (N, 1, H, W)
+    input_4d = input_tensor.movedim(-1, -3).reshape(-1, 1, H, W)
 
     # Convert weights to shape (1, 1, K, K) to apply the same kernel on all channels
     weight_4d = weights.unsqueeze(0).unsqueeze(0)
 
-    # Apply 2D convolution for each channel separately using conv2d with groups=C
     conv_output = F.conv2d(input_4d, weight_4d, stride=1, padding='same', groups=1)
 
-    # Convert output back to (H, W, C) by inverting the initial permutation
-    output_tensor = conv_output.squeeze(1).permute(1, 2, 0)
+    # Restore (..., C, H, W) and then move the channel axis back to the end.
+    output_tensor = conv_output.reshape(*leading, C, H, W).movedim(-3, -1)
 
     return output_tensor
 
@@ -627,16 +665,20 @@ def roll_with_padding(
     if len(shifts) != len(dims):
         raise ValueError("Length of shifts must match length of dims")
 
-    # Padding starts from the last dimension, while the shifts for rolling start from the first dimension,
-    # so the padding indices need to be reversed here.
-    paddings = [0] * (len(dims) * 2)
+    ndim = input.dim()
+    # Normalize dims so negative (from-the-end) indices work, which is what makes
+    # this rank-agnostic: callers pass dims=(-2, -1) for the spatial axes.
+    dims = tuple(d % ndim for d in dims)
+
+    # F.pad counts pairs from the LAST dimension backwards, while dims are
+    # counted from the front, so the pair for dim d sits at index 2*(ndim-1-d).
+    paddings = [0] * (ndim * 2)
     for shift, dim in zip(shifts, dims):
         pad_left = max(0, shift)
         pad_right = max(0, -shift)
-        paddings[-2 * (dim + 1)] = pad_left
-        paddings[-2 * (dim + 1) + 1] = pad_right
-
-    paddings += [0] * (input.dim() - len(dims) * 2)
+        base = 2 * (ndim - 1 - dim)
+        paddings[base] = pad_left
+        paddings[base + 1] = pad_right
 
     if padding_mode == 'constant':
         result = F.pad(input, paddings, mode='constant', value=padding_value)
@@ -668,7 +710,9 @@ def neighbors(
     # If we roll the input tensor by the negative of the kernel direction, the resulting tensor will
     # contain the neighbor in the direction of the kernel.
     if not reverse:
-        kernels *= -1
+        # NOT in place: generate_direction_kernels is device_lru_cached, so `*=`
+        # mutated the cached tensor and flipped the sign on every subsequent call.
+        kernels = kernels * -1
     if eight_direction:
         neighbors_tensor = torch.zeros(input.shape + (8,), dtype=input.dtype)
     else:
@@ -677,7 +721,7 @@ def neighbors(
         neighbors_tensor[..., i] = roll_with_padding(
             input,
             shifts=(int(dy), int(dx)),
-            dims=(0, 1),
+            dims=(-2, -1),
             padding_mode=padding_mode,
             padding_value=padding_value
         )
@@ -691,7 +735,13 @@ def pad_and_view(td: TensorDict, key: NestedKey, pad: Tuple[int, ...], value: Un
         padded = torch.nn.functional.pad(original, pad, mode='constant', value=value)
         td[padded_key] = padded
 
-        slices = tuple(slice(pad[i * 2], -pad[i * 2 + 1]) for i in range(len(pad) // 2))
+        # F.pad consumes pairs from the LAST dimension backwards, so the pad pairs
+        # map onto the trailing dims in reverse order. Leading (e.g. batch) dims
+        # are left alone via the Ellipsis.
+        slices = (Ellipsis,) + tuple(
+            slice(pad[i * 2], -pad[i * 2 + 1] if pad[i * 2 + 1] else None)
+            for i in reversed(range(len(pad) // 2))
+        )
         view = td[padded_key][slices]
         td[key] = view
     assert td[key].storage().data_ptr() == td[padded_key].storage().data_ptr()
@@ -703,23 +753,28 @@ def unfold_neighbors(td: TensorDict, key: NestedKey, kernel_size: Tuple[int, ...
         return td[neighbors_key]
     # Ensure we have a padded version
     padding = (kernel_size[0] - 1) // 2
-    pad = (padding,) * (2 * td[key].dim())
+    # Only the two spatial dims are padded; any leading dims are untouched.
+    pad = (padding,) * 4
     pad_and_view(td, key, pad, pad_value)
 
     padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
     x_padded = td[padded_key]
     assert td[key].storage().data_ptr() == x_padded.storage().data_ptr()
 
-    H, W = td[key].shape
+    leading = td[key].shape[:-2]
+    H, W = td[key].shape[-2:]
     kH, kW = kernel_size
 
     # Calculate strides
     stride = x_padded.stride()
 
-    # Create the unfolded view
-    unfolded = torch.as_strided(x_padded,
-        size=(H, W, kH, kW),
-        stride=(stride[0], stride[1], stride[0], stride[1]))
+    # Create the unfolded view. Leading dims keep their own size/stride; the
+    # spatial strides are reused for the kernel window axes.
+    unfolded = torch.as_strided(
+        x_padded,
+        size=(*leading, H, W, kH, kW),
+        stride=(*stride[:-2], stride[-2], stride[-1], stride[-2], stride[-1]),
+    )
     assert unfolded.storage().data_ptr() == x_padded.storage().data_ptr()
 
     # Store the result
@@ -738,18 +793,20 @@ def fold_neighbors(td: TensorDict, key: NestedKey):
     padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
     x_padded = td[padded_key].contiguous()
 
-    H, W, kH, kW = x_padded.shape
+    leading = x_padded.shape[:-4]
+    H, W, kH, kW = x_padded.shape[-4:]
     H_orig, W_orig = H - 2, W - 2
     assert kH == 3 and kW == 3, "This function assumes a 3x3 neighborhood"
 
-    # Calculate the correct strides
+    # Calculate the correct strides (x_padded was made contiguous above)
     s0 = W * kH * kW
     s1 = kH * kW
+    leading_strides = x_padded.stride()[:-4]
 
     inverse_neighbors = torch.as_strided(
         x_padded,
-        size=(H_orig, W_orig, 3, 3),
-        stride=(s0, s1, W, 1),
+        size=(*leading, H_orig, W_orig, 3, 3),
+        stride=(*leading_strides, s0, s1, W, 1),
         storage_offset=s0 + s1
     )
 
@@ -758,17 +815,20 @@ def fold_neighbors(td: TensorDict, key: NestedKey):
 
 
 def custom_filter_operation(input_tensor, kernels):
-    H, W = input_tensor.shape
+    leading = input_tensor.shape[:-2]
+    H, W = input_tensor.shape[-2:]
 
-    # Pad the input tensor
+    # Pad the input tensor (F.pad already counts from the last dim backwards)
     padded = F.pad(input_tensor, (1, 1, 1, 1))
 
-    # Unfold the padded tensor to create patches
-    patches = padded.unfold(0, 3, 1).unfold(1, 3, 1)
+    # Unfold the padded tensor to create patches. Each unfold replaces its dim
+    # with the window count and appends the window, so unfolding dim -2 twice
+    # walks H then W: (..., H+2, W+2) -> (..., H, W+2, 3) -> (..., H, W, 3, 3).
+    patches = padded.unfold(-2, 3, 1).unfold(-2, 3, 1)
 
     # Reshape patches and kernels for batched matrix multiplication
-    patches = patches.reshape(H, W, 9)
-    kernels = kernels.reshape(H, W, 9)
+    patches = patches.reshape(*leading, H, W, 9)
+    kernels = kernels.reshape(*leading, H, W, 9)
 
     # Perform batched matrix multiplication
     result = torch.sum(patches * kernels, dim=-1)
@@ -780,27 +840,31 @@ def apply_kernels(td, input_key, kernels):
     input_patches = unfold_neighbors(td, input_key, (3, 3))
 
     # Apply the kernels through einstein summation
-    updated = torch.einsum('ijkl, ijkl -> ij', input_patches, kernels)
+    updated = torch.einsum('...ijkl, ...ijkl -> ...ij', input_patches, kernels)
     td.set(input_key, updated, inplace=True)
 
 
 def flow_gradient(input, apply_distances=True):
+    """Per-cell 3x3 outward gradient of a (..., H, W) field, returned as (..., H, W, 3, 3)."""
     device = input.device
-    H, W = input.shape
+    leading = input.shape[:-2]
+    H, W = input.shape[-2:]
+    # The unsqueeze(0)/squeeze() round trip this used to do was a no-op for a 2D
+    # input and would have dropped any size-1 leading dim for a batched one.
     padded_input = torch.nn.functional.pad(
-        input.unsqueeze(0),
+        input,
         (1, 1, 1, 1),
         mode="constant",
         value=0
-    ).squeeze()
+    )
     stride = padded_input.stride()
     unfolded = torch.as_strided(
         padded_input,
-        size=(H, W, 3, 3),
-        stride=(stride[0], stride[1], stride[0], stride[1])
+        size=(*leading, H, W, 3, 3),
+        stride=(*stride[:-2], stride[-2], stride[-1], stride[-2], stride[-1])
     )
 
-    expanded_input = input.reshape(H, W, 1, 1).expand(H, W, 3, 3)
+    expanded_input = input.reshape(*leading, H, W, 1, 1).expand(*leading, H, W, 3, 3)
 
     if apply_distances:
         euclidean_distance_matrix = torch.tensor(
@@ -814,10 +878,12 @@ def flow_gradient(input, apply_distances=True):
     else:
         gradient = (expanded_input - unfolded)
 
-    gradient[0, :, 0, :] = 0
-    gradient[-1, :, -1, :] = 0
-    gradient[:, 0, :, 0] = 0
-    gradient[:, -1, :, -1] = 0
+    # Zero the flows that would leave the grid. The first two indices are the
+    # spatial axes, the last two the 3x3 window.
+    gradient[..., 0, :, 0, :] = 0
+    gradient[..., -1, :, -1, :] = 0
+    gradient[..., :, 0, :, 0] = 0
+    gradient[..., :, -1, :, -1] = 0
     assert not torch.isnan(gradient).any()
     assert not torch.isinf(gradient).any()
 
@@ -861,20 +927,22 @@ def flow(
     )
 
     padded_input = torch.nn.functional.pad(
-        input.unsqueeze(0),
+        input,
         (1, 1, 1, 1),
         mode="constant",
         value=0
-    ).squeeze()
+    )
     inflow = torch.zeros_like(padded_input)
     for i in range(3):
         for j in range(3):
             if i == 1 and j == 1:
                 continue  # Skip the center cell
-            shifted_outflow = torch.roll(padded_corrected_outflow[:, :, i, j], shifts=(i-1, j-1), dims=(0, 1))
+            shifted_outflow = torch.roll(
+                padded_corrected_outflow[..., i, j], shifts=(i - 1, j - 1), dims=(-2, -1)
+            )
             inflow.add_(shifted_outflow)
 
-    inflow = inflow[1:-1, 1:-1]
+    inflow = inflow[..., 1:-1, 1:-1]
 
     assert torch.isclose(torch.sum(inflow), torch.sum(corrected_outflow))
 

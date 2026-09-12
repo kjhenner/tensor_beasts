@@ -136,11 +136,11 @@ class RuleBasedPolicy:
 
         # Handle case where no features are configured
         if combined_directional is None:
-            h, w = obs.energy.shape
+            shape = obs.energy.shape
             device = obs.energy.device
             return (
-                torch.zeros(h, w, device=device),
-                torch.zeros(h, w, dtype=torch.long, device=device)
+                torch.zeros(shape, device=device),
+                torch.zeros(shape, dtype=torch.long, device=device)
             )
 
         # Clamp signed values for direction calculation
@@ -166,6 +166,9 @@ class RuleBasedPolicy:
         Uses random tie-breaking when multiple directions have equal value.
         """
         # Stack: [current, up, down, left, right] -> (5, H, W)
+        # dim 0 is the stacked direction axis (5 candidates), not a spatial
+        # axis. It stays leading at any input rank, so the reductions over
+        # dim=0 here and in _compute_gradient are already rank-agnostic.
         stacked = torch.cat([current.unsqueeze(0), directional], dim=0)
 
         # Find max value at each position
