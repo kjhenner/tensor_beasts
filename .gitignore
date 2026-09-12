@@ -91,3 +91,4 @@ multirun/
 rl_baseline_512.txt
 runs/
 sweeps/
+sweep_run.log

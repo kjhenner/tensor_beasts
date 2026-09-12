@@ -60,12 +60,15 @@ SEARCH_SPACE: Dict[str, List[Any]] = {
     "reproduction_reward": [0.0, 3.0, 10.0, 30.0],
     "foraging_reward": [0.0, 0.1, 0.5, 2.0],
     "segment_steps": [32, 64, 128],
-    # Also the memory lever. A fully convolutional policy holds one
-    # full-resolution activation per convolution and this multiplies all of
-    # them, so 16 timesteps of the residual network at 256x256 is about 3 GB
-    # while 4 is about 0.7 GB. Minibatching here is over whole timesteps, not
-    # over individuals, so a smaller value just means more, cheaper passes.
-    "minibatch_steps": [4, 8, 16],
+    # Also the memory lever, and capped at 8 for that reason. A fully
+    # convolutional policy holds one full-resolution activation per convolution
+    # and this multiplies all of them, so at 256x256 the residual network needs
+    # about 4.7 GB at 16 timesteps, 2.5 GB at 8 and 1.4 GB at 4. Since the guard
+    # sizes every worker by the hungriest sampled trial, allowing 16 here drops
+    # the whole sweep to a single worker on a 17 GB machine. Minibatching is
+    # over whole timesteps rather than individuals, so a smaller value just
+    # means more and cheaper passes over the same data.
+    "minibatch_steps": [4, 8],
 }
 
 # A deliberately small grid, for when a full product is wanted.
