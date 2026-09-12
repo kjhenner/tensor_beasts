@@ -463,6 +463,29 @@ against the unchanged rules. Learning the predator as well is the more
 exciting experiment and belongs after a two-lever herbivore exists to be
 hunted.
 
+### Two levers, first run: parity, and a reward artefact
+
+Same recipe as the winner plus four metabolic levels, paired evaluation at
+step 1664 on the 256 world: **1.008x**, against 1.075x and 1.041x for
+direction-only on two seeds. The direction head imitated the rules better than
+any direction-only run, 0.88 agreement, and the metabolic head imitated them at
+0.95, which is the problem: its mean chosen level was 0.086 on a scale of 0 to
+3 with entropy 0.14, nearly deterministic on the coldest setting, from step
+576 onward.
+
+The learner is not being timid; it is being rational under the reward I gave
+it. The foraging term is net biomass change per step, and burning biomass into
+energy is exactly what the metabolic lever does, so every unit burned costs
+reward directly. Energy never appears in the reward at all, and survival is
+judged on biomass, so under this signal hoarding is optimal and the throttle's
+only correct setting is off. The anchor agrees, since the rule sits near basal
+most of the time. The lever was neutered by the signal, not by the network.
+
+The fix is to reward what foraging actually is, biomass *eaten*, rather than
+net change. Then burning is neutral to the foraging term and pays off only
+through what energy buys, movement, which is the trade the lever exists to
+make.
+
 ## Design: per-individual memory
 
 The repo owner's suggestion: give each individual a small vector it can read
