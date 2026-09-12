@@ -29,6 +29,7 @@ from typing import Any, Dict, Optional
 from omegaconf import OmegaConf
 
 from tensor_beasts.rl.ppo import PPOConfig
+from tensor_beasts.rl.memory import estimate_training_bytes, format_bytes
 from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
 DEFAULT_CONFIG = "conf/rl/ppo.yaml"
@@ -201,6 +202,21 @@ def main(argv: Optional[list] = None) -> int:
     trainer_config = TrainerConfig(**merged["trainer"])
     ppo_config = PPOConfig(**merged["ppo"])
 
+    trainer = Trainer(trainer_config, ppo_config)
+
+    # Say this out loud before starting. A fully convolutional policy holds one
+    # full-resolution activation per convolution and the minibatch multiplies
+    # every one of them, so the backward pass, not the stored rollout, is what
+    # runs a machine out of memory. Lower --minibatch-steps if this is large.
+    estimate = estimate_training_bytes(
+        trainer.network,
+        minibatch_steps=ppo_config.minibatch_steps,
+        segment_steps=trainer_config.segment_steps,
+        observation_channels=trainer.env.observation_channels,
+        height=trainer_config.size,
+        width=trainer_config.size,
+    )
+    print(f"estimated peak memory {format_bytes(estimate)}")
     trainer = Trainer(trainer_config, ppo_config)
     print(
         f"arch={trainer_config.arch} params={trainer.network.num_parameters()} "

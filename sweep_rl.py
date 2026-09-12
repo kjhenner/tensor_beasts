@@ -37,6 +37,8 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+from tensor_beasts.rl.memory import format_bytes, workers_that_fit
+
 
 # Ranges to sample from. Each entry is a list of candidate values; random search
 # picks one per trial, grid search takes the product.
@@ -58,6 +60,12 @@ SEARCH_SPACE: Dict[str, List[Any]] = {
     "reproduction_reward": [0.0, 3.0, 10.0, 30.0],
     "foraging_reward": [0.0, 0.1, 0.5, 2.0],
     "segment_steps": [32, 64, 128],
+    # Also the memory lever. A fully convolutional policy holds one
+    # full-resolution activation per convolution and this multiplies all of
+    # them, so 16 timesteps of the residual network at 256x256 is about 3 GB
+    # while 4 is about 0.7 GB. Minibatching here is over whole timesteps, not
+    # over individuals, so a smaller value just means more, cheaper passes.
+    "minibatch_steps": [4, 8, 16],
 }
 
 # A deliberately small grid, for when a full product is wanted.
@@ -163,6 +171,32 @@ def grid_params(space: Dict[str, List[Any]]) -> List[Dict[str, Any]]:
     return [dict(zip(keys, combo)) for combo in itertools.product(*(space[k] for k in keys))]
 
 
+def _worst_case_worker_bytes(combos: Sequence[Dict[str, Any]], size: int) -> int:
+    """Peak resident bytes for the hungriest trial in this sweep."""
+    from tensor_beasts.rl.memory import estimate_training_bytes
+    from tensor_beasts.rl.networks import build_network
+
+    # Fourteen observation channels for the default herbivore perception: one
+    # value plus four neighbours for each of two scents, then four own-state
+    # channels.
+    channels = 14
+    worst = 0
+    for params in combos:
+        network = build_network(params.get("arch", "conv"), channels)
+        worst = max(
+            worst,
+            estimate_training_bytes(
+                network,
+                minibatch_steps=params.get("minibatch_steps", 16),
+                segment_steps=params.get("segment_steps", 64),
+                observation_channels=channels,
+                height=size,
+                width=size,
+            ),
+        )
+    return worst
+
+
 def report(records: Sequence[Dict[str, Any]], top: int = 10) -> None:
     ok = [r for r in records if r.get("ratio") is not None]
     failed = [r for r in records if r.get("ratio") is None]
@@ -205,6 +239,17 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=str, default="sweeps")
     parser.add_argument("--report", type=str, default=None, help="print a saved result file and exit")
+    parser.add_argument(
+        "--memory-fraction",
+        type=float,
+        default=0.5,
+        help="fraction of physical RAM the sweep may use (default 0.5)",
+    )
+    parser.add_argument(
+        "--no-memory-guard",
+        action="store_true",
+        help="do not reduce the worker count to fit in memory",
+    )
     args = parser.parse_args()
 
     if args.report:
@@ -212,17 +257,34 @@ def main() -> int:
         return 0
 
     cores = os.cpu_count() or 1
-    # Half the cores by default: each worker still wants two threads for the
-    # simulation, and oversubscribing makes every trial slower without
+    # Half the cores by default: each worker still wants a couple of threads for
+    # the simulation, and oversubscribing makes every trial slower without
     # finishing the sweep any sooner.
     workers = args.workers or max(1, cores // 2)
-    threads = max(1, cores // max(workers, 1))
 
     rng = random.Random(args.seed)
     if args.grid:
         combos = grid_params(GRID_SPACE)
     else:
         combos = [sample_params(SEARCH_SPACE, rng) for _ in range(args.trials)]
+
+    # Memory, not cores, is what actually limits the worker count here. An
+    # earlier sweep was killed by the OS: a fully convolutional policy holds one
+    # full-resolution activation tensor per convolution, and the minibatch
+    # dimension multiplies every one of them, so a residual trial at 256x256
+    # wants about 3 GB before anything else.
+    worst_case = _worst_case_worker_bytes(combos, args.size)
+    if not args.no_memory_guard:
+        allowed = workers_that_fit(worst_case, workers, args.memory_fraction)
+        if allowed < workers:
+            print(
+                f"Reducing workers {workers} -> {allowed}: the largest sampled trial "
+                f"needs about {format_bytes(worst_case)} and the budget is "
+                f"{int(args.memory_fraction * 100)}% of RAM."
+            )
+            workers = allowed
+    threads = max(1, cores // max(workers, 1))
+    print(f"largest trial needs roughly {format_bytes(worst_case)} resident")
 
     output_root = os.path.join(args.out, time.strftime("sweep_%Y%m%d_%H%M%S"))
     os.makedirs(output_root, exist_ok=True)
