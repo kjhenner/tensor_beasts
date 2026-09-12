@@ -243,6 +243,14 @@ def main() -> int:
     parser.add_argument("--out", type=str, default="sweeps")
     parser.add_argument("--report", type=str, default=None, help="print a saved result file and exit")
     parser.add_argument(
+        "--cheap",
+        action="store_true",
+        help=(
+            "restrict the search to the cheap architectures (conv, dilated) and "
+            "the smallest minibatch, for a machine that cannot afford the rest"
+        ),
+    )
+    parser.add_argument(
         "--memory-fraction",
         type=float,
         default=0.5,
@@ -266,10 +274,14 @@ def main() -> int:
     workers = args.workers or max(1, cores // 2)
 
     rng = random.Random(args.seed)
+    space = dict(SEARCH_SPACE)
+    if args.cheap:
+        space["arch"] = ["conv", "dilated"]
+        space["minibatch_steps"] = [4]
     if args.grid:
         combos = grid_params(GRID_SPACE)
     else:
-        combos = [sample_params(SEARCH_SPACE, rng) for _ in range(args.trials)]
+        combos = [sample_params(space, rng) for _ in range(args.trials)]
 
     # Memory, not cores, is what actually limits the worker count here. An
     # earlier sweep was killed by the OS: a fully convolutional policy holds one
