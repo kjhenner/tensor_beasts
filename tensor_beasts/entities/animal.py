@@ -515,7 +515,7 @@ class Animal(Entity):
             divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
             carried_features_self=[offspring_count, id_feature, biomass, gradient_ema, slot_id],
             carried_feature_fns_self=[
-                lambda x: safe_add(x, 1),
+                lambda x: safe_add(x, 1, inplace=False),  # must be pure; see perform_move
                 lambda x: x,
                 lambda x: (x.float() * 0.5).to(x.dtype),
                 lambda x: x,

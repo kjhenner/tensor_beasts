@@ -102,6 +102,11 @@ def perform_move(
         divide_feature: Feature to check against divide_threshold for reproduction.
                        Defaults to entity_energy if not provided.
 
+    Every carried_feature_fn and divide_fn MUST BE PURE. Each is applied once
+    and its result is shared across all four directions, so a function that
+    mutates its argument in place will corrupt the whole grid rather than the
+    moving cells. Pass e.g. safe_add(x, 1, inplace=False), never safe_add(x, 1).
+
     Returns:
         move_origin_mask: Boolean tensor indicating which cells had entities that moved.
     """
@@ -130,12 +135,25 @@ def perform_move(
         else:
             assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
 
-    # Masks are 0/1 uint8, so bitwise or matches the previous stack-and-sum.
+    # Masks are 0/1 uint8, so bitwise or matches a stack-and-sum.
     move_origin_mask = (
         direction_masks[1] | direction_masks[2] | direction_masks[3] | direction_masks[4]
     ).type(torch.bool)
-    offspring_mask = move_origin_mask * (divide_feature > divide_threshold)
-    vacated_mask = move_origin_mask * (divide_feature <= divide_threshold)
+
+    # Who reproduces is decided once, from state as it stood on entry. It used
+    # to be re-read per feature and per direction, which made the outcome depend
+    # on the order of carried_features_self: divide_feature is normally biomass,
+    # which is itself one of the carried features and is mutated by the loop
+    # below, so features processed later saw a different reproduction decision
+    # than features processed earlier.
+    is_reproducing = divide_feature > divide_threshold
+    offspring_mask = move_origin_mask * is_reproducing
+    vacated_mask = move_origin_mask * ~is_reproducing
+
+    # Per-direction reproduction, derived from the same single decision.
+    reproducing_toward = {
+        d: direction_masks[d].type(torch.bool) & is_reproducing for d in range(1, 5)
+    }
 
     for feature, fn in [(entity_energy, divide_fn_self)] + list(zip(carried_features_self or [], carried_feature_fns_self or [])):
         # Apply move_cost only to energy (first feature in the list)
@@ -144,22 +162,21 @@ def perform_move(
         else:
             feature_after_cost = feature
 
-        # NOTE: fn is deliberately re-applied per direction. Some callers pass
-        # impure functions (e.g. safe_add(x, 1), which mutates in place), so
-        # hoisting this out of the loop changes simulation behaviour.
+        # fn is direction-independent, so it is applied once. It used to be
+        # called once per direction, which silently multiplied the effect of any
+        # caller that passed an in-place function.
+        feature_if_reproducing = fn(feature_after_cost)
+
         # Accumulate instead of stacking four (H, W) tensors and reducing.
         # Integral features accumulate in int64: several movers can arrive at one
-        # cell and the total can exceed the uint8 range. torch.sum promoted to
-        # int64 for the same reason, and safe_add needs the unwrapped total in
-        # order to clamp. Float features keep their own dtype, as torch.sum does.
+        # cell and the total can exceed the uint8 range, and safe_add needs the
+        # unwrapped total in order to clamp. Float features keep their own dtype.
         arrivals = None
         for d in range(1, 5):
             carried = pad_matrix(
                 torch.where(
-                    # divide_feature is re-read per direction on purpose: the loop
-                    # below mutates it in place through carried_features_self.
-                    ((direction_masks[d] * divide_feature) > divide_threshold).type(torch.bool),
-                    direction_masks[d] * fn(feature_after_cost),  # Reproducing: apply fn after cost
+                    reproducing_toward[d],
+                    direction_masks[d] * feature_if_reproducing,  # Reproducing: apply fn after cost
                     direction_masks[d] * feature_after_cost       # Regular move: carry with cost applied
                 ),
                 d
