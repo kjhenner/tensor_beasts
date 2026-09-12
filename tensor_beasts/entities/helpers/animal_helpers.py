@@ -3,7 +3,7 @@ from typing import Dict, Optional, List, Callable, Tuple, Union
 import torch
 
 from tensor_beasts.util import (
-    safe_sum, directional_kernel_set, torch_correlate_2d, safe_add, pad_matrix,
+    safe_sum, directional_kernel_bank, torch_correlate_2d_bank, safe_add, pad_matrix,
     get_direction_matrix, safe_sub
 )
 
@@ -37,15 +37,15 @@ def get_direction_masks(
     else:
         clearance_mask = entity_energy > 0
 
-    clearance_kernels = directional_kernel_set(clearance_kernel_size)
+    # One batched conv over all four directional kernels rather than four
+    # separate convs, each of which re-pads the same input.
+    blocked = torch_correlate_2d_bank(
+        clearance_mask.type(torch.float32),
+        directional_kernel_bank(clearance_kernel_size),
+        cval=1,
+    ).detach().type(torch.bool)
     for d in range(1, 5):
-        direction_masks[d] *= ~(
-            torch_correlate_2d(
-                clearance_mask.type(torch.float32),
-                clearance_kernels[d].type(torch.float32),
-                mode='constant',
-                cval=1
-            ).detach().type(torch.bool))
+        direction_masks[d] *= ~blocked[d - 1]
     return direction_masks
 
 
@@ -130,7 +130,10 @@ def perform_move(
         else:
             assert len(carried_features_offspring) == len(carried_feature_fns_offspring)
 
-    move_origin_mask = torch.sum(torch.stack(list(direction_masks.values())), dim=0).type(torch.bool)
+    # Masks are 0/1 uint8, so bitwise or matches the previous stack-and-sum.
+    move_origin_mask = (
+        direction_masks[1] | direction_masks[2] | direction_masks[3] | direction_masks[4]
+    ).type(torch.bool)
     offspring_mask = move_origin_mask * (divide_feature > divide_threshold)
     vacated_mask = move_origin_mask * (divide_feature <= divide_threshold)
 
@@ -141,17 +144,32 @@ def perform_move(
         else:
             feature_after_cost = feature
 
-        safe_add(feature, torch.sum(torch.stack([
-            pad_matrix(
+        # NOTE: fn is deliberately re-applied per direction. Some callers pass
+        # impure functions (e.g. safe_add(x, 1), which mutates in place), so
+        # hoisting this out of the loop changes simulation behaviour.
+        # Accumulate instead of stacking four (H, W) tensors and reducing.
+        # Integral features accumulate in int64: several movers can arrive at one
+        # cell and the total can exceed the uint8 range. torch.sum promoted to
+        # int64 for the same reason, and safe_add needs the unwrapped total in
+        # order to clamp. Float features keep their own dtype, as torch.sum does.
+        arrivals = None
+        for d in range(1, 5):
+            carried = pad_matrix(
                 torch.where(
+                    # divide_feature is re-read per direction on purpose: the loop
+                    # below mutates it in place through carried_features_self.
                     ((direction_masks[d] * divide_feature) > divide_threshold).type(torch.bool),
                     direction_masks[d] * fn(feature_after_cost),  # Reproducing: apply fn after cost
                     direction_masks[d] * feature_after_cost       # Regular move: carry with cost applied
                 ),
                 d
             )
-            for d in range(1, 5)
-        ]), dim=0))
+            if arrivals is None:
+                arrivals = carried if carried.is_floating_point() else carried.to(torch.int64)
+            else:
+                arrivals = arrivals + carried
+
+        safe_add(feature, arrivals)
 
     # After this operation, each origin position where an offspring will be left will be adjusted by corresponding
     # feature functions

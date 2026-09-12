@@ -7,6 +7,8 @@ from rich.console import Console
 from rich.table import Table
 from tensordict import TensorDict, NestedKey
 
+from tensor_beasts.config.namespace import ConfigNamespace, resolve_to_namespace
+
 
 class Feature(abc.ABC):
     name: str
@@ -32,8 +34,10 @@ class Feature(abc.ABC):
                 parent_config = OmegaConf.to_container(cls.default_config, resolve=False)
                 merged_default.update(parent_config)
 
-        # Merge with instance config
-        self.config = OmegaConf.merge(OmegaConf.create(merged_default), config or {})
+        # Merge with instance config, then resolve once. Interpolations are
+        # resolved here rather than on every access in the update loop.
+        merged = OmegaConf.merge(OmegaConf.create(merged_default), config or {})
+        self.config: ConfigNamespace = resolve_to_namespace(merged)
         self.td = td
         if key_prefix not in td:
             td[key_prefix] = TensorDict({}, batch_size=[])
@@ -207,7 +211,7 @@ class SharedFeature(Feature, abc.ABC):
                     if local_val != shared_val:
                         # Use shared value, could log warning here
                         if hasattr(self.config, key):
-                            OmegaConf.update(self.config, key, shared_val)
+                            setattr(self.config, key, shared_val)
 
         self._is_parent = is_parent
         self._shared_key = reg["shared_key"]

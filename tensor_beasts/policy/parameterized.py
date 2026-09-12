@@ -220,7 +220,8 @@ class ParameterizedPolicy:
         max_values = stacked.max(dim=0).values
         masks = (stacked == max_values.unsqueeze(0))
         random_tiebreak = masks.float() * torch.rand_like(masks, dtype=torch.float32)
-        direction = torch.argmax(random_tiebreak, dim=0)
+        # See note in observations.py: max().indices beats argmax() on dim 0.
+        direction = random_tiebreak.max(dim=0).indices
         return direction
 
     def _compute_gradient(

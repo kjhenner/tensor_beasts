@@ -448,12 +448,14 @@ def test_flow_gradient():
     elevation *= perlin_noise(input.shape, (4, 8), 4)
 
     gradient = flow_gradient(elevation + input)
-    print(gradient)
-    # Open result as png
+
+    # No plt.show() here: on the default interactive macOS backend it blocks the
+    # whole suite waiting on a window. Render to a figure and drop it instead.
     plt.imshow(
         torch.sum(gradient, (-1, -2)).cpu().numpy(),
         cmap='gray'
     )
+    plt.close('all')
     # plt.imshow(
     #     torch.sum(gradient, (-1, -2)).cpu().numpy(),
     #     cmap='gray'
@@ -462,7 +464,6 @@ def test_flow_gradient():
     #     elevation.cpu().numpy(),
     #     cmap='gray'
     # )
-    plt.show()
 
 
 

@@ -1,22 +1,15 @@
 import abc
-from types import SimpleNamespace
 from typing import Optional, Dict, List, Set, Type, ClassVar, Any
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from tensor_beasts.config.namespace import ConfigNamespace, to_namespace
 from tensor_beasts.features.feature import Feature, SharedFeature
 
 
 class DependencyCycleError(Exception):
     """Raised when a circular dependency is detected in feature dependencies."""
     pass
-
-
-class ConfigNamespace(SimpleNamespace):
-    """SimpleNamespace with dict-like .get() method for compatibility."""
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return getattr(self, key, default)
 
 
 class EntityMeta(abc.ABCMeta):
@@ -90,27 +83,8 @@ class Entity(abc.ABC, metaclass=EntityMeta):
         self._update_order = None
 
     def _dict_to_namespace(self, d: Dict) -> ConfigNamespace:
-        """Recursively convert a dict to ConfigNamespace.
-
-        Dicts with non-string keys (like navigation_weights with tuple keys)
-        are kept as dicts rather than converted to namespaces.
-        """
-        result = {}
-        for key, value in d.items():
-            if isinstance(value, dict):
-                # Check if all keys are strings - if not, keep as dict
-                if all(isinstance(k, str) for k in value.keys()):
-                    result[key] = self._dict_to_namespace(value)
-                else:
-                    result[key] = value  # Keep dict with non-string keys as-is
-            elif isinstance(value, list):
-                result[key] = [
-                    self._dict_to_namespace(item) if isinstance(item, dict) and all(isinstance(k, str) for k in item.keys()) else item
-                    for item in value
-                ]
-            else:
-                result[key] = value
-        return ConfigNamespace(**result)
+        """Recursively convert a dict to ConfigNamespace."""
+        return to_namespace(d)
 
     def _build_dependency_graph(self) -> Dict[str, Set[str]]:
         """

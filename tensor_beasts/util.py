@@ -6,7 +6,7 @@ from typing import List, Union, Tuple, SupportsAbs, Optional
 import numpy as np
 import torch
 import torch.nn.functional as F
-from functools import lru_cache
+from functools import lru_cache, wraps
 
 import time
 import statistics
@@ -15,6 +15,26 @@ from tensordict import TensorDict, NestedKey
 
 # Initialize a dictionary to store function execution times
 execution_times = {}
+
+
+def device_lru_cache(fn):
+    """lru_cache for functions returning tensors, keyed by device as well as args.
+
+    A plain lru_cache here caches a kernel built on whichever device happened to
+    be default at the first call. Any later call under a different default
+    device then gets a kernel on the wrong device, which surfaces as
+    "Input type (MPSFloatType) and weight type (torch.FloatTensor) should be the
+    same" from conv2d rather than as anything that names the cache.
+    """
+    cached = lru_cache(maxsize=None)(lambda _device, *args, **kwargs: fn(*args, **kwargs))
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        return cached(torch.get_default_device(), *args, **kwargs)
+
+    wrapper.cache_clear = cached.cache_clear
+    return wrapper
+
 
 
 DIRECTION_NAMES = {
@@ -50,7 +70,7 @@ def get_mean_execution_times():
     }
 
 
-@lru_cache
+@device_lru_cache
 def directional_kernel_set(size: int):
     return {
         1: generate_direction_kernel(size, 1),
@@ -138,7 +158,7 @@ def pad_matrix(mat, direction):
         return torch.nn.functional.pad(mat[:, :-1], (1, 0, 0, 0), value=0)
 
 
-@lru_cache
+@device_lru_cache
 def get_edge_mask(shape: tuple):
     mask = torch.zeros(shape, dtype=torch.float32)
     mask[0, :] = 1
@@ -222,6 +242,40 @@ def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     return result.type(input_dtype)
 
 
+@device_lru_cache
+def directional_kernel_bank(size: int) -> torch.Tensor:
+    """The four directional kernels stacked as conv2d weights of shape (4, 1, K, K).
+
+    Index d-1 holds the kernel for direction d, matching directional_kernel_set.
+    """
+    kernels = directional_kernel_set(size)
+    return torch.stack([kernels[d].type(torch.float32) for d in range(1, 5)]).unsqueeze(1)
+
+
+def torch_correlate_2d_bank(input: torch.Tensor, kernels: torch.Tensor, cval: float = 0) -> torch.Tensor:
+    """Correlate a 2D input against a bank of kernels in a single conv2d.
+
+    Equivalent to stacking torch_correlate_2d(input, k) over each kernel in the
+    bank, but pays the pad and dispatch cost once rather than once per kernel.
+
+    Parameters:
+    - input: (H, W) tensor.
+    - kernels: (K, 1, kh, kw) conv2d weights.
+    - cval: constant boundary fill value.
+
+    Returns:
+    - (K, H, W) tensor.
+    """
+    pad_h, pad_w = kernels.shape[-2] // 2, kernels.shape[-1] // 2
+    input_padded = F.pad(
+        input.type(torch.float32).unsqueeze(0).unsqueeze(0),
+        pad=(pad_w, pad_w, pad_h, pad_h),
+        mode='constant',
+        value=cval,
+    )
+    return F.conv2d(input_padded, kernels).squeeze(0)
+
+
 def torch_correlate_3d(input_tensor, weights):
     """
     Apply a batched 2D convolution to a (H, W, C) tensor using (H, W) weights and return (H, W, C) tensor.
@@ -288,7 +342,7 @@ def generate_maze(size: int):
     return maze.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
 
 
-@lru_cache
+@device_lru_cache
 def _generate_diffusion_kernel():
     kernel = torch.tensor([
         [0, 0, 1, 0, 0],
@@ -300,7 +354,7 @@ def _generate_diffusion_kernel():
     return kernel / torch.sum(kernel)
 
 
-@lru_cache
+@device_lru_cache
 def generate_diffusion_kernel(size: int = 7, sigma: float = 1.0, slice_height: float = 0.1):
     """
     Generate a 2D slice of a hemispherical diffusion kernel on a flat plane.
@@ -336,7 +390,7 @@ def generate_diffusion_kernel(size: int = 7, sigma: float = 1.0, slice_height: f
 
     return kernel
 
-@lru_cache
+@device_lru_cache
 def generate_plant_crowding_kernel():
     return torch.tensor([
         [0, 1, 1, 1, 0],
@@ -347,7 +401,7 @@ def generate_plant_crowding_kernel():
     ], dtype=torch.uint8)
 
 
-@lru_cache
+@device_lru_cache
 def generate_direction_kernels(eight_directions: bool = False, include_center: bool = False):
     if not include_center:
         if eight_directions:

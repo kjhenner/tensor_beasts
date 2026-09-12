@@ -79,7 +79,9 @@ def compute_gradient_and_direction(
 
     # Random tie-breaking
     random_max_masks = masks * torch.rand_like(masks, dtype=torch.float32)
-    direction = torch.argmax(random_max_masks, dim=0)
+    # max().indices rather than argmax(): argmax over a strided dim hits a slow
+    # CPU kernel in torch and is ~30x slower here for identical results.
+    direction = random_max_masks.max(dim=0).indices
 
     return gradient, direction
 
