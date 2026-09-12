@@ -424,9 +424,44 @@ only 5% higher. The early-window story was a window artefact, which is exactly
 why the longer evaluation was worth running.
 
 Soft distillation learned the rules better and produced the weaker policy,
-1.066x against 1.331x under identical conditions. Given the training log,
-that is the cross-fade releasing into drift rather than a fault in the target;
-the floored variant is the next run.
+1.066x against 1.331x under identical conditions. Adding a floor of 0.2 to
+the cross-fade, so the anchor never fully releases, kept argmax agreement
+higher through training, 0.84 against 0.78, and recovered some of the gap at
+512: 1.138x. The ordering at 512 under identical seeds and window is therefore
+hard 1.331x, floored soft 1.138x, soft 1.066x, all above the rules. At 256 on
+two seeds the three sat at 1.075x, 0.996x and 0.988x. Matching the rules more
+faithfully has not converted into survival; the plausible reading is that the
+winning policy's edge comes from departing from the rules in particular ways
+and a target that keeps pulling toward the rule's exact scoring works against
+those departures. This line is closed for now. What would actually settle it
+is variance: the winning recipe on several seeds.
+
+### Taking stock
+
+The stated goal is met, with caveats that are recorded rather than hidden:
+three paired seeds, a policy trained at 256 and evaluated at 512, and an
+advantage that narrows as the ecology settles. Before it is called solid the
+same recipe should run on a handful of seeds, about half an hour each at 256,
+to separate the recipe from the draw.
+
+The learned policy controls one of the two levers the rules control. The
+external action overrides only the movement direction; the metabolic rate,
+the move probability and the gradient history that sets the rate all still
+come from the rule-based policy. The rule burns biomass at a basal rate plus a
+term in the smoothed scent-gradient history, capped by carried biomass, with
+efficiency falling as the rate rises. So the learned herbivore chooses where to
+go while its throttle is set by a rule reacting to gradients it may have chosen
+to ignore. It cannot conserve on purpose, sprint from a predator it sees, or
+trade efficiency for speed.
+
+The proposed next goal follows from that: **a learned policy that controls
+both movement and metabolic rate beats the rule-based policy.** A second
+output head over a few metabolic levels, the action override extended to carry
+it, and the anchor extended to the rule's metabolic choice so the learner
+starts from a working throttle. Evaluation stays herbivore-steps survived
+against the unchanged rules. Learning the predator as well is the more
+exciting experiment and belongs after a two-lever herbivore exists to be
+hunted.
 
 ## What to try next, in order
 
