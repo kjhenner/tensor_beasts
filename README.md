@@ -79,18 +79,45 @@ review.
 
 ## Reinforcement learning
 
-```python
-from tensor_beasts.rl.envs import make_env, make_vector_env
+The experiment: **can a learned policy beat the rule-based policy at herbivore
+survival?** The rule-based policy is not a strawman, so this is a real question.
 
-env = make_env("conf/base/simulation.yaml", size=(128, 128))
-vec = make_vector_env(8, size=(128, 128))   # eight worlds, eight processes
+```bash
+python train_rl.py                          # train, then score against the baseline
+python train_rl.py --arch dilated --size 512
+python train_rl.py --eval-only outputs/rl/checkpoint.pt
+python sweep_rl.py --trials 16              # parallel hyperparameter search
+python evaluate_policy.py --size 512        # score the baseline on its own
 ```
 
-The observation, action, reward and termination contract is documented at the
-top of `tensor_beasts/rl/envs/world_environment.py`. The current rule-based
-baseline, which a learned policy has to beat, is about 25,500 herbivore-steps
-over a 600 step episode at 128x128; random scores about 14,200 and standing
-still goes extinct. See `planning/03-performance-and-rl-foundation.md`.
+**Every living herbivore is its own agent**, all sharing one set of policy
+weights, each with its own reward and its own episode from birth to death. A
+shared policy over a spatial observation is a single convolutional forward pass,
+so this costs nothing versus treating the world as one controller. The framing
+and the reasoning behind it are in `planning/04-reinforcement-learning.md`; the
+environment is `tensor_beasts/rl/multiagent.py`.
+
+Algorithms are `ppo`, `vtrace` and `awr`; architectures are `linear`, `conv`,
+`residual` and `dilated`. `linear` is a diagnostic rather than a contender: it
+can represent the rule-based policy exactly, so it tells you whether a failure
+is in the setup or in the model.
+
+The baseline to beat, five episodes of 600 steps at 512x512, in herbivore-steps
+survived:
+
+| Policy | Return | Final population |
+|---|---|---|
+| Rule-based | 1,082,723 | 4,634 |
+| Random | 309,589 | 1,475 |
+| Stay put | 60,539 | 0 by step 202 |
+
+**Size matters more than anything else here.** Below roughly 256 the predator
+population goes extinct and the three-species dynamic degenerates, so a small
+world is a different problem rather than a cheap version of this one. Use 256
+for iteration and 512 for results.
+
+`tensor_beasts/rl/envs/world_environment.py` is a separate, single-controller
+Gymnasium environment, kept for off-the-shelf algorithms that expect that API.
 
 ## TODO
 
