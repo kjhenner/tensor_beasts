@@ -38,6 +38,7 @@ import torch
 
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
 from tensor_beasts.rl.networks import ActorCritic, build_network
+from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.ppo import PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 
@@ -104,6 +105,10 @@ class TrainerConfig:
     checkpoint_interval: int = 2_000
     output_dir: str = "outputs/rl"
     log_name: str = "train_log.jsonl"
+
+    # Predict normalized values. Off makes the ablation runnable; see
+    # tensor_beasts/rl/normalization.py for why it should normally stay on.
+    normalize_values: bool = True
 
     wandb: bool = False
     wandb_project: str = "tensor-beasts-rl"
@@ -262,7 +267,11 @@ class Trainer:
         self.optimizer = torch.optim.Adam(
             self.network.parameters(), lr=self.ppo_config.learning_rate
         )
-        self.algorithm = PPO(self.ppo_config)
+        # The network predicts normalized values; see rl/normalization.py for the
+        # measurement that motivates it. Without this the value term is 100% of
+        # the gradient norm and global clipping starves the policy.
+        self.value_normalizer = ValueNormalizer(enabled=config.normalize_values)
+        self.algorithm = PPO(self.ppo_config, value_normalizer=self.value_normalizer)
 
         self.size = self.env.size
         self.world_steps = 0
@@ -326,6 +335,9 @@ class Trainer:
             flat = log_probs.permute(0, 2, 3, 1).reshape(-1, NUM_ACTIONS)
             action = torch.multinomial(flat.exp(), 1).reshape(logits.shape[0], *logits.shape[2:])
         log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+        # The advantage recursion mixes rewards and bootstrapped values, so it
+        # has to run in real return units, not normalized ones.
+        value = self.value_normalizer.denormalize(value)
         return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0)
 
     # ------------------------------------------------------------------
@@ -359,6 +371,7 @@ class Trainer:
         rollout = buffer.build()
         with torch.no_grad():
             _, last_value = self.network(policy_input(_observe(self.env)).unsqueeze(0))
+            last_value = self.value_normalizer.denormalize(last_value)
         rollout = compute_gae(
             rollout,
             last_value.squeeze(0),

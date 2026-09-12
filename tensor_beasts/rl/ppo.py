@@ -39,6 +39,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.rollout import Rollout
 
 
@@ -190,8 +191,16 @@ class _Accumulator:
 class PPO:
     """Clipped-surrogate PPO with every loss term masked to acting cells."""
 
-    def __init__(self, config: Optional[PPOConfig] = None):
+    def __init__(
+        self,
+        config: Optional[PPOConfig] = None,
+        value_normalizer: Optional[ValueNormalizer] = None,
+    ):
         self.config = config or PPOConfig()
+        # Without normalization the value term is the entire gradient norm and
+        # global clipping leaves the policy with a thousandth of its intended
+        # step. See tensor_beasts/rl/normalization.py for the measurement.
+        self.value_normalizer = value_normalizer or ValueNormalizer(enabled=False)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
@@ -240,14 +249,20 @@ class PPO:
         clipped = torch.clamp(ratio, 1.0 - config.clip_range, 1.0 + config.clip_range) * advantage
         policy_loss = -masked_mean(torch.min(surrogate, clipped), mask)
 
+        # The network predicts normalized values, so the target and the
+        # collection-time value are brought onto the same scale before the loss.
+        # `value` is left exactly as the network produced it.
+        target = self.value_normalizer.normalize(ret)
+        old_value_scaled = self.value_normalizer.normalize(old_value)
+
         if config.value_clip_range is None:
-            value_loss = masked_mean((value - ret) ** 2, mask)
+            value_loss = masked_mean((value - target) ** 2, mask)
         else:
-            clipped_value = old_value + torch.clamp(
-                value - old_value, -config.value_clip_range, config.value_clip_range
+            clipped_value = old_value_scaled + torch.clamp(
+                value - old_value_scaled, -config.value_clip_range, config.value_clip_range
             )
             value_loss = masked_mean(
-                torch.max((value - ret) ** 2, (clipped_value - ret) ** 2), mask
+                torch.max((value - target) ** 2, (clipped_value - target) ** 2), mask
             )
 
         entropy_mean = masked_mean(entropy, mask)
@@ -308,6 +323,10 @@ class PPO:
             raise ValueError(
                 "Rollout has no advantages. Call compute_gae before update()."
             )
+
+        # Fold this segment's returns into the running scale before the epochs
+        # run, so target and old value are normalized by the same statistics.
+        self.value_normalizer.update(rollout.ret, rollout.acted)
 
         config = self.config
         accumulator = _Accumulator()

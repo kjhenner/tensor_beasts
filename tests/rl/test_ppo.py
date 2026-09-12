@@ -296,3 +296,103 @@ def test_minibatch_iteration_covers_every_timestep_once():
         seen += batch[0].shape[0]
         assert len(batch) == 7
     assert seen == STEPS
+
+
+# ---------------------------------------------------------------------------
+# Return normalization
+# ---------------------------------------------------------------------------
+
+
+def test_value_normalization_keeps_the_policy_gradient_alive():
+    """The measurement that motivated rl/normalization.py, as a regression test.
+
+    Without normalization the squared-error value loss is two orders of
+    magnitude larger than the policy loss, so it is essentially the entire
+    gradient norm, and global clipping then scales the policy's share down with
+    it. The symptom is a policy that never moves while the loss curve looks
+    busy, which is exactly the kind of failure that wastes days.
+    """
+    import torch
+
+    from tensor_beasts.rl.normalization import ValueNormalizer
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import masked_mean
+
+    torch.manual_seed(0)
+    channels, size, steps = 6, 8, 4
+    network = build_network("linear", channels)
+    observation = torch.randn(steps, channels, size, size)
+    acted = torch.rand(steps, size, size) < 0.3
+    action = torch.randint(0, 5, (steps, size, size))
+    advantage = torch.randn(steps, size, size)
+    # Returns on the scale survival reward actually produces: large and smooth.
+    returns = torch.full((steps, size, size), 95.0) + torch.randn(steps, size, size)
+
+    def gradient_norms(normalizer):
+        logits, value = network(observation)
+        log_probs = torch.log_softmax(logits, dim=1)
+        chosen = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+        policy_loss = -masked_mean(chosen * advantage, acted)
+        value_loss = masked_mean((value - normalizer.normalize(returns)) ** 2, acted)
+
+        def norm(loss):
+            network.zero_grad(set_to_none=True)
+            loss.backward(retain_graph=True)
+            return sum(
+                float(p.grad.pow(2).sum()) for p in network.parameters() if p.grad is not None
+            ) ** 0.5
+
+        return norm(policy_loss), norm(0.5 * value_loss)
+
+    off = ValueNormalizer(enabled=False)
+    on = ValueNormalizer(enabled=True)
+    on.update(returns, acted)
+
+    policy_off, value_off = gradient_norms(off)
+    policy_on, value_on = gradient_norms(on)
+
+    assert value_off > 50 * policy_off, "the unnormalized value term should dwarf the policy term"
+    assert value_on < 10 * policy_on, "normalization should bring them onto comparable scales"
+
+
+def test_normalizer_round_trips():
+    import torch
+
+    from tensor_beasts.rl.normalization import ValueNormalizer
+
+    normalizer = ValueNormalizer(enabled=True)
+    values = torch.randn(500) * 12.0 + 90.0
+    normalizer.update(values)
+
+    normalized = normalizer.normalize(values)
+    assert abs(float(normalized.mean())) < 0.05
+    assert abs(float(normalized.std()) - 1.0) < 0.05
+    assert torch.allclose(normalizer.denormalize(normalized), values, atol=1e-3)
+
+
+def test_disabled_normalizer_is_the_identity():
+    import torch
+
+    from tensor_beasts.rl.normalization import ValueNormalizer
+
+    normalizer = ValueNormalizer(enabled=False)
+    values = torch.randn(50)
+    normalizer.update(values)
+    assert torch.equal(normalizer.normalize(values), values)
+    assert torch.equal(normalizer.denormalize(values), values)
+
+
+def test_running_stats_match_a_single_pass():
+    import torch
+
+    from tensor_beasts.rl.normalization import RunningMeanStd
+
+    torch.manual_seed(0)
+    chunks = [torch.randn(300) * 3.0 + 7.0 for _ in range(8)]
+    stats = RunningMeanStd()
+    for chunk in chunks:
+        stats.update(chunk)
+
+    everything = torch.cat(chunks)
+    assert abs(stats.mean - float(everything.mean())) < 1e-3
+    assert abs(stats.std - float(everything.std(unbiased=False))) < 1e-3
