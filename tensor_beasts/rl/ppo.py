@@ -48,13 +48,14 @@ here are deliberately free functions for the same reason.
 """
 
 from dataclasses import dataclass, asdict, field
-from typing import Dict, Iterator, Optional, Protocol, Tuple
+from typing import Dict, Iterator, Optional, Protocol, Tuple, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from tensor_beasts.rl.normalization import ValueNormalizer
+from tensor_beasts.rl.recurrent import propagate_memory
 from tensor_beasts.rl.rollout import Rollout
 
 NUM_ACTIONS = 5
@@ -200,6 +201,14 @@ class PPOConfig:
     # first two-lever run collapsed onto the coldest level. Zero anchors
     # direction only and lets the reward decide the throttle.
     metabolic_imitation_scale: float = 1.0
+    # Recurrent training of the memory write. Zero is off: the memory read at
+    # each step is the stored one and the write is a fixed function of the
+    # observation (stage 1 of planning/04). Positive N replays each segment in
+    # time order, feeds every step's recomputed write to the next step's read
+    # through the successor map, and backpropagates through windows of N
+    # steps, detaching at window boundaries. That is what lets the gradient at
+    # a decision reach the earlier step that wrote what it read.
+    recurrent_window: int = 0
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
@@ -301,7 +310,9 @@ class PPO:
             out = network.forward_all(observation)
             logits, value = out["logits"], out["value"]
         else:
-            logits, value = network(observation)
+            # forward_all also surfaces the memory write when the network has one.
+            out = network.forward_all(observation) if hasattr(network, "forward_all") else {}
+            logits, value = (out["logits"], out["value"]) if out else network(observation)
         log_probs = F.log_softmax(logits, dim=1)
         log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
         entropy = -(log_probs.exp() * log_probs).sum(dim=1)
@@ -329,6 +340,8 @@ class PPO:
             result["metabolic_log_probs"] = metabolic_log_probs
             result["metabolic_log_prob"] = metabolic_log_prob
             result["metabolic_entropy"] = metabolic_entropy
+        if "memory" in out:
+            result["memory"] = out["memory"]
         return result
 
     @staticmethod
@@ -363,9 +376,11 @@ class PPO:
         rule_scores: Optional[torch.Tensor] = None,
         metabolic_action: Optional[torch.Tensor] = None,
         rule_metabolic_level: Optional[torch.Tensor] = None,
+        heads: Optional[dict] = None,
     ):
         config = self.config
-        heads = self._heads(network, observation, action, metabolic_action)
+        if heads is None:
+            heads = self._heads(network, observation, action, metabolic_action)
         logits, value = heads["logits"], heads["value"]
         log_probs = heads["log_probs"]
         # Joint over both levers when the network has a metabolic head; the
@@ -523,6 +538,9 @@ class PPO:
             raise ValueError(
                 "Rollout has no advantages. Call compute_gae before update()."
             )
+        memory_size = int(getattr(network, "memory_size", 0) or 0)
+        if self.config.recurrent_window > 0 and memory_size > 0:
+            return self.update_recurrent(network, rollout, optimizer, memory_size)
 
         # Fold this segment's returns into the running scale before the epochs
         # run, so target and old value are normalized by the same statistics.
@@ -573,4 +591,111 @@ class PPO:
         )
         result["epochs_run"] = float(epochs_run)
         result["agent_steps"] = float(rollout.num_agent_steps)
+        return result
+
+
+    # ------------------------------------------------------------------
+    # Recurrent update: backpropagation through the individual
+    # ------------------------------------------------------------------
+    def update_recurrent(
+        self,
+        network: nn.Module,
+        rollout: Rollout,
+        optimizer: torch.optim.Optimizer,
+        memory_size: int,
+    ) -> Dict[str, float]:
+        """Replay the segment in time order, routing each step's recomputed
+        memory write into the next step's read, and backpropagate through
+        windows of ``recurrent_window`` steps.
+
+        The memory channels are the last ``memory_size`` channels of the
+        observation. At the first step of the segment they are the stored ones;
+        from then on they are the network's own recomputed write from the
+        previous step, carried through the successor map by
+        :func:`propagate_memory`, so the loss at a decision differentiates back
+        into the write it depended on. Every other channel comes from storage.
+
+        PPO's ratio still uses the behaviour policy's log-probability from
+        collection time. With unchanged weights the recomputed reads equal the
+        stored ones up to float16 storage rounding, so the first epoch's ratio
+        is one, the standard check.
+        """
+        if rollout.reproduced is None:
+            raise ValueError("Recurrent training needs rollout.reproduced; collect with a current RolloutBuffer.")
+
+        self.value_normalizer.update(rollout.ret, rollout.acted)
+        config = self.config
+        window = int(config.recurrent_window)
+        steps = rollout.steps
+        accumulator = _Accumulator()
+        epochs_run = 0
+        write_magnitudes: List[float] = []
+
+        def part(tensor, t):
+            return None if tensor is None else tensor[t : t + 1]
+
+        for epoch in range(config.epochs):
+            epochs_run = epoch + 1
+            epoch_kl = _Accumulator()
+            read_prev: Optional[torch.Tensor] = None
+            pending_loss = None
+            pending_weight = 0.0
+
+            for t in range(steps):
+                observation = rollout.observation[t].float()
+                if read_prev is not None:
+                    observation = torch.cat([observation[:-memory_size], read_prev], dim=0)
+                observation = observation.unsqueeze(0)
+
+                acted = rollout.acted[t : t + 1]
+                agent_steps = float(acted.sum())
+                heads = self._heads(network, observation, rollout.action[t : t + 1], part(rollout.metabolic_action, t))
+                write = heads["memory"][0]
+                write_magnitudes.append(float(write.detach().abs().mean()))
+                read_prev = propagate_memory(
+                    write, rollout.successor[t], rollout.acted[t], rollout.reproduced[t], rollout.done[t]
+                )
+
+                if agent_steps > 0:
+                    loss, diagnostics = self._losses(
+                        network, observation, acted, rollout.action[t : t + 1],
+                        rollout.log_prob[t : t + 1], rollout.value[t : t + 1],
+                        rollout.advantage[t : t + 1], rollout.ret[t : t + 1],
+                        part(rollout.rule_action, t), part(rollout.rule_scores, t),
+                        part(rollout.metabolic_action, t), part(rollout.rule_metabolic_level, t),
+                        heads=heads,
+                    )
+                    # Weight each step by its agent-steps so a window's loss is the
+                    # same agent-weighted mean the minibatch update uses.
+                    pending_loss = loss * agent_steps if pending_loss is None else pending_loss + loss * agent_steps
+                    pending_weight += agent_steps
+                    accumulator.add(diagnostics, agent_steps)
+                    epoch_kl.add({"approx_kl": diagnostics["approx_kl"]}, agent_steps)
+
+                if (t + 1) % window == 0 or t == steps - 1:
+                    if pending_loss is not None and pending_weight > 0:
+                        optimizer.zero_grad(set_to_none=True)
+                        (pending_loss / pending_weight).backward()
+                        grad_norm = torch.nn.utils.clip_grad_norm_(network.parameters(), config.max_grad_norm)
+                        optimizer.step()
+                        accumulator.add({"grad_norm": float(grad_norm)}, pending_weight)
+                    pending_loss = None
+                    pending_weight = 0.0
+                    # Truncate: the next window starts from a constant read.
+                    read_prev = read_prev.detach()
+
+            if config.target_kl is not None:
+                kl = epoch_kl.mean().get("approx_kl", 0.0)
+                if kl == kl and kl > config.target_kl:
+                    break
+
+        result = accumulator.mean()
+        measured = result.get("conformance", float("nan"))
+        if measured == measured:
+            self.conformance = measured
+        result["explained_variance"] = explained_variance(rollout.value, rollout.ret, rollout.acted)
+        result["epochs_run"] = float(epochs_run)
+        result["agent_steps"] = float(rollout.num_agent_steps)
+        result["recurrent_window"] = float(window)
+        result["memory_write_abs_mean"] = sum(write_magnitudes) / max(len(write_magnitudes), 1)
         return result

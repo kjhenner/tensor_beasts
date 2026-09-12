@@ -137,6 +137,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="minimum anchor weight as a fraction of --imitation-coef, so the rules never fully let go (default 0)")
     hyper.add_argument("--metabolic-imitation-scale", type=float, default=None,
                        help="weight of the metabolic-level anchor relative to the direction anchor; 0 anchors direction only (default 1)")
+    hyper.add_argument("--recurrent-window", type=int, default=None,
+                       help="with --memory-size, backpropagate through this many steps of the individual's own memory writes (0 = off, stage 1)")
     hyper.add_argument("--imitation-target", type=float, default=None,
                        help="conformance at which the imitation weight reaches zero (default 0.8)")
 
@@ -211,6 +213,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "imitation_temperature": args.imitation_temperature,
         "imitation_floor": args.imitation_floor,
         "metabolic_imitation_scale": args.metabolic_imitation_scale,
+        "recurrent_window": args.recurrent_window,
     }
 
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})

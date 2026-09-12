@@ -573,6 +573,28 @@ arriving animal's carried features onto its destination, so a stale value left
 on an empty cell would be summed into whoever moved there next. The test that
 caught it compares what an individual wrote with what its new cell holds.
 
+### Stage 2 has landed: backpropagation through the individual
+
+`--recurrent-window N` replays each segment in time order, feeds every step's
+recomputed memory write into the next step's read through the successor map,
+and backpropagates through windows of N steps, detaching at window
+boundaries. The routing function is tested against the simulation's own carry
+and matches it at every cell over real steps; with unchanged weights the
+replayed reads reproduce the stored ones up to float16 rounding, and the first
+recurrent epoch has unit PPO ratio, so the recomputation sees exactly what the
+behaviour policy saw.
+
+The test that justifies the machinery: a synthetic task where the target at
+step t is the argmax of five channels the individual observed at step t-1,
+carried through a random move. Only a policy that writes what it saw and reads
+it back can match it. After the same 120 updates, stage 1 sits near chance
+and recurrent training reaches over 0.7 agreement. The learner can learn what
+to write.
+
+Cost: one extra forward per step of the segment per epoch and the activations
+of a window held at once, so the window is the memory lever in the same way
+the minibatch was for the plain update.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same

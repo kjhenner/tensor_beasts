@@ -84,3 +84,6 @@ ppo:
   # 90% of the time, so 1.0 teaches the throttle to stay cold; 0 lets the
   # reward decide it.
   metabolic_imitation_scale: 1.0
+  # Backpropagate memory writes through this many steps of the individual's
+  # own trajectory. 0 = off (stage 1). See planning/04.
+  recurrent_window: 0

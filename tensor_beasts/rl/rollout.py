@@ -69,6 +69,9 @@ class Rollout:
     rule_action: Optional[torch.Tensor] = None
     # (T, 5, H, W) float32, the rule's per-action scores, or None.
     rule_scores: Optional[torch.Tensor] = None
+    # (T, H, W) bool, individuals that divided this step. Recurrent training
+    # needs it to route an inherited memory copy to the offspring.
+    reproduced: Optional[torch.Tensor] = None
     # (T, H, W) int64, the metabolic level each individual chose, or None when
     # the policy has no metabolic head.
     metabolic_action: Optional[torch.Tensor] = None
@@ -100,6 +103,7 @@ class RolloutBuffer:
         self._successor: List[torch.Tensor] = []
         self._rule_action: List[torch.Tensor] = []
         self._rule_scores: List[torch.Tensor] = []
+        self._reproduced: List[torch.Tensor] = []
         self._metabolic_action: List[torch.Tensor] = []
         self._rule_metabolic_level: List[torch.Tensor] = []
 
@@ -124,6 +128,7 @@ class RolloutBuffer:
             self._rule_action.append(batch.rule_action.detach())
         if batch.rule_scores is not None:
             self._rule_scores.append(batch.rule_scores.detach().to(torch.float16))
+        self._reproduced.append(batch.reproduced.detach())
         if batch.metabolic_action is not None:
             self._metabolic_action.append(batch.metabolic_action.detach())
         if batch.rule_metabolic_level is not None:
@@ -159,6 +164,11 @@ class RolloutBuffer:
                 if len(self._rule_metabolic_level) == len(self._successor)
                 else None
             ),
+            reproduced=(
+                torch.stack(self._reproduced)
+                if len(self._reproduced) == len(self._successor)
+                else None
+            ),
         )
 
     def clear(self) -> None:
@@ -175,6 +185,7 @@ class RolloutBuffer:
             self._rule_scores,
             self._metabolic_action,
             self._rule_metabolic_level,
+            self._reproduced,
         ):
             store.clear()
 
