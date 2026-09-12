@@ -650,3 +650,22 @@ def test_uniform_policy_has_zero_soft_conformance():
     batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
     _, diagnostics = ppo._losses(network, *batch)
     assert diagnostics["conformance"] == pytest.approx(0.0, abs=1e-4)
+
+
+
+def test_imitation_floor_keeps_a_permanent_pull():
+    """Releasing fully at the target was seen to oscillate: the RL gradient
+    lowers conformance, the anchor re-engages, repeat. A floor keeps a light
+    pull on however far conformance climbs, and zero preserves the old rule."""
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    floored = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8, imitation_floor=0.25))
+    for conformance in (0.0, 0.5, 0.8, 0.95):
+        floored.conformance = conformance
+        assert floored.imitation_weight() >= 0.5
+    floored.conformance = 0.0
+    assert floored.imitation_weight() == pytest.approx(2.0), "the floor never raises the weight above full strength"
+
+    released = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8, imitation_floor=0.0))
+    released.conformance = 0.9
+    assert released.imitation_weight() == 0.0

@@ -71,3 +71,6 @@ ppo:
   imitation_target_conformance: 0.8
   # Soft distillation toward softmax(rule scores / temperature). 0 = hard argmax.
   imitation_temperature: 0.01
+  # Minimum anchor weight as a fraction of imitation_coef. 0 releases fully at
+  # the target, which was seen to oscillate; 0.2 keeps a permanent light pull.
+  imitation_floor: 0.0

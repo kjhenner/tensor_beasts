@@ -109,6 +109,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     hyper.add_argument("--imitation-temperature", type=float, default=None,
                        help="softmax temperature over the rule's scores for soft distillation; 0 = hard argmax (default 0.01)")
+    hyper.add_argument("--imitation-floor", type=float, default=None,
+                       help="minimum anchor weight as a fraction of --imitation-coef, so the rules never fully let go (default 0)")
     hyper.add_argument("--imitation-target", type=float, default=None,
                        help="conformance at which the imitation weight reaches zero (default 0.8)")
 
@@ -179,6 +181,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "imitation_coef": args.imitation_coef,
         "imitation_target_conformance": args.imitation_target,
         "imitation_temperature": args.imitation_temperature,
+        "imitation_floor": args.imitation_floor,
     }
 
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})

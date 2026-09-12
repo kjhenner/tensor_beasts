@@ -167,6 +167,15 @@ class PPOConfig:
     # argmax imitation spends its gradient on coin-flips. Set to 0 to fall back
     # to hard imitation of the argmax.
     imitation_temperature: float = 0.01
+    # Floor on the cross-fade, as a fraction of imitation_coef. With a floor of
+    # zero the anchor releases fully once conformance reaches the target, and
+    # the first soft-distillation run showed what happens next: the RL gradient
+    # immediately pulls the policy away from the rules, conformance falls, the
+    # anchor re-engages, and the two oscillate for the rest of training. A
+    # small permanent pull keeps the policy in the neighbourhood the rules
+    # already know is good while leaving RL free to improve on it. Zero
+    # preserves the earlier behaviour exactly.
+    imitation_floor: float = 0.0
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
@@ -239,7 +248,7 @@ class PPO:
         if config.imitation_coef <= 0.0:
             return 0.0
         remaining = 1.0 - self.conformance / max(config.imitation_target_conformance, 1e-8)
-        return config.imitation_coef * max(0.0, remaining)
+        return config.imitation_coef * max(config.imitation_floor, remaining)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
