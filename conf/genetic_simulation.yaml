@@ -1,0 +1,121 @@
+# Genetic simulation config
+# Inherits from basic_config, adds genetic system
+
+_base: "conf/basic_config.yaml"
+
+display:
+  color_displays:
+    # Keep all basic displays, add genetic ecosystem view
+    - title: "predator_scent"
+      fn_name: "default"
+      key: "${key:predator,scent}"
+      input_range: [0, 255]
+
+    - title: "herbivore_scent"
+      fn_name: "default"
+      key: "${key:herbivore,scent}"
+      input_range: [0, 255]
+
+    - title: "plant_scent"
+      fn_name: "default"
+      key: "${key:simpleplant,scent}"
+      input_range: [0, 255]
+
+    - title: "carrion_scent"
+      fn_name: "default"
+      key: "${key:simpleterrain,carrion_scent}"
+      input_range: [0, 255]
+
+    - title: "layers"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 16]
+          color_max: [0, 255, 127]
+          input_range: [0, 255]
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,biomass}"
+          threshold: 1
+          color_min: [64, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+
+    - title: "biomass"
+      fn_name: "layered"
+      layers:
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,biomass}"
+          threshold: 1
+          color_min: [64, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+
+    - title: "water_level"
+      fn_name: "default"
+      key: "${key:simpleterrain,simple_water}"
+      input_range: [0, 1]
+
+    - title: "growth_coeff"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,growth_coeff}"
+          threshold: -3
+          color_min: [255, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [-2.5, 2.5]
+
+    # Genetic ecosystem view - plants with slot-colored animals
+    - title: "genetic_ecosystem"
+      fn_name: "genetic_layered"
+      base_layers:
+        - key: "simpleplant:energy"
+          threshold: 0
+          color_min: [0, 32, 16]
+          color_max: [0, 200, 100]
+          input_range: [0, 255]
+      genetic_layers:
+        - slot_id_key: "herbivore:slot_id"
+          slot_colors_key: "herbivore:slot_colors"
+          biomass_key: "herbivore:biomass"
+          biomass_range: [0, 255]
+          brightness_min: 0.5
+          brightness_max: 1.0
+        - slot_id_key: "predator:slot_id"
+          slot_colors_key: "predator:slot_colors"
+          biomass_key: "predator:biomass"
+          biomass_range: [0, 255]
+          brightness_min: 0.5
+          brightness_max: 1.0
+
+world:
+  size: [512, 512]
+
+  entities:
+    Herbivore:
+      init_prob: 0.005
+      genetics:
+        enabled: true
+        num_slots: 8
+        mutation_probability: 0.005
+        mutation_rate: 0.15
+        mutation_scale: 0.02
+        log_interval: 20
+
+    Predator:
+      init_prob: 0.002
+      genetics:
+        enabled: true
+        num_slots: 4
+        mutation_probability: 0.005
+        mutation_rate: 0.15
+        mutation_scale: 0.02
+        log_interval: 20

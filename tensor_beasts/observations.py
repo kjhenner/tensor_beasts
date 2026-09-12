@@ -1,10 +1,13 @@
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, TYPE_CHECKING
 
 import torch
 
 from tensor_beasts.features.feature import Feature
 from tensor_beasts.util import directional_kernel_set, torch_correlate_2d
+
+if TYPE_CHECKING:
+    from tensordict import TensorDict
 
 
 # =============================================================================
@@ -88,49 +91,59 @@ def compute_gradient_and_direction(
 @dataclass
 class Observation:
     """
-    Complete sensory information available to an entity.
-    This is the "sensorium" - pure perception with no semantic meaning attached.
+    Complete observation available to an entity's policy.
 
-    The same observation can be used with different weight sets for different
-    decisions (e.g., navigation vs. risk assessment).
+    Following RL convention, this contains everything the policy needs
+    to make a decision: sensory perception + internal state.
+
+    All tensors are (H, W) unless otherwise noted.
+    Keys in dicts are tuples: ("entity", "feature")
     """
-    # Spatial perception: (4, H, W) per feature [up, down, left, right]
-    # Keys are tuples like ("entity", "feature")
-    directional: Dict[str, torch.Tensor]
+    # === Sensory Perception ===
+    # Directional values: (4, H, W) per feature [up, down, left, right]
+    directional: Dict[Tuple[str, str], torch.Tensor]
 
     # Current cell values: (H, W) per feature
-    current: Dict[str, torch.Tensor]
+    current: Dict[Tuple[str, str], torch.Tensor]
 
-    # Internal state
-    energy: torch.Tensor
-    biomass: torch.Tensor
+    # === Internal State ===
+    energy: torch.Tensor        # (H, W) uint8
+    biomass: torch.Tensor       # (H, W) uint8
+    gradient_ema: torch.Tensor  # (H, W) float32 - smoothed stimulus history
+
+    # === Context ===
+    alive_mask: torch.Tensor    # (H, W) bool - which cells have living entities
+    step: Optional[int] = None  # Current simulation step
 
 
 def get_observation(
     td: 'TensorDict',
-    perception: List[Tuple[str, int]],
+    perception: List[Tuple[Tuple[str, str], int]],
     energy: torch.Tensor,
     biomass: torch.Tensor,
+    gradient_ema: torch.Tensor,
+    survival_threshold: int,
     log_compress: bool = True,
     log_scale: float = 1.0,
+    step: Optional[int] = None,
 ) -> Observation:
     """
-    Gather sensory information into an Observation.
-
-    Pure perception - no semantic meaning (food/predator) at this level.
+    Build complete observation for policy.
 
     Args:
         td: TensorDict containing feature data
         perception: List of (feature_key, kernel_size) tuples specifying what to perceive
                    e.g., [(("plant", "scent"), 1), (("predator", "scent"), 3)]
-        energy: Entity's energy tensor
-        biomass: Entity's biomass tensor
-        log_compress: If True, apply log1p compression to scent values for better
-                      gradient detection across wide dynamic range
+        energy: Entity's energy tensor (H, W) uint8
+        biomass: Entity's biomass tensor (H, W) uint8
+        gradient_ema: Smoothed stimulus history (H, W) float32
+        survival_threshold: Biomass threshold for alive_mask
+        log_compress: If True, apply log1p compression for better gradient detection
         log_scale: Scale factor applied before log compression
+        step: Current simulation step (optional)
 
     Returns:
-        Observation containing all sensory data
+        Observation containing all data needed by policy
     """
     directional = {}
     current = {}
@@ -139,18 +152,23 @@ def get_observation(
         feature_data = td.get(key).float()
 
         # Apply log compression for better gradient detection at low values
-        # This makes small differences at low scent levels perceptible
         if log_compress:
             feature_data = torch.log1p(feature_data * log_scale)
 
         current[key] = feature_data
         directional[key] = get_directional_values(feature_data, kernel_size)
 
+    # Compute alive mask
+    alive_mask = biomass >= survival_threshold
+
     return Observation(
         directional=directional,
         current=current,
         energy=energy,
         biomass=biomass,
+        gradient_ema=gradient_ema,
+        alive_mask=alive_mask,
+        step=step,
     )
 
 

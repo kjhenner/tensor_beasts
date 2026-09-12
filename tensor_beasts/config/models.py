@@ -255,6 +255,17 @@ class PerceptionConfig(BaseModel):
     kernel_size: int = 1
 
 
+class GeneticsConfig(BaseModel):
+    """Configuration for genetic algorithm system."""
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False                  # Whether genetic system is active
+    num_slots: conint(ge=1, le=255) = 8    # Number of genetic slots
+    mutation_probability: float = 0.1      # Chance of slot change on reproduction
+    mutation_rate: float = 0.1             # Probability of mutating each parameter
+    mutation_scale: float = 0.1            # Magnitude of parameter mutations
+    log_interval: int = 0                  # Log genetic status every N steps (0 = disabled)
+
+
 class AnimalEntityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     # Initialization - UInt8 because these set uint8 tensor values
@@ -317,6 +328,10 @@ class AnimalEntityConfig(BaseModel):
     biomass: Optional[BiomassConfig] = None
     gradient_ema: Optional[GradientEMAConfig] = None
     scent: Optional[ScentConfig] = None
+    slot_id: Optional[Dict[str, Any]] = None  # SlotId feature config
+
+    # Genetic algorithm
+    genetics: Optional[GeneticsConfig] = None
 
     # Debugging
     verbose: bool = False
@@ -418,9 +433,42 @@ class RGBSpeciesDisplay(BaseModel):
     biomass_floor: conint(ge=0, le=255) = 128
 
 
+class GeneticSlotDisplay(BaseModel):
+    """Display entities colored by their genetic slot."""
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    fn_name: Literal["genetic_slot"]
+    slot_id_key: str          # Key for slot_id tensor (H, W)
+    slot_colors_key: str      # Key for slot_colors tensor (num_slots, 3)
+    biomass_key: str          # Key for biomass/energy tensor (H, W)
+    biomass_range: conlist(float, min_length=2, max_length=2) = [0, 255]
+    brightness_min: float = 0.3   # Minimum brightness multiplier
+    brightness_max: float = 1.0   # Maximum brightness multiplier
+
+
+class GeneticLayerConfig(BaseModel):
+    """Config for a genetic slot layer in layered display."""
+    model_config = ConfigDict(extra="forbid")
+    slot_id_key: str
+    slot_colors_key: str
+    biomass_key: str
+    biomass_range: conlist(float, min_length=2, max_length=2) = [0, 255]
+    brightness_min: float = 0.4
+    brightness_max: float = 1.0
+
+
+class GeneticLayeredDisplay(BaseModel):
+    """Display with base layers and genetic slot-colored animals on top."""
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    fn_name: Literal["genetic_layered"]
+    base_layers: List[LayerConfig] = Field(default_factory=list)
+    genetic_layers: List[GeneticLayerConfig] = Field(default_factory=list)
+
+
 class DisplayConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    color_displays: List[Union[DefaultDisplay, LayeredDisplay, CrossSectionDisplay, HistogramDisplay, RGBSpeciesDisplay]] = Field(
+    color_displays: List[Union[DefaultDisplay, LayeredDisplay, CrossSectionDisplay, HistogramDisplay, RGBSpeciesDisplay, GeneticSlotDisplay, GeneticLayeredDisplay]] = Field(
         default_factory=list
     )
     text_displays: List[DefaultDisplay] = Field(default_factory=list)

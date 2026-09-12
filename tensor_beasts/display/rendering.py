@@ -274,6 +274,136 @@ def histogram_renderer(source, config: DictConfig) -> torch.Tensor:
     return output.to(torch.uint8)
 
 
+def _parse_key(key: str):
+    """Parse 'entity:feature' string to tuple or return as-is if not a string."""
+    if isinstance(key, str) and ':' in key:
+        parts = key.split(':')
+        if len(parts) == 2:
+            return (parts[0].strip(), parts[1].strip())
+    return key
+
+
+def genetic_layered_renderer(source, config: DictConfig) -> torch.Tensor:
+    """
+    Render multiple layers with genetic slot coloring for animals.
+
+    Shows a base layer (e.g., plants) with animals colored by genetic slot on top.
+
+    Config:
+        base_layers: List of base layers (rendered first, like plants)
+            - key: tensor key for presence/energy
+            - threshold: minimum value to show
+            - color_min/color_max: color range based on value
+            - input_range: [min, max] for normalization
+        genetic_layers: List of genetic slot layers (rendered on top)
+            - slot_id_key: Key for slot_id tensor
+            - slot_colors_key: Key for slot_colors tensor
+            - biomass_key: Key for biomass tensor
+            - biomass_range: [min, max] for brightness normalization
+            - brightness_min/brightness_max: brightness multiplier range
+    """
+    result = None
+
+    # Render base layers first (e.g., plants)
+    for layer in config.get("base_layers", []):
+        data = source.get(_parse_key(layer.key)).float()
+        if result is None:
+            result = torch.zeros(data.shape[0], data.shape[1], 3, dtype=torch.float32)
+
+        threshold = layer.get("threshold", 0)
+        mask = (data > threshold).float().unsqueeze(-1)
+
+        input_min, input_max = layer.input_range
+        normalized = torch.clamp((data - input_min) / (input_max - input_min + 1e-8), 0, 1)
+
+        color_min = torch.tensor(layer.color_min, dtype=torch.float32)
+        color_max = torch.tensor(layer.color_max, dtype=torch.float32)
+        colored = color_min + normalized.unsqueeze(-1) * (color_max - color_min)
+
+        result = result * (1 - mask) + colored * mask
+
+    # Render genetic layers on top (e.g., herbivores, predators)
+    for layer in config.get("genetic_layers", []):
+        slot_ids = source.get(_parse_key(layer.slot_id_key))
+        slot_colors = source.get(_parse_key(layer.slot_colors_key))
+        biomass = source.get(_parse_key(layer.biomass_key))
+
+        if result is None:
+            H, W = slot_ids.shape
+            result = torch.zeros(H, W, 3, dtype=torch.float32)
+
+        H, W = slot_ids.shape
+
+        # Normalize biomass for brightness
+        biomass_min, biomass_max = layer.get("biomass_range", [0, 255])
+        brightness_min = layer.get("brightness_min", 0.3)
+        brightness_max = layer.get("brightness_max", 1.0)
+
+        biomass_normalized = ((biomass.float() - biomass_min) / (biomass_max - biomass_min + 1e-8)).clamp(0, 1)
+        brightness = brightness_min + biomass_normalized * (brightness_max - brightness_min)
+
+        # Map slot_ids to colors
+        flat_ids = slot_ids.flatten().long()
+        flat_colors = slot_colors[flat_ids]
+        colors = flat_colors.view(H, W, 3).float()
+
+        # Apply brightness
+        colors = colors * brightness.unsqueeze(-1)
+
+        # Create mask where entities exist
+        alive_mask = (biomass > 0).unsqueeze(-1).float()
+
+        # Overlay on result
+        result = result * (1 - alive_mask) + colors * alive_mask
+
+    return result.clamp(0, 255).to(torch.uint8)
+
+
+def genetic_slot_renderer(source, config: DictConfig) -> torch.Tensor:
+    """
+    Render entities colored by their genetic slot.
+
+    Each slot has a distinct color, and entity brightness scales with biomass.
+
+    Config:
+        slot_id_key: Key for slot_id tensor (H, W) - which slot each cell belongs to
+        slot_colors_key: Key for slot_colors tensor (num_slots, 3) - RGB per slot
+        biomass_key: Key for biomass/energy tensor (H, W) - controls brightness
+        biomass_range: [min, max] for biomass normalization (default: [0, 255])
+        brightness_min: Minimum brightness multiplier (default: 0.3)
+        brightness_max: Maximum brightness multiplier (default: 1.0)
+    """
+    slot_ids = source.get(_parse_key(config.slot_id_key))  # (H, W)
+    slot_colors = source.get(_parse_key(config.slot_colors_key))  # (num_slots, 3)
+    biomass = source.get(_parse_key(config.biomass_key))  # (H, W)
+
+    H, W = slot_ids.shape
+
+    # Normalize biomass for brightness
+    biomass_min, biomass_max = config.get("biomass_range", [0, 255])
+    brightness_min = config.get("brightness_min", 0.3)
+    brightness_max = config.get("brightness_max", 1.0)
+
+    biomass_normalized = ((biomass.float() - biomass_min) / (biomass_max - biomass_min + 1e-8)).clamp(0, 1)
+    brightness = brightness_min + biomass_normalized * (brightness_max - brightness_min)
+
+    # Map slot_ids to colors: index into slot_colors
+    # slot_colors is (num_slots, 3), slot_ids is (H, W)
+    # Result should be (H, W, 3)
+    flat_ids = slot_ids.flatten().long()  # (H*W,)
+    flat_colors = slot_colors[flat_ids]  # (H*W, 3)
+    colors = flat_colors.view(H, W, 3).float()
+
+    # Apply brightness based on biomass
+    colors = colors * brightness.unsqueeze(-1)
+
+    # Where biomass is 0, show black (no entity)
+    alive_mask = (biomass > 0).unsqueeze(-1).float()
+    colors = colors * alive_mask
+
+    return colors.clamp(0, 255).to(torch.uint8)
+
+
 def _get_source(source):
     if isinstance(source, WorldSnapshot):
         return source
@@ -294,5 +424,9 @@ def dispatch_render(source, config: DictConfig):
         return histogram_renderer(source, config)
     if config.fn_name == "rgb_species":
         return rgb_species_renderer(source, config)
+    if config.fn_name == "genetic_slot":
+        return genetic_slot_renderer(source, config)
+    if config.fn_name == "genetic_layered":
+        return genetic_layered_renderer(source, config)
     else:
         raise ValueError(f"Unknown display function: {config.fn_name}")

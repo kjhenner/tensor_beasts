@@ -7,9 +7,12 @@ from tensor_beasts.entities import Entity
 from tensor_beasts.registry import register_entity
 from tensor_beasts.entities.helpers.animal_helpers import move
 from tensor_beasts.features.shared_features import Energy, Scent
-from tensor_beasts.observations import get_observation, process_observation
+from tensor_beasts.observations import get_observation
+from tensor_beasts.policy.base import Action, AnimalPolicy
+from tensor_beasts.policy.rule_based import RuleBasedPolicy
+from tensor_beasts.policy.parameterized import ParameterizedPolicy
 
-from tensor_beasts.features.animal_features import IdFeature, OffspringCount, Biomass, GradientEMA
+from tensor_beasts.features.animal_features import IdFeature, OffspringCount, Biomass, GradientEMA, SlotId
 from tensor_beasts.util import safe_sub, safe_add
 
 
@@ -21,6 +24,7 @@ class Animal(Entity):
     scent: Scent
     id_feature: IdFeature
     offspring_count: OffspringCount
+    slot_id: SlotId
     default_config = DictConfig({
         # Initialization
         "initial_energy": 50,
@@ -79,6 +83,16 @@ class Animal(Entity):
         "reproduction_threshold": 200,     # biomass level to reproduce
         # Note: On reproduction, both parent and offspring receive 50% of biomass/energy
 
+        # Genetic algorithm settings
+        "genetics": {
+            "enabled": False,         # Whether genetic system is active
+            "num_slots": 8,           # Number of genetic slots
+            "mutation_probability": 0.1,  # Chance of slot change on reproduction
+            "mutation_rate": 0.1,     # Probability of mutating each parameter
+            "mutation_scale": 0.1,    # Magnitude of parameter mutations
+            "log_interval": 0,        # Log genetic status every N steps (0 = disabled)
+        },
+
         # Debugging
         "verbose": False,  # Log metabolism details per step
     })
@@ -90,6 +104,48 @@ class Animal(Entity):
     ):
         super().__init__(world, config)
 
+        # Set up genetic system if enabled
+        self.genetic_registry = None
+        genetics_config = getattr(self.config, 'genetics', None)
+        if genetics_config and getattr(genetics_config, 'enabled', False):
+            self._setup_genetics(genetics_config)
+
+        # Create policy for decision-making
+        self.policy: AnimalPolicy = self._create_policy()
+
+    def _setup_genetics(self, genetics_config) -> None:
+        """Initialize the genetic registry with base genome from config."""
+        from tensor_beasts.genetic import Genome, GeneticRegistry
+
+        # Create base genome from entity config
+        base_genome = Genome.from_config(self.config)
+
+        # Determine base hue from entity type (blue for herbivores, red for predators)
+        class_name = self.__class__.__name__.lower()
+        if 'predator' in class_name:
+            base_hue = 0.0  # Red
+        else:
+            base_hue = 0.6  # Blue (default for herbivores)
+
+        # Create registry
+        num_slots = getattr(genetics_config, 'num_slots', 8)
+        self.genetic_registry = GeneticRegistry(
+            num_slots=num_slots,
+            base_genome=base_genome,
+            base_hue=base_hue,
+        )
+
+        # Register slot_colors in TensorDict for rendering (use tuple key for consistency)
+        slot_colors_key = (class_name, "slot_colors")
+        self.td.set(slot_colors_key, self.genetic_registry.slot_colors)
+
+    def _create_policy(self) -> AnimalPolicy:
+        """Create the decision-making policy from config."""
+        # Use ParameterizedPolicy if genetics enabled, otherwise RuleBasedPolicy
+        if self.genetic_registry is not None:
+            return ParameterizedPolicy(self.config)
+        return RuleBasedPolicy(self.config)
+
     def initialize(self):
         self.energy.initialize_data()
         self.biomass.initialize_data()
@@ -97,6 +153,7 @@ class Animal(Entity):
         self.scent.initialize_data()
         self.offspring_count.initialize_data()
         self.id_feature.initialize_data()
+        self.slot_id.initialize_data()
 
         energy = self.energy.data
         biomass = self.biomass.data
@@ -113,6 +170,11 @@ class Animal(Entity):
             )
             energy[:] = spawn_mask * self.config.initial_energy
             biomass[:] = spawn_mask * self.config.initial_biomass
+
+        # Update genetic registry populations if enabled
+        if self.genetic_registry is not None:
+            alive_mask = biomass >= self.config.survival_threshold
+            self.genetic_registry.update_populations(self.slot_id.data, alive_mask)
 
     def _compute_metabolic_rate(
         self,
@@ -234,6 +296,17 @@ class Animal(Entity):
             print(f"  [{self.__class__.__name__}@({x},{y})] {label}: {vals}")
 
     def update(self, action: Optional[torch.Tensor] = None):
+        """
+        Main update loop for animal entities.
+
+        Uses the policy to make all decisions, then executes them.
+
+        Args:
+            action: Optional external action override (for RL). If provided,
+                   overrides the policy's move_direction output.
+        """
+        # Capture external action before policy call produces local 'action' variable
+        external_action = action
         biomass = self.biomass.data
         energy = self.energy.data
         gradient_ema = self.gradient_ema.data
@@ -251,105 +324,48 @@ class Animal(Entity):
         dead = biomass < self.config.survival_threshold
         self._handle_death(dead)
 
-        # Step 2: Build observation (sensorium)
-        # Convert PerceptionConfig objects to (key_tuple, kernel_size) pairs
+        # Step 2: Build observation (complete input to policy)
         perception = [(p.key, p.kernel_size) for p in self.config.perception]
         obs = get_observation(
             td=self.td,
             perception=perception,
             energy=energy,
             biomass=biomass,
+            gradient_ema=gradient_ema,
+            survival_threshold=self.config.survival_threshold,
             log_scale=self.config.log_scale,
+            step=self.world.step,
         )
 
-        # Step 3: Process observation into gradient and direction
-        # navigation_weights already has tuple keys from Pydantic validation
-        gradient_strength, direction = process_observation(obs, self.config.navigation_weights)
+        # Step 3: Run policy to get all decisions (includes gradient EMA update)
+        alive = obs.alive_mask
+        action = self.policy(obs)
 
-        # Step 4: Update gradient EMA
-        alpha = self.config.gradient_ema_alpha
-        alive = biomass >= self.config.survival_threshold
-
-        gradient_ema[:] = torch.where(
-            alive,
-            alpha * gradient_strength + (1 - alpha) * gradient_ema,
-            gradient_ema
-        )
-
-        # Step 5: Compute metabolic rate based on gradient EMA and biomass
-        # Biomass modulates max rate - low biomass animals can't sprint
-        metabolic_rate = self._compute_metabolic_rate(gradient_ema, biomass)
-
-        # Step 5b: Compute metabolic efficiency (decreases at higher rates)
-        efficiency = self._compute_efficiency(metabolic_rate)
+        # Step 4: Write back updated gradient EMA from policy
+        gradient_ema[:] = action.gradient_ema
 
         if verbose and positions:
-            self._log_metabolism(positions, "GRADIENT", gradient_strength=gradient_strength, metabolic_rate=metabolic_rate, efficiency=efficiency)
+            self._log_metabolism(
+                positions, "GRADIENT",
+                gradient_ema=action.gradient_ema,
+                metabolic_rate=action.metabolic_rate,
+                efficiency=self._compute_efficiency(action.metabolic_rate)
+            )
 
-        # Step 6: Metabolism - convert biomass to energy
-        # biomass_burned is limited by metabolic rate and available biomass
-        biomass_burned = torch.min(metabolic_rate, biomass.float()).to(torch.uint8)
-        # energy gained = biomass burned * efficiency (dynamic based on exertion)
-        energy_gained = (biomass_burned.float() * efficiency).to(torch.uint8)
-        safe_add(energy, energy_gained)
-        safe_sub(biomass, biomass_burned)
+        # Step 5: Execute metabolism using action's metabolic_rate
+        self._execute_metabolism(action.metabolic_rate, verbose, positions if verbose else None)
 
-        if verbose and positions:
-            self._log_metabolism(positions, "METABOLISM", biomass_burned=biomass_burned, energy_gained=energy_gained, biomass=biomass, energy=energy)
+        # Step 6: Execute energy dissipation
+        self._execute_dissipation(verbose, positions if verbose else None)
 
-        # Step 7: Energy dissipation
-        dissipation = (energy.float() * self.config.dissipation_rate).to(torch.uint8)
-        dissipation = torch.clamp(dissipation, min=self.config.dissipation_floor)
-        safe_sub(energy, dissipation)
-
-        if verbose and positions:
-            self._log_metabolism(positions, "DISSIPATION", dissipation=dissipation, energy=energy)
-
-        offspring_count = self.offspring_count.data
-        id_feature = self.id_feature.data
-        random = self.world.td.get("random")
-
-        # Step 8: Compute movement probability based on energy
-        # stimulus -> metabolism -> energy -> movement
-        # Energy accumulates over time, providing natural smoothing
-        move_prob = energy.float() / 255.0
-        move_mask = torch.rand_like(energy, dtype=torch.float32) < move_prob
-
-        if verbose and positions:
-            self._log_metabolism(positions, "MOVE_PROB", move_prob=move_prob, move_mask=move_mask.float())
-
-        # Step 9: Movement cost (flat cost per move)
-        movement_cost = torch.full_like(energy, self.config.base_movement_cost)
-
-        # Step 10: Movement
-        # Direction comes from observation processing (or external action for RL)
-        # Reproduction: both parent and offspring get 50% of biomass and energy
-        # Movement cost is subtracted from energy during the move
-        move_direction = action if action is not None else direction
-        did_move = move(
-            primary_feature=energy,
-            target=None,  # Direction pre-computed
-            target_weights=None,
-            divide_threshold=self.config.reproduction_threshold,
-            divide_feature=biomass,  # Check biomass, not energy, for reproduction
-            divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),  # energy: parent gets 50%
-            divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),  # energy: offspring gets 50%
-            carried_features_self=[offspring_count, id_feature, biomass, gradient_ema],
-            carried_feature_fns_self=[
-                lambda x: safe_add(x, 1),  # offspring_count increments
-                lambda x: x,                # id_feature unchanged
-                lambda x: (x.float() * 0.5).to(x.dtype),  # biomass: parent gets 50%
-                lambda x: x                 # gradient_ema unchanged
-            ],
-            carried_features_offspring=[id_feature, biomass, gradient_ema],
-            carried_feature_fns_offspring=[
-                lambda x: random,           # id_feature: new random id
-                lambda x: (x.float() * 0.5).to(x.dtype),  # biomass: offspring gets 50%
-                lambda x: x * 0.5           # gradient_ema: offspring starts with half
-            ],
-            agent_action=move_direction,
-            move_mask=move_mask,
-            move_cost=movement_cost,
+        # Step 7: Execute movement using action's direction and probability
+        # External action overrides policy direction (for RL)
+        move_direction = external_action if external_action is not None else action.move_direction
+        did_move = self._execute_movement(
+            direction=move_direction,
+            move_probability=action.move_probability,
+            verbose=verbose,
+            positions=positions if verbose else None,
         )
 
         # After movement, find new positions for logging
@@ -357,17 +373,15 @@ class Animal(Entity):
             new_alive_mask = biomass >= self.config.survival_threshold
             new_positions = list(zip(*torch.where(new_alive_mask)))
             if positions:
-                # Show movement info at old positions
                 for y, x in positions:
                     if did_move[y, x]:
                         print(f"  [{self.__class__.__name__}@({x},{y})] MOVED to new position")
-            positions = new_positions  # Update to new positions
+            positions = new_positions
 
         if verbose and positions:
             self._log_metabolism(positions, "POST_MOVE", biomass=biomass, energy=energy)
 
-        # Step 11: Eating (fills biomass, not energy)
-        # Try food sources in order until satiated
+        # Step 8: Eating (fills biomass, not energy)
         biomass_before_eat = biomass.clone() if verbose else None
         self._eat()
 
@@ -376,8 +390,217 @@ class Animal(Entity):
             self._log_metabolism(positions, "EAT", eaten=eaten, biomass=biomass)
             self._log_metabolism(positions, "END", biomass=biomass, energy=energy)
 
-        # Step 12: Emit scent (based on biomass); diffusion handled by World
+        # Step 9: Emit scent (based on biomass); diffusion handled by World
         self.scent.emit(self.world.step)
+
+        # Step 10: Update genetic registry populations if enabled
+        if self.genetic_registry is not None:
+            alive = biomass >= self.config.survival_threshold
+            self.genetic_registry.update_populations(self.slot_id.data, alive)
+
+            # Log genetic status at configured interval
+            log_interval = getattr(self.config.genetics, 'log_interval', 0)
+            if log_interval > 0 and self.world.step % log_interval == 0:
+                self.genetic_registry.log_status(
+                    entity_name=self.__class__.__name__,
+                    step=self.world.step
+                )
+
+    def _execute_metabolism(
+        self,
+        metabolic_rate: torch.Tensor,
+        verbose: bool = False,
+        positions: Optional[List[Tuple[int, int]]] = None
+    ):
+        """
+        Execute metabolism: convert biomass to energy.
+
+        Args:
+            metabolic_rate: (H, W) float - biomass to burn per cell
+            verbose: Whether to log metabolism details
+            positions: Positions to log (if verbose)
+        """
+        biomass = self.biomass.data
+        energy = self.energy.data
+
+        # Compute efficiency (decreases at higher metabolic rates)
+        efficiency = self._compute_efficiency(metabolic_rate)
+
+        # Burn biomass, limited by available biomass
+        biomass_burned = torch.min(metabolic_rate, biomass.float()).to(torch.uint8)
+
+        # Energy gained = biomass * efficiency
+        energy_gained = (biomass_burned.float() * efficiency).to(torch.uint8)
+
+        safe_add(energy, energy_gained)
+        safe_sub(biomass, biomass_burned)
+
+        if verbose and positions:
+            self._log_metabolism(
+                positions, "METABOLISM",
+                biomass_burned=biomass_burned,
+                energy_gained=energy_gained,
+                biomass=biomass,
+                energy=energy
+            )
+
+    def _execute_dissipation(
+        self,
+        verbose: bool = False,
+        positions: Optional[List[Tuple[int, int]]] = None
+    ):
+        """
+        Execute energy dissipation.
+
+        Args:
+            verbose: Whether to log dissipation details
+            positions: Positions to log (if verbose)
+        """
+        energy = self.energy.data
+
+        dissipation = (energy.float() * self.config.dissipation_rate).to(torch.uint8)
+        dissipation = torch.clamp(dissipation, min=self.config.dissipation_floor)
+        safe_sub(energy, dissipation)
+
+        if verbose and positions:
+            self._log_metabolism(positions, "DISSIPATION", dissipation=dissipation, energy=energy)
+
+    def _execute_movement(
+        self,
+        direction: torch.Tensor,
+        move_probability: torch.Tensor,
+        verbose: bool = False,
+        positions: Optional[List[Tuple[int, int]]] = None,
+    ) -> torch.Tensor:
+        """
+        Execute movement and reproduction.
+
+        Args:
+            direction: (H, W) long - movement direction per cell
+            move_probability: (H, W) float - probability of attempting move
+            verbose: Whether to log movement details
+            positions: Positions to log (if verbose)
+
+        Returns:
+            did_move: (H, W) bool - which cells actually moved
+        """
+        energy = self.energy.data
+        biomass = self.biomass.data
+        offspring_count = self.offspring_count.data
+        id_feature = self.id_feature.data
+        gradient_ema = self.gradient_ema.data
+        slot_id = self.slot_id.data
+        random = self.world.td.get("random")
+
+        # Stochastic movement based on probability
+        move_mask = torch.rand_like(energy, dtype=torch.float32) < move_probability
+
+        if verbose and positions:
+            self._log_metabolism(positions, "MOVE_PROB", move_prob=move_probability, move_mask=move_mask.float())
+
+        # Movement cost (flat cost per move)
+        movement_cost = torch.full_like(energy, self.config.base_movement_cost)
+
+        # Prepare offspring slot assignment function
+        offspring_slot_fn = self._make_offspring_slot_fn()
+
+        # Execute move with reproduction
+        did_move = move(
+            primary_feature=energy,
+            target=None,  # Direction pre-computed
+            target_weights=None,
+            divide_threshold=self.config.reproduction_threshold,
+            divide_feature=biomass,
+            divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
+            divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+            carried_features_self=[offspring_count, id_feature, biomass, gradient_ema, slot_id],
+            carried_feature_fns_self=[
+                lambda x: safe_add(x, 1),
+                lambda x: x,
+                lambda x: (x.float() * 0.5).to(x.dtype),
+                lambda x: x,
+                lambda x: x,  # slot_id unchanged for parent
+            ],
+            carried_features_offspring=[id_feature, biomass, gradient_ema, slot_id],
+            carried_feature_fns_offspring=[
+                lambda x: random,
+                lambda x: (x.float() * 0.5).to(x.dtype),
+                lambda x: x * 0.5,
+                offspring_slot_fn,  # slot assignment for offspring
+            ],
+            agent_action=direction,
+            move_mask=move_mask,
+            move_cost=movement_cost,
+        )
+
+        return did_move
+
+    def _make_offspring_slot_fn(self) -> Callable:
+        """
+        Create function for assigning slots to offspring.
+
+        If genetics not enabled, offspring inherit parent slot.
+        If enabled, offspring may be assigned to empty slots with mutation.
+
+        Uses lazy colonization: only creates genomes for slots that actually
+        receive offspring, avoiding wasted work.
+        """
+        if self.genetic_registry is None:
+            # No genetics: offspring inherit parent slot
+            return lambda x: x
+
+        genetics_config = self.config.genetics
+        mutation_prob = getattr(genetics_config, 'mutation_probability', 0.1)
+        mutation_rate = getattr(genetics_config, 'mutation_rate', 0.1)
+        mutation_scale = getattr(genetics_config, 'mutation_scale', 0.1)
+
+        def assign_offspring_slot(parent_slots: torch.Tensor) -> torch.Tensor:
+            """Assign slots to offspring, potentially mutating to new slots."""
+            # Early exit: check mutation mask BEFORE any slot queries
+            mutation_mask = torch.rand_like(parent_slots.float()) < mutation_prob
+            if not mutation_mask.any():
+                return parent_slots  # No clone needed if no mutations
+
+            offspring_slots = parent_slots.clone()
+
+            # Now query slots (only when we know mutations will occur)
+            empty_slots = self.genetic_registry.get_empty_slots()
+
+            if len(empty_slots) > 0:
+                # Assign mutating offspring to random empty slots
+                # Only generate random indices for cells that are actually mutating
+                mutating_indices = mutation_mask.nonzero(as_tuple=True)
+                num_mutating = len(mutating_indices[0])
+                random_slot_indices = torch.randint(0, len(empty_slots), (num_mutating,))
+                new_slots = empty_slots[random_slot_indices]
+                offspring_slots[mutating_indices] = new_slots.to(offspring_slots.dtype)
+
+                # Lazy colonization: only create genomes for slots that were actually assigned
+                used_empty_slots = new_slots.unique()
+                occupied_slots = self.genetic_registry.get_occupied_slots()
+
+                if len(occupied_slots) > 0:
+                    for slot in used_empty_slots:
+                        slot_int = slot.item()
+                        # Only colonize if this slot is still empty (population == 0)
+                        if self.genetic_registry.populations[slot_int] == 0:
+                            source = occupied_slots[torch.randint(len(occupied_slots), (1,))].item()
+                            self.genetic_registry.colonize_slot(
+                                slot_int, source, mutation_rate, mutation_scale
+                            )
+            else:
+                # No empty slots - assign to random occupied slots
+                occupied_slots = self.genetic_registry.get_occupied_slots()
+                if len(occupied_slots) > 0:
+                    mutating_indices = mutation_mask.nonzero(as_tuple=True)
+                    num_mutating = len(mutating_indices[0])
+                    random_slot_indices = torch.randint(0, len(occupied_slots), (num_mutating,))
+                    new_slots = occupied_slots[random_slot_indices]
+                    offspring_slots[mutating_indices] = new_slots.to(offspring_slots.dtype)
+
+            return offspring_slots
+
+        return assign_offspring_slot
 
     def _eat_from(self, food: torch.Tensor, amount: int) -> torch.Tensor:
         """

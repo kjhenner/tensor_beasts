@@ -84,6 +84,7 @@ def main(config: DictConfig):
     print(f"Height: {height}, Width: {width}")
 
     world = World(config.world)
+    world.initialize()
 
     clock = pygame.time.Clock()
 

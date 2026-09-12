@@ -1,5 +1,6 @@
 import math
 import random
+from contextlib import nullcontext
 from typing import List, Union, Tuple, SupportsAbs, Optional
 
 import numpy as np
@@ -402,6 +403,13 @@ def gradient(h, x, y):
 
 
 def perlin_noise(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
+    # Run on CPU to avoid MPS advanced indexing race conditions, then move to target device
+    target_device = torch.get_default_device()
+    run_on_cpu = target_device is not None and target_device.type == 'mps'
+
+    if run_on_cpu:
+        torch.mps.synchronize()  # Ensure all MPS ops complete first
+
     def generate_noise(x, y, res):
         grid0_x, grid0_y = x.to(torch.int32), y.to(torch.int32)
         grid1_x, grid1_y = grid0_x + 1, grid0_y + 1
@@ -432,28 +440,41 @@ def perlin_noise(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
         return nxy
 
     def domain_warp(x, y, warp_amount=0.1):
-        wx = x + warp_amount * generate_noise(x, y, (res[0]//2, res[1]//2))
-        wy = y + warp_amount * generate_noise(x, y, (res[0]//2, res[1]//2))
+        warp_res = (max(1, res[0]//2), max(1, res[1]//2))
+        # Scale coordinates to match the warp resolution
+        sx = x * (warp_res[0] / res[0])
+        sy = y * (warp_res[1] / res[1])
+        wx = x + warp_amount * generate_noise(sx, sy, warp_res)
+        wy = y + warp_amount * generate_noise(sx, sy, warp_res)
         return wx, wy
 
-    base_x = torch.linspace(0, res[0], size[0])
-    base_y = torch.linspace(0, res[1], size[1])
-    x, y = torch.meshgrid(base_x, base_y, indexing='ij')
+    # Generate on CPU if MPS to avoid race conditions
+    with torch.device('cpu') if run_on_cpu else nullcontext():
+        # Exclude endpoint so coordinates stay in [0, res) — prevents out-of-bounds grid indexing
+        base_x = torch.linspace(0, res[0], size[0] + 1)[:-1]
+        base_y = torch.linspace(0, res[1], size[1] + 1)[:-1]
+        x, y = torch.meshgrid(base_x, base_y, indexing='ij')
 
-    # Apply domain warping
-    x, y = domain_warp(x, y)
+        # Apply domain warping, then clamp to valid range
+        x, y = domain_warp(x, y)
+        x = torch.clamp(x, 0, res[0] - 1e-6)
+        y = torch.clamp(y, 0, res[1] - 1e-6)
 
-    # Generate fractal Brownian motion (fBm)
-    noise = torch.zeros(size)
-    frequency = 1
-    amplitude = 1
-    for _ in range(octaves):
-        noise += amplitude * generate_noise(x * frequency, y * frequency, (int(res[0]*frequency), int(res[1]*frequency)))
-        frequency *= lacunarity
-        amplitude *= persistence
+        # Generate fractal Brownian motion (fBm)
+        noise = torch.zeros(size)
+        frequency = 1
+        amplitude = 1
+        for _ in range(octaves):
+            noise += amplitude * generate_noise(x * frequency, y * frequency, (int(res[0]*frequency), int(res[1]*frequency)))
+            frequency *= lacunarity
+            amplitude *= persistence
 
-    # Normalize the noise
-    noise = (noise - noise.min()) / (noise.max() - noise.min())
+        # Normalize the noise
+        noise = (noise - noise.min()) / (noise.max() - noise.min())
+
+    # Move to target device if we ran on CPU
+    if run_on_cpu:
+        noise = noise.to(target_device)
 
     return noise
 

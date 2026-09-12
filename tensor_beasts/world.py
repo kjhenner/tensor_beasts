@@ -168,8 +168,6 @@ class World:
         """Initialize all entities in dependency order."""
         for entity_name in self._entity_order:
             self.entity_dict[entity_name].initialize()
-        for shared_feature in self.shared_features_dict.values():
-            shared_feature.initialize_data()
 
     def snapshot(self) -> WorldSnapshot:
         data = {}
