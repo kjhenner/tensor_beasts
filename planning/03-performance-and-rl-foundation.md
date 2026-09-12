@@ -175,12 +175,36 @@ entity. That convention lived in `conf/base/simulation.yaml` and nowhere else.
 It is now set explicitly in the repaired configs too, but the underlying
 default is still a trap worth removing.
 
-## Known problems, not fixed
+## The baseline to beat
 
-- **The ecology is boring.** The committed grid search recorded a mean movement
-  rate near 0.003 across all 128 trials. Herbivores camp on plants and
-  reproduce. A world where standing still is optimal has nothing to teach an
-  agent, so this blocks step 5 more than any performance number does.
+`evaluate_policy.py` scores a policy through the environment's own reward,
+termination and truncation rules. Eight episodes, `conf/base/simulation.yaml`,
+128 x 128, 600 steps:
+
+| Policy     | Return | Std dev | Episode length | Final population | Move rate |
+|------------|--------|---------|----------------|------------------|-----------|
+| rule-based | 25462  | 8942    | 600            | 55.6             | 0.280     |
+| random     | 14169  | 5331    | 600            | 44.0             | 0.379     |
+| stay put   | 3866   | 448     | 168 (extinct)  | 0.0              | 0.021     |
+
+Return is herbivore-steps survived, so higher is better. **This corrects an
+earlier worry.** I had read the committed grid search results, which record a
+mean movement rate near 0.003, as evidence that herbivores camp on plants and
+that the ecology rewards standing still. Measured through the environment that
+is not what happens: standing still goes extinct by step 168, moving randomly
+is 3.7x better than that, and the rule-based policy is 1.8x better again. There
+is real signal here for a learned policy to find.
+
+Two caveats for step 5. The spread is roughly 35% of the mean, so demonstrating
+that a learned policy beats 25462 will need many episodes, not a handful. And
+at 64 x 64 the same comparison collapses into noise, with random statistically
+indistinguishable from rule-based, because the surviving population is only a
+few cells; evaluate at 128 or larger.
+
+## Known problems, not fixed
+- **Herbivore populations decline hard** even under the rule-based policy,
+  from 91 down to roughly 40 over a few hundred steps at 128 x 128. The world
+  sustains a small population rather than a thriving one.
 - **Predators go extinct** by roughly step 200 on `basic_config.yaml` at
   128 x 128, leaving a herbivore-and-plant world.
 - `conf/toy_zoo/single_herbivore.yaml` still does not load. It configures a

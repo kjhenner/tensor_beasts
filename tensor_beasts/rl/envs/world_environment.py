@@ -229,6 +229,25 @@ class TensorBeastsEnv(_EnvBase):
 
         return self._observation(), reward, terminated, truncated, self._info()
 
+    def step_builtin(self) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
+        """Advance one step letting the simulation's own policy choose movement.
+
+        This is a baseline-only escape hatch, not part of the Gymnasium API. It
+        exists so the rule-based policy can be scored through exactly the same
+        reward, termination and truncation rules as a learned policy, which is
+        what makes the comparison meaningful. Everything except the source of
+        the movement decision is identical to ``step``.
+        """
+        self.world.update()
+        self._elapsed_steps += 1
+
+        population = self.population()
+        reward = float(population)
+        terminated = population == 0
+        truncated = (not terminated) and self._elapsed_steps >= self.max_steps
+
+        return self._observation(), reward, terminated, truncated, self._info()
+
     def close(self):
         return None
 
