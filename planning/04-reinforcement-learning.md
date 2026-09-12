@@ -627,6 +627,14 @@ Cost: one extra forward per step of the segment per epoch and the activations
 of a window held at once, so the window is the memory lever in the same way
 the minibatch was for the plain update.
 
+### Stage 1 control result
+
+Four memory channels with the fixed, non-recurrent write, same recipe as the
+winner, evaluated at 0.942x at step 1664 on the 256 world, inside the band the
+recipe's own seeds span there, 0.96x to 1.08x. No benefit and no harm, which
+is what a fixed random projection of the observation should give. This is the
+number the recurrent run has to beat.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same
