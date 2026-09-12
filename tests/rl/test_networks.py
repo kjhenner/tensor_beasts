@@ -110,3 +110,19 @@ def test_initial_policy_is_close_to_uniform():
 def test_unknown_architecture_is_rejected():
     with pytest.raises(ValueError, match="Unknown architecture"):
         build_network("transformer", CHANNELS)
+
+
+
+@pytest.mark.skipif(not torch.backends.mps.is_available(), reason="needs a Metal device")
+def test_networks_can_be_built_under_a_metal_default_device():
+    """The viewer sets Metal as the default device. Orthogonal init needs a QR
+    decomposition that Metal lacks, and this is the exact path that crashed."""
+    previous = torch.get_default_device()
+    torch.set_default_device("mps")
+    try:
+        for name in ARCHITECTURES:
+            network = build_network(name, CHANNELS).to("mps")
+            logits, value = network(torch.randn(1, CHANNELS, 16, 16, device="mps"))
+            assert logits.device.type == "mps"
+    finally:
+        torch.set_default_device(previous)

@@ -220,7 +220,15 @@ ARCHITECTURES = {
 
 
 def build_network(name: str, in_channels: int, **kwargs) -> ActorCritic:
-    """Construct a network by name. See ARCHITECTURES for the options."""
+    """Construct a network by name. See ARCHITECTURES for the options.
+
+    Always built on the CPU, whatever the default device is, and moved by the
+    caller. Orthogonal initialization needs a QR decomposition, which Metal does
+    not implement; the interactive viewer sets Metal as the default device and
+    crashed here the first time it loaded a checkpoint. Building on the CPU
+    costs one small transfer and removes the trap for every caller.
+    """
     if name not in ARCHITECTURES:
         raise ValueError(f"Unknown architecture {name!r}. Options: {sorted(ARCHITECTURES)}")
-    return ARCHITECTURES[name](in_channels, **kwargs)
+    with torch.device("cpu"):
+        return ARCHITECTURES[name](in_channels, **kwargs)
