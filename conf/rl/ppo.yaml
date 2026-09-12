@@ -67,4 +67,5 @@ ppo:
   # Off by default so the plain-PPO result stays reproducible; 1.0 is a
   # sensible strength when turning it on.
   imitation_coef: 0.0
-  imitation_target_conformance: 0.9
+  # Below the ~0.9 practical ceiling; the rule's decisions are knife-edge.
+  imitation_target_conformance: 0.8

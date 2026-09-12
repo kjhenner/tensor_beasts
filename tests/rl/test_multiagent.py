@@ -30,14 +30,8 @@ def test_observation_gives_the_policy_the_baseline_inputs():
     names = env.channel_names
     # One 'here' plus four neighbours per perceived feature, then own state.
     assert names[-4:] == ["self/energy", "self/biomass", "self/gradient_ema", "self/alive"]
-    perceived = [n for n in names if n.startswith("simpleplant:scent")]
-    assert perceived == [
-        "simpleplant:scent/here",
-        "simpleplant:scent/up",
-        "simpleplant:scent/down",
-        "simpleplant:scent/left",
-        "simpleplant:scent/right",
-    ]
+    for suffix in ("here", "up", "down", "left", "right", "grad_up", "grad_down", "grad_left", "grad_right"):
+        assert f"simpleplant:scent/{suffix}" in names
     assert any(n.startswith("predator:scent") for n in names), "herbivores must be able to sense predators"
 
 
@@ -48,8 +42,11 @@ def test_observation_is_finite_and_scaled():
         batch = env.step(torch.randint(0, 5, SIZE))
         observation = batch.observation
         assert torch.isfinite(observation).all()
-        assert observation.min() >= 0.0
-        assert observation.max() <= 1.5, "channels should be roughly unit-scaled"
+        names = env.channel_names
+        grad = torch.tensor(["/grad_" in n for n in names])
+        assert observation[~grad].min() >= 0.0
+        assert observation[~grad].max() <= 1.5, "value channels should be roughly unit-scaled"
+        assert observation[grad].abs().max() <= 4.0, "gradient channels are clipped"
 
 
 def test_reward_and_done_only_touch_acting_cells():
@@ -240,3 +237,51 @@ def test_batch_carries_the_rule_based_action_for_acting_cells():
         acting = batch.rule_action[batch.acted]
         assert acting.numel() > 0
         assert acting.min() >= 0 and acting.max() <= 4
+
+
+
+def test_a_small_conv_can_fit_the_rule_action():
+    """The regression behind the whole imitation episode.
+
+    A model once stalled at 0.46 agreement with the rule action because the
+    informative differences between neighbouring cells were two orders of
+    magnitude smaller than the channel values. Explicit gradient channels at
+    unit scale fixed that. The bar is 0.8 rather than higher because the rule's
+    decisions are knife-edge and roughly 0.9 is the practical ceiling for any
+    approximate model. Small world for speed; the fit is a property of the
+    observation encoding, not of the ecology.
+    """
+    import torch.nn.functional as F
+    from tensor_beasts.rl.networks import build_network
+
+    torch.manual_seed(0)
+    env = MultiAgentWorldEnv(size=(96, 96), device="cpu")
+    env.reset(seed=0)
+    for _ in range(60):
+        env.world.update()
+
+    observations, labels, masks = [], [], []
+    for _ in range(24):
+        stack, raw = env._observe()
+        observations.append(stack)
+        labels.append(env._rule_action(raw))
+        masks.append(raw.alive_mask.clone())
+        env.world.update()
+    observations, labels, masks = map(torch.stack, (observations, labels, masks))
+    assert int(masks.sum()) > 200, "need a population to fit against"
+
+    network = build_network("conv", env.observation_channels, hidden_channels=32)
+    optimizer = torch.optim.Adam(network.parameters(), lr=3e-3)
+    for _ in range(300):
+        logits, _ = network(observations[:20])
+        m = masks[:20]
+        loss = F.cross_entropy(logits.permute(0, 2, 3, 1)[m], labels[:20][m])
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        logits, _ = network(observations[20:])
+        m = masks[20:]
+        agreement = float((logits.argmax(1)[m] == labels[20:][m]).float().mean())
+    assert agreement > 0.8, f"conv fit of the rule action reached only {agreement:.3f}"

@@ -263,6 +263,58 @@ None of the five completed trials beat the baseline. Their survival ratios,
 computed after the fix, are not worth tabulating: the runs were starved and the
 budget of 4000 world steps was never reached by three of them.
 
+### Anchoring to the rules, and what it uncovered about the rules
+
+The repo owner's suggestion: use the rule-based policy as the reward structure
+first and cross-fade to the real rewards as conformance rises. Implemented as a
+supervised imitation term in the loss rather than as a reward, since the rule
+action is free at every cell and a direct cross-entropy avoids the noisy
+advantage path. Weight = `imitation_coef * max(0, 1 - conformance / target)`.
+
+The first run stalled at 0.31 conformance, barely above the 0.20 chance level,
+and finding out why took four diagnostics, each of which eliminated a
+hypothesis:
+
+| Check | Result | Eliminated |
+|---|---|---|
+| Rule action sampled twice from one observation | 99.8% self-agreement | "the label is noise" |
+| Imitation with every reward zeroed | still 0.34 | "the RL gradient fights it" |
+| Plain supervised fit, no PPO | linear 0.46, conv 0.66 | "the training loop is broken" |
+| Analytic rule scoring over the env's channels | 1.000 agreement | "the observation lacks what the rule uses" |
+
+The first real bug was mine: `get_observation` log-compresses scent as
+`log1p(x * 50)`, so those channels top out near 9.4, and the environment divided
+them by 255 as if they were bytes. Every perceived channel the learner saw lived
+in roughly [0, 0.04]. Fixed by scaling to the actual ceiling.
+
+That alone did not rescue the linear fit, and the reason is the finding worth
+keeping. **The rule's decisions are knife-edge.** Scent is a smooth field, so
+the difference between a cell and its neighbour, which is all the rule compares,
+is two orders of magnitude smaller than the values. Measured on a settled world:
+
+| Quantity | Value |
+|---|---|
+| Median relative margin, best vs second-best direction | 0.18% |
+| Decisions settled by under 1% | 93% |
+| Agreement after perturbing one navigation weight by 1% | 0.949 |
+| by 5% | 0.744 |
+| by 20% | 0.665 |
+
+So the baseline's behaviour is dominated by hair-thin comparisons, an
+approximate model tops out near 0.9 agreement however it is trained, and a
+learned policy that drifts a few percent in one weight ratio changes a quarter
+of its decisions. That is a large part of why "learning makes it worse" was so
+easy to reach.
+
+Two consequences went into the code. The observation now carries explicit
+gradient channels, neighbour minus own cell, scaled by 25 so their standard
+deviation is about 0.25 and clipped at 4; a small conv then fits the rule to
+0.91 held-out, against 0.66 before. And the default conformance target is 0.8,
+below the ceiling, so the anchor can actually let go.
+
+Before the fix the anchored run reached 0.58x of the baseline at step 1664,
+already up from 0.49x at the start. The post-fix run is the next number.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the

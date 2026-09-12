@@ -81,6 +81,16 @@ DIRECTION_NAMES = ("stay", "up", "down", "left", "right")
 DEFAULT_CONFIG = "conf/basic_config.yaml"
 DEFAULT_ENTITY = "Herbivore"
 
+# Multiplier on the explicit gradient channels (neighbour minus own cell).
+# Chosen so a measured standard deviation of 0.010 becomes 0.25 and the 99th
+# percentile of 0.037 lands near 0.9. See _observe for why they exist.
+GRADIENT_GAIN = 25.0
+# Gradient channels are clipped to this magnitude. Typical values sit within
+# +-1 after the gain, but a fresh scent source in a young world can produce a
+# neighbour difference several times larger, and an unbounded input is a poor
+# thing to hand a network.
+GRADIENT_CLIP = 4.0
+
 
 @dataclass
 class AgentBatch:
@@ -213,6 +223,9 @@ class MultiAgentWorldEnv:
             label = ":".join(key)
             names.append(f"{label}/here")
             names.extend(f"{label}/{d}" for d in ("up", "down", "left", "right"))
+        for key, _ in self._perception():
+            label = ":".join(key)
+            names.extend(f"{label}/grad_{d}" for d in ("up", "down", "left", "right"))
         names.extend(["self/energy", "self/biomass", "self/gradient_ema", "self/alive"])
         return names
 
@@ -235,8 +248,35 @@ class MultiAgentWorldEnv:
         information the baseline has, and own state is appended because
         metabolism and movement both depend on it.
 
-        Values are scaled to roughly the unit interval. Scent and energy are
-        uint8-derived, biomass likewise; gradient EMA is already small.
+        Values are scaled to roughly the unit interval. Perceived features are
+        NOT raw uint8: get_observation log-compresses them as log1p(x * log_scale)
+        for the rule-based policy's benefit, so their ceiling is
+        log1p(255 * log_scale), about 9.4 at the default log_scale of 50. An
+        earlier version divided these by 255 as if they were bytes, which left
+        every perceived channel in roughly [0, 0.04]; a linear model then could
+        not fit the rule action above 0.46 agreement on a label that is 99.8%
+        self-consistent, because it had to grow its weights thirty-fold first.
+        Own energy and biomass are genuine uint8 and are divided by 255.
+
+        After the perceived values come explicit gradient channels, neighbour
+        minus own cell for each direction, scaled by GRADIENT_GAIN. The rule
+        compares a cell against its neighbours and nothing else, and scent is a
+        smooth field, so those differences are tiny relative to the values:
+        measured on a settled 256x256 world the difference has a standard
+        deviation of 0.010 and a 99th percentile near 0.037. A linear model can
+        represent the rule exactly from the raw channels, and an analytic check
+        confirms the label is exactly linear in them, yet cross-entropy on logit
+        margins that small is nearly flat and the linear fit stalled at 0.46
+        agreement. Handing the learner the differences at unit scale removes an
+        optimization problem the rule-based policy never had to face.
+
+        Even so, do not expect any learner to match the rule action exactly.
+        The rule's decisions are knife-edge: measured on a settled world the
+        median relative margin between its best and second-best direction is
+        0.18%, 93% of decisions are settled by under 1%, and perturbing one
+        navigation weight by 1% flips 5% of them. Around 0.9 agreement is the
+        practical ceiling for an approximate model, which is why the default
+        imitation target sits below it.
         """
         entity = self.entity
         observation = get_observation(
@@ -250,12 +290,23 @@ class MultiAgentWorldEnv:
             step=self.world.step,
         )
 
+        # Ceiling of the log-compressed perceived values; see the docstring.
+        perceived_scale = float(torch.log1p(torch.tensor(255.0 * entity.config.log_scale)))
+
         channels: List[torch.Tensor] = []
         for key, _ in self._perception():
-            current = observation.current[key].float() / 255.0
-            directional = observation.directional[key].float() / 255.0
+            current = observation.current[key].float() / perceived_scale
+            directional = observation.directional[key].float() / perceived_scale
             channels.append(current)
             channels.extend(directional[i] for i in range(directional.shape[0]))
+
+        for key, _ in self._perception():
+            here = observation.current[key].float() / perceived_scale
+            directional = observation.directional[key].float() / perceived_scale
+            channels.extend(
+                ((directional[i] - here) * GRADIENT_GAIN).clamp(-GRADIENT_CLIP, GRADIENT_CLIP)
+                for i in range(directional.shape[0])
+            )
 
         channels.append(observation.energy.float() / 255.0)
         channels.append(observation.biomass.float() / 255.0)

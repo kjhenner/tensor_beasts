@@ -108,7 +108,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     hyper.add_argument("--imitation-target", type=float, default=None,
-                       help="conformance at which the imitation weight reaches zero (default 0.9)")
+                       help="conformance at which the imitation weight reaches zero (default 0.8)")
 
     evaluation = parser.add_argument_group("evaluation")
     evaluation.add_argument("--eval-interval", type=int, default=None)

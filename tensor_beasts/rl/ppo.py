@@ -150,7 +150,10 @@ class PPOConfig:
     # reaches zero once agreement hits the target, leaving only the real
     # rewards. Zero disables it.
     imitation_coef: float = 0.0
-    imitation_target_conformance: float = 0.9
+    # 0.8, not higher: the rule's decisions are knife-edge (see multiagent.py),
+    # so roughly 0.9 argmax agreement is the practical ceiling and a target
+    # above it would keep the anchor engaged forever.
+    imitation_target_conformance: float = 0.8
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
