@@ -112,10 +112,10 @@ survived:
 | Stay put | 60,539 | 0 by step 202 |
 
 A learned policy has beaten it. A `conv` network trained at 256 with the
-rule-based policy as a fading anchor scores **1.331x** the baseline at 512 on
-three paired seeds over 400 steps, sustaining a third more herbivores by
-reproducing 62% more. See `planning/04-reinforcement-learning.md` for the
-caveats, chiefly that 400 steps is short against the ecology's cycles.
+rule-based policy as a fading anchor scores **1.155x** the baseline at 512 on
+three paired seeds over 1200 steps, and 1.331x over the first 400. Over the
+long window its herbivores live longer, 137 steps against 124, and sustain a
+15% larger population. See `planning/04-reinforcement-learning.md`.
 
 **Size matters more than anything else here.** Below roughly 256 the predator
 population goes extinct and the three-species dynamic degenerates, so a small

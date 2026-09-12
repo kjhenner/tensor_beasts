@@ -402,6 +402,32 @@ conformance. Options, untested: a floor on the anchor weight rather than zero,
 a release keyed on the *evaluation ratio* rather than on agreement, or simply
 a slower fade.
 
+### The result holds over a long window
+
+Same winning checkpoint, same three paired seeds at 512, three times the
+window, plus the soft-distillation checkpoint under the original window for an
+apples-to-apples comparison:
+
+| Checkpoint | Window | Learned survived | Rule-based survived | Learned lifespan | Rule-based lifespan | Ratio |
+|---|---|---|---|---|---|---|
+| Hard anchor | 400 | 537,030 | 403,426 | 85.2 | 88.3 | 1.331x |
+| Soft anchor | 400 | 430,150 | 403,426 | 82.3 | 88.3 | 1.066x |
+| Hard anchor | 1200 | 4,645,223 | 4,022,149 | 136.9 | 123.6 | **1.155x** |
+
+Two corrections to the earlier reading. The advantage narrows as the ecology
+settles, from 1.33x to 1.16x, so a full 3000-step cycle would likely narrow it
+further; it is a real but modest edge, not a rout. And the mechanism changes
+with the window: over 400 steps the learned policy won by reproducing 62%
+more with slightly shorter lives, but over 1200 it wins by living longer, 137
+steps against 124, and sustaining a 15% larger population, with reproductions
+only 5% higher. The early-window story was a window artefact, which is exactly
+why the longer evaluation was worth running.
+
+Soft distillation learned the rules better and produced the weaker policy,
+1.066x against 1.331x under identical conditions. Given the training log,
+that is the cross-fade releasing into drift rather than a fault in the target;
+the floored variant is the next run.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the

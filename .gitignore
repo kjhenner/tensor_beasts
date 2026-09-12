@@ -92,3 +92,6 @@ rl_baseline_512.txt
 runs/
 sweeps/
 sweep_run.log
+
+# Run logs written to the repo root by background jobs
+*.log
