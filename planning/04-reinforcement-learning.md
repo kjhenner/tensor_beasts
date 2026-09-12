@@ -315,6 +315,33 @@ below the ceiling, so the anchor can actually let go.
 Before the fix the anchored run reached 0.58x of the baseline at step 1664,
 already up from 0.49x at the start. The post-fix run is the next number.
 
+### Distilling the scoring regime, not the outcome
+
+The repo owner's refinement: the rule works by scoring each action and taking
+the best, so match a softmax over the learner's logits to a softmax over the
+rule's scores rather than matching the argmax. Given the knife-edge finding
+this is the right target. A near-tie becomes a near-uniform distribution that
+costs nothing to disagree with, so no gradient is spent on the rule's
+coin-flips, while confident decisions still get sharp targets.
+
+The environment now emits the rule's five scores alongside its action, and
+PPO's imitation term is the KL from `softmax(scores / temperature)` to the
+policy. The temperature decides what counts as confident; measured on a settled
+world the absolute score gaps have a median of 0.0076, so at the default of
+0.01 a typical decision is a 60% preference and a clear one is sharp.
+Conformance for the cross-fade is now the Bhattacharyya coefficient between
+the two distributions: 1 exactly when they match, including where the rule
+itself is unsure, 0 when they share no support. Argmax agreement is still logged, as a
+separate diagnostic, because it is the number the knife-edge analysis was done
+in.
+
+The Q-learning connection is real and deliberately not built yet. The rule's
+scores are a heuristic action-value function, so the same target that shapes
+the policy logits here would regress a Q-head directly, with Bellman updates
+refining it from there. In the actor-critic the logits are the natural home
+for that prior; a value-based learner with the rule as its initial Q is the
+obvious follow-on once the actor-critic path has a result.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the

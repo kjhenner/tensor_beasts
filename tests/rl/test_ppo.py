@@ -115,7 +115,7 @@ def test_losses_ignore_non_acting_cells():
     rollout = make_rollout(network)
     ppo = PPO(PPOConfig(minibatch_steps=STEPS))
 
-    observation, acted, action, log_prob, value, advantage, ret, _rule = single_batch(rollout)
+    observation, acted, action, log_prob, value, advantage, ret, _rule, _scores = single_batch(rollout)
     _, clean = ppo._losses(
         network, observation, acted, action, log_prob, value, advantage, ret
     )
@@ -236,7 +236,7 @@ def test_value_clipping_runs_and_changes_the_value_loss():
 
     unclipped = PPO(PPOConfig(minibatch_steps=STEPS))
     clipped = PPO(PPOConfig(minibatch_steps=STEPS, value_clip_range=1e-4))
-    observation, acted, action, log_prob, value, advantage, ret, _rule = batch
+    observation, acted, action, log_prob, value, advantage, ret, _rule, _scores = batch
     # Stand the recorded value away from the current prediction, the way it
     # would be part way through an update. With them equal, clipping is a no-op
     # by construction and the test would prove nothing.
@@ -294,7 +294,7 @@ def test_minibatch_iteration_covers_every_timestep_once():
     seen = 0
     for batch in iter_minibatches_with_value(rollout, 4):
         seen += batch[0].shape[0]
-        assert len(batch) == 8
+        assert len(batch) == 9
     assert seen == STEPS
 
 
@@ -503,4 +503,129 @@ def test_imitation_term_is_masked_to_acting_cells():
     rule[~batch[1]] = (rule[~batch[1]] + 1) % 5
     scrambled[7] = rule
     after = float(ppo.minibatch_loss(network, tuple(scrambled)))
+    assert before == pytest.approx(after)
+
+
+# ---------------------------------------------------------------------------
+# Soft distillation toward the rule's scoring regime
+# ---------------------------------------------------------------------------
+
+
+def _rollout_with_rule_scores(seed=0, steps=6, size=8, channels=6, gap=1.0):
+    """Rule scores that are a fixed function of the observation, with a
+    controllable gap between best and second-best so tests can build both
+    confident cells and near-ties."""
+    import torch
+    from tensor_beasts.rl.rollout import Rollout
+
+    rollout = _rollout_with_rule_actions(seed=seed, steps=steps, size=size, channels=channels)
+    obs = rollout.observation.float()
+    # Scores: the first five channels, sharpened so that the best beats the
+    # rest by roughly `gap` on the softmax temperature's scale.
+    scores = obs[:, :5] * gap
+    rollout.rule_scores = scores
+    rollout.rule_action = scores.argmax(dim=1)
+    return rollout
+
+
+def test_soft_distillation_raises_scoring_conformance():
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    torch.manual_seed(0)
+    rollout = _rollout_with_rule_scores(gap=1.0)
+    network = build_network("linear", 6)
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1, imitation_target_conformance=0.99,
+                        learning_rate=0.1, epochs=1, minibatch_steps=6, entropy_coef=0.0, value_coef=0.0))
+    optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
+    first = ppo.update(network, rollout, optimizer)
+    for _ in range(40):
+        last = ppo.update(network, rollout, optimizer)
+    assert last["conformance"] > first["conformance"] + 0.15
+    assert last["conformance"] > 0.9
+    assert last["imitation_loss"] < first["imitation_loss"] * 0.5
+    assert 0.0 <= last["conformance"] <= 1.0 + 1e-6
+
+
+def test_near_ties_cost_almost_nothing_to_disagree_with():
+    """The reason for soft targets. A uniform policy pays the full KL against a
+    confident rule but next to nothing against a rule that cannot decide."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    torch.manual_seed(0)
+    network = build_network("linear", 6)
+    with torch.no_grad():
+        network.policy_head.weight.zero_()
+        network.policy_head.bias.zero_()  # exactly uniform policy
+
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1, entropy_coef=0.0, value_coef=0.0))
+
+    def imitation_loss(gap):
+        rollout = _rollout_with_rule_scores(gap=gap)
+        batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
+        _, diagnostics = ppo._losses(network, *batch)
+        return diagnostics["imitation_loss"]
+
+    confident = imitation_loss(gap=5.0)
+    near_tie = imitation_loss(gap=0.01)
+    assert near_tie < 0.1 * confident, f"near-tie loss {near_tie:.4f} vs confident {confident:.4f}"
+
+
+def test_soft_conformance_ceiling_is_one_even_where_the_rule_is_unsure():
+    """A policy that exactly matches the rule's distribution must score 1,
+    including at near-ties where the raw overlap would be far below 1."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    rollout = _rollout_with_rule_scores(gap=0.05)  # near-ties everywhere
+    temperature = 0.1
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=temperature))
+    network = build_network("linear", 6)
+    with torch.no_grad():
+        # logits = scores / temperature reproduces the target exactly.
+        network.policy_head.weight.zero_()
+        network.policy_head.bias.zero_()
+        for a in range(5):
+            network.policy_head.weight[a, a] = 0.05 / temperature  # scores = obs * gap(0.05)
+    batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
+    _, diagnostics = ppo._losses(network, *batch)
+    assert diagnostics["conformance"] == pytest.approx(1.0, abs=1e-3)
+    assert diagnostics["imitation_loss"] == pytest.approx(0.0, abs=1e-4)
+
+
+def test_zero_temperature_falls_back_to_hard_imitation():
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    rollout = _rollout_with_rule_scores()
+    network = build_network("linear", 6)
+    batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
+    soft = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1))
+    hard = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0))
+    _, d_soft = soft._losses(network, *batch)
+    _, d_hard = hard._losses(network, *batch)
+    assert d_hard["conformance"] == pytest.approx(d_hard["argmax_agreement"])
+    assert d_soft["imitation_loss"] != pytest.approx(d_hard["imitation_loss"])
+
+
+def test_soft_imitation_is_masked_to_acting_cells():
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    rollout = _rollout_with_rule_scores()
+    network = build_network("linear", 6)
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1))
+    batch = list(next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False)))
+    before = float(ppo.minibatch_loss(network, tuple(batch)))
+    scores = batch[8].clone()
+    idle = (~batch[1]).unsqueeze(1).expand_as(scores)  # per-step idle cells, all five actions
+    scores[idle] = torch.randn(int(idle.sum())) * 10
+    batch[8] = scores
+    after = float(ppo.minibatch_loss(network, tuple(batch)))
     assert before == pytest.approx(after)

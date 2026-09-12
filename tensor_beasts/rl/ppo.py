@@ -60,8 +60,8 @@ def iter_minibatches_with_value(
     grows a ``value`` output, delete this and use it.
 
     Yields:
-        (observation, acted, action, log_prob, value, advantage, ret, rule_action),
-        where rule_action is None if the rollout does not carry one.
+        (observation, acted, action, log_prob, value, advantage, ret, rule_action,
+        rule_scores), the last two None if the rollout does not carry them.
     """
     if shuffle:
         order = torch.randperm(rollout.steps, generator=generator)
@@ -78,6 +78,7 @@ def iter_minibatches_with_value(
             rollout.advantage[index],
             rollout.ret[index],
             rollout.rule_action[index] if rollout.rule_action is not None else None,
+            rollout.rule_scores[index].float() if rollout.rule_scores is not None else None,
         )
 
 
@@ -154,6 +155,16 @@ class PPOConfig:
     # so roughly 0.9 argmax agreement is the practical ceiling and a target
     # above it would keep the anchor engaged forever.
     imitation_target_conformance: float = 0.8
+    # Soft distillation. When the rollout carries the rule's per-action scores,
+    # the imitation target is softmax(scores / temperature) and the loss is the
+    # KL from that target to the policy. The temperature sets what counts as a
+    # confident rule decision: the rule's absolute score gaps have a median
+    # near 0.01, so 0.01 makes a typical decision a mild preference and a
+    # clear one sharp, while a near-tie becomes near-uniform and costs nothing
+    # to disagree with. That is the point: the rules are knife-edge, and hard
+    # argmax imitation spends its gradient on coin-flips. Set to 0 to fall back
+    # to hard imitation of the argmax.
+    imitation_temperature: float = 0.01
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
@@ -264,6 +275,7 @@ class PPO:
         advantage: torch.Tensor,
         ret: torch.Tensor,
         rule_action: Optional[torch.Tensor] = None,
+        rule_scores: Optional[torch.Tensor] = None,
     ):
         config = self.config
         logits, value = network(observation)
@@ -304,15 +316,32 @@ class PPO:
         # policy has drifted even when nothing is pulling it back.
         imitation_loss = torch.zeros((), device=loss.device)
         conformance = float("nan")
-        if rule_action is not None:
+        argmax_agreement = float("nan")
+        soft = rule_scores is not None and config.imitation_temperature > 0.0
+        if soft:
+            # Distill toward the rule's scoring regime rather than its outcome.
+            target = F.softmax(rule_scores / config.imitation_temperature, dim=1)
+            kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
+            imitation_loss = masked_mean(kl, mask)
+            with torch.no_grad():
+                # Conformance to the scoring regime: the Bhattacharyya
+                # coefficient between the two distributions. It is 1 exactly
+                # when they match, including where the rule is unsure, and 0
+                # when they share no support. (A first attempt normalized the
+                # overlap by the target's self-overlap, which can exceed 1.)
+                conformance = float(masked_mean((target * log_probs.exp()).sqrt().sum(dim=1), mask))
+        elif rule_action is not None:
             rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
             imitation_loss = -masked_mean(rule_log_prob, mask)
+            with torch.no_grad():
+                conformance = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
+        if rule_action is not None:
+            with torch.no_grad():
+                argmax_agreement = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
+        if soft or rule_action is not None:
             weight = self.imitation_weight()
             if weight > 0.0:
                 loss = loss + weight * imitation_loss
-            with torch.no_grad():
-                agrees = (logits.argmax(dim=1) == rule_action).float()
-                conformance = float(masked_mean(agrees, mask))
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
@@ -333,14 +362,16 @@ class PPO:
             "imitation_loss": float(imitation_loss.detach()),
             "imitation_weight": self.imitation_weight(),
             "conformance": conformance,
+            "argmax_agreement": argmax_agreement,
         }
         return loss, diagnostics
 
     def minibatch_loss(self, network: nn.Module, batch) -> torch.Tensor:
         """Loss for one :func:`iter_minibatches_with_value` tuple. For tests."""
-        observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action = batch
+        observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action, rule_scores = batch
         loss, _ = self._losses(
-            network, observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action
+            network, observation, acted, action, old_log_prob, old_value, advantage, ret,
+            rule_action, rule_scores,
         )
         return loss
 
@@ -388,7 +419,7 @@ class PPO:
             for batch in iter_minibatches_with_value(
                 rollout, config.minibatch_steps, shuffle=True, generator=generator
             ):
-                observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action = batch
+                observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action, rule_scores = batch
                 agent_steps = float(acted.sum())
                 if agent_steps == 0:
                     # No individuals in these timesteps. Nothing to learn from,
@@ -396,7 +427,8 @@ class PPO:
                     continue
 
                 loss, diagnostics = self._losses(
-                    network, observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action
+                    network, observation, acted, action, old_log_prob, old_value, advantage, ret,
+                    rule_action, rule_scores,
                 )
 
                 optimizer.zero_grad(set_to_none=True)

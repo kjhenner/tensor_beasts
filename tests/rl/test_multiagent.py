@@ -285,3 +285,23 @@ def test_a_small_conv_can_fit_the_rule_action():
         m = masks[20:]
         agreement = float((logits.argmax(1)[m] == labels[20:][m]).float().mean())
     assert agreement > 0.8, f"conv fit of the rule action reached only {agreement:.3f}"
+
+
+def test_rule_scores_reproduce_the_rule_action():
+    """The scores the learner is distilled toward must be the rule's own
+    scores: their argmax has to agree with the action the rule actually takes,
+    at every acting cell, on both step paths. Ties are the only allowed
+    exception and they are essentially absent in practice."""
+    env = build()
+    env.reset(seed=0)
+    for _ in range(10):
+        env.world.update()
+    for stepper in (lambda: env.step(torch.randint(0, 5, SIZE)), env.rule_based_step):
+        batch = stepper()
+        assert batch.rule_scores is not None
+        assert batch.rule_scores.shape == (5, *SIZE)
+        acting = batch.acted
+        predicted = batch.rule_scores.argmax(dim=0)[acting]
+        actual = batch.rule_action[acting]
+        agreement = float((predicted == actual).float().mean())
+        assert agreement > 0.98, f"score argmax agrees with the rule action only {agreement:.3f}"

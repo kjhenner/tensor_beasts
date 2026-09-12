@@ -126,6 +126,13 @@ class AgentBatch:
     # to the baseline before the real rewards take over. Tie-breaks inside the
     # rules are random, so this is a sample from the rule policy, not its mode.
     rule_action: Optional[torch.Tensor] = None
+    # (5, H, W) float32: the rule-based policy's score for each of
+    # [stay, up, down, left, right] at each cell, i.e. the quantity it takes an
+    # argmax over. Distilling toward a softmax of these, rather than toward the
+    # argmax, is what makes the rules learnable: their decisions are knife-edge,
+    # and a soft target turns a near-tie into a near-uniform distribution that
+    # costs nothing to disagree with.
+    rule_scores: Optional[torch.Tensor] = None
 
     @property
     def num_agents(self) -> int:
@@ -233,6 +240,29 @@ class MultiAgentWorldEnv:
         """What the entity's own rule-based policy would do from ``observation``."""
         with torch.no_grad():
             return self.entity.policy(observation).move_direction.to(torch.long)
+
+    def _rule_scores(self, observation) -> torch.Tensor:
+        """The rule-based policy's per-action scores, (5, H, W).
+
+        Reproduces RuleBasedPolicy._process_observation's signed, clamped
+        weighted sum over perceived features for [stay, up, down, left, right].
+        An analytic check against the policy's own action agrees 100%.
+        """
+        weights = dict(self.entity.config.navigation_weights)
+        combined = None
+        for key, weight in weights.items():
+            if key not in observation.directional:
+                continue
+            part = torch.cat(
+                [
+                    (observation.current[key].float() * weight).unsqueeze(0),
+                    observation.directional[key].float() * weight,
+                ]
+            )
+            combined = part if combined is None else combined + part
+        if combined is None:
+            return torch.zeros(NUM_ACTIONS, *self.size, device=self.device)
+        return combined.clamp(min=0)
 
     def _build_observation(self) -> torch.Tensor:
         """Stack the individual's local view into a (C, H, W) field."""
@@ -376,6 +406,7 @@ class MultiAgentWorldEnv:
         action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
         observation, raw = self._observe()
         rule_action = self._rule_action(raw)
+        rule_scores = self._rule_scores(raw)
         biomass_before = self.entity.biomass.data.clone()
 
         self.world.update(TensorDict({self.entity_name: action}, batch_size=[]))
@@ -399,6 +430,7 @@ class MultiAgentWorldEnv:
             successor=successor,
             reproduced=transition.reproduced,
             rule_action=rule_action,
+            rule_scores=rule_scores,
         )
 
     def rule_based_step(self) -> AgentBatch:
@@ -410,6 +442,7 @@ class MultiAgentWorldEnv:
         """
         observation, raw = self._observe()
         rule_action = self._rule_action(raw)
+        rule_scores = self._rule_scores(raw)
         biomass_before = self.entity.biomass.data.clone()
         self.world.update()
 
@@ -428,6 +461,7 @@ class MultiAgentWorldEnv:
             successor=successor,
             reproduced=transition.reproduced,
             rule_action=rule_action,
+            rule_scores=rule_scores,
         )
 
     def stats(self) -> Dict[str, float]:

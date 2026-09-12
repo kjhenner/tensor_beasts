@@ -63,6 +63,8 @@ class Rollout:
     # (T, H, W) int64, the rule-based policy's direction at each cell, or None
     # if the environment did not supply it. Used by the imitation term.
     rule_action: Optional[torch.Tensor] = None
+    # (T, 5, H, W) float32, the rule's per-action scores, or None.
+    rule_scores: Optional[torch.Tensor] = None
 
     @property
     def steps(self) -> int:
@@ -87,6 +89,7 @@ class RolloutBuffer:
         self._done: List[torch.Tensor] = []
         self._successor: List[torch.Tensor] = []
         self._rule_action: List[torch.Tensor] = []
+        self._rule_scores: List[torch.Tensor] = []
 
     def __len__(self) -> int:
         return len(self._observation)
@@ -107,6 +110,8 @@ class RolloutBuffer:
         self._successor.append(batch.successor.detach())
         if batch.rule_action is not None:
             self._rule_action.append(batch.rule_action.detach())
+        if batch.rule_scores is not None:
+            self._rule_scores.append(batch.rule_scores.detach().to(torch.float16))
 
     def build(self) -> Rollout:
         return Rollout(
@@ -123,6 +128,11 @@ class RolloutBuffer:
                 if len(self._rule_action) == len(self._successor)
                 else None
             ),
+            rule_scores=(
+                torch.stack(self._rule_scores)
+                if len(self._rule_scores) == len(self._successor)
+                else None
+            ),
         )
 
     def clear(self) -> None:
@@ -136,6 +146,7 @@ class RolloutBuffer:
             self._done,
             self._successor,
             self._rule_action,
+            self._rule_scores,
         ):
             store.clear()
 
