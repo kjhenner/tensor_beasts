@@ -111,6 +111,12 @@ survived:
 | Random | 309,589 | 1,475 |
 | Stay put | 60,539 | 0 by step 202 |
 
+A learned policy has beaten it. A `conv` network trained at 256 with the
+rule-based policy as a fading anchor scores **1.331x** the baseline at 512 on
+three paired seeds over 400 steps, sustaining a third more herbivores by
+reproducing 62% more. See `planning/04-reinforcement-learning.md` for the
+caveats, chiefly that 400 steps is short against the ecology's cycles.
+
 **Size matters more than anything else here.** Below roughly 256 the predator
 population goes extinct and the three-species dynamic degenerates, so a small
 world is a different problem rather than a cheap version of this one. Use 256

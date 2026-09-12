@@ -342,6 +342,37 @@ refining it from there. In the actor-critic the logits are the natural home
 for that prior; a value-based learner with the rule as its initial Q is the
 obvious follow-on once the actor-critic path has a result.
 
+### First result that beats the baseline
+
+The hard-anchored run on the fixed observation (`conv`, 256 world, imitation
+weight 1.0 cross-fading to zero at 0.8 conformance, foraging reward 0.1, two
+epochs, minibatch 4) reached 1.075x the rule-based policy at step 1664 on
+paired seeds at 256. Because the network is fully convolutional, the same
+checkpoint can be scored at 512 without retraining. Three paired seeds, 400
+steps each:
+
+| Policy | Survived agent-steps | Reproductions | Mean population | Episode length |
+|---|---|---|---|---|
+| Learned | 537,030 | 4,175 | 1,353 | 85.2 |
+| Rule-based | 403,426 | 2,575 | 1,015 | 88.3 |
+
+**1.331x on herbivore-steps survived, at the size where the ecology is valid.**
+
+How it wins is more interesting than that it wins. Individual lifespans are
+marginally shorter under the learned policy, 85 steps against 88, but it
+reproduces 62% more, so the population it sustains is a third larger. It beat
+the rules on the metric the goal names by trading a little longevity for a lot
+of offspring, which is exactly what a survival-plus-reproduction reward should
+select for.
+
+Caveats, in order of weight. The evaluation window is 400 steps against boom
+and bust cycles of roughly 3000, so this is a measurement of the early cycle
+and a longer window is the next confirmation. Three seeds. The policy was
+trained at 256, where predators go extinct, and evaluated at 512, where they
+do not; that it transferred is encouraging but a policy trained at 512 may do
+better still. And this used hard argmax imitation; the soft distillation
+committed alongside it has not yet been run head to head.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
