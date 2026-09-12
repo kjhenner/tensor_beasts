@@ -1,3 +1,16 @@
+"""DEPRECATED. Does not run against the current API.
+
+Builds its environment with a `world_cfg` keyword that no longer exists, and depends on MaskedDQNLoss, which needs a 'mask' observation key the
+current environment does not publish. It also wants hydra configs that are
+not in the repository.
+
+The supported path is per-individual reinforcement learning:
+``tensor_beasts/rl/multiagent.py`` for the environment and the trainer under
+``tensor_beasts/rl/`` for the algorithms. This file is kept only as a reference
+for anyone reviving the approach, and should be rewritten against the current
+environment or deleted rather than patched.
+"""
+
 import tempfile
 import time
 import copy

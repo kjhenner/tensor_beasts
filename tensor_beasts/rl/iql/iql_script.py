@@ -1,3 +1,15 @@
+"""DEPRECATED. Does not run against the current API.
+
+Generic torchrl and D4RL boilerplate that never references the
+tensor-beasts environment at all. It is unrelated to this project.
+
+The supported path is per-individual reinforcement learning:
+``tensor_beasts/rl/multiagent.py`` for the environment and the trainer under
+``tensor_beasts/rl/`` for the algorithms. This file is kept only as a reference
+for anyone reviving the approach, and should be rewritten against the current
+environment or deleted rather than patched.
+"""
+
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 #
 # This source code is licensed under the MIT license found in the

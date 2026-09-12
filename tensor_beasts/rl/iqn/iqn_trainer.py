@@ -1,3 +1,16 @@
+"""DEPRECATED. Does not run against the current API.
+
+Constructs World with the pre-refactor signature and imports
+`tensor_beasts.display_manager`, a module path that no longer exists. It
+fails at import.
+
+The supported path is per-individual reinforcement learning:
+``tensor_beasts/rl/multiagent.py`` for the environment and the trainer under
+``tensor_beasts/rl/`` for the algorithms. This file is kept only as a reference
+for anyone reviving the approach, and should be rewritten against the current
+environment or deleted rather than patched.
+"""
+
 import time
 
 import torch
