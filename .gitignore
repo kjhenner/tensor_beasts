@@ -83,3 +83,6 @@ checkpoints/
 
 # Hydra outputs
 multirun/
+
+# Claude Code agent worktrees
+.claude/worktrees/

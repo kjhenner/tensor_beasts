@@ -8,6 +8,7 @@ This directory contains planning and status documents for major feature developm
 |---------|--------|-----------|
 | Centralized Animal Policy | Planning | [01-centralized-policy.md](./01-centralized-policy.md), [01a-policy-implementation-detail.md](./01a-policy-implementation-detail.md) |
 | Genetic Algorithm System | Planning | [02-genetic-algorithm.md](./02-genetic-algorithm.md) |
+| Performance and RL foundation | In progress | [03-performance-and-rl-foundation.md](./03-performance-and-rl-foundation.md) |
 
 ## Overview
 
