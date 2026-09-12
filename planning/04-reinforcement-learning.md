@@ -486,6 +486,38 @@ net change. Then burning is neutral to the foraging term and pays off only
 through what energy buys, movement, which is the trade the lever exists to
 make.
 
+### Two levers at 512, and the corrected run
+
+The first two-lever checkpoint, the one whose throttle collapsed to basal and
+which evaluated at parity on the 256 world, was scored at 512 under the same
+three seeds and 400-step window as every other checkpoint:
+
+| Checkpoint | Survived | Reproductions | Population | Lifespan | Ratio |
+|---|---|---|---|---|---|
+| Direction-only winner | 537,030 | 4,175 | 1,353 | 85.2 | 1.331x |
+| Two levers, throttle at basal | 560,502 | 4,613 | 1,413 | 80.8 | **1.389x** |
+| Rule-based | 403,426 | 2,575 | 1,015 | 88.3 | 1.000x |
+
+The best 512 number so far comes from a policy whose throttle sits at basal
+almost always, against a rule whose mean rate is 2.16 on a basal of 2. So
+"run cold" is not the artefact it looked like at 256; at the valid size it is
+a better policy than the rule's, and the rule-based metabolism appears to burn
+more than it needs. That is an ecological finding as much as a learning one,
+and it should be checked the boring way, by evaluating the direction-only
+winner with the throttle pinned to basal.
+
+The corrected run, eaten-based reward and the throttle anchor off, evaluated
+at 0.940x at step 1664 on the 256 world. Freed of the anchor the metabolic
+head stayed near uniform, entropy 1.05 to 1.39 against a maximum of 1.39, and
+drifted slowly cold, mean level 1.54 down to 0.64 by the end. Nothing in the
+reward taught it to run hot, because nothing in the reward values energy
+except through movement it did not learn to need. That run has not been
+scored at 512.
+
+Seed variance of the direction-only recipe at 256, step 1664: 1.075x, 1.041x,
+0.969x, 0.963x. The 256
+edge is small and partly the draw; the 512 results are the ones to trust.
+
 ## Design: per-individual memory
 
 The repo owner's suggestion: give each individual a small vector it can read
