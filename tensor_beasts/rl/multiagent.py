@@ -40,10 +40,11 @@ mapping is one-to-one in practice as well as in intent.
 Reward
 ------
 
-Survival plus reproduction, both per individual:
+Three terms, all per individual:
 
 * ``survival_reward`` for each step the individual is still alive afterwards.
 * ``reproduction_reward`` when it divides.
+* ``foraging_reward`` times the change in its own biomass across the step.
 * Its episode ends when it dies.
 
 The metric this is a surrogate for is the one the project actually cares about,
@@ -51,6 +52,16 @@ total herbivore-steps survived, which is what ``evaluate_policy.py`` reports for
 the rule-based baseline. Survival reward tracks it directly; reproduction reward
 credits an individual for the future population it creates, which survival
 reward alone would attribute entirely to the offspring.
+
+Foraging reward exists because the first two are nearly useless as a learning
+signal on their own. Herbivores survive about 99.4% of steps, so the per-step
+reward is 1.0 with a standard deviation of 0.076: almost all of an individual's
+return is fixed no matter what it does, and the part that responds to its
+choices is buried under that. Reproduction is rarer still, around 0.7% of
+agent-steps. Biomass change, by contrast, responds immediately and directly to
+whether the individual moved somewhere with food. It is off by default, because
+turning it on is reward shaping and changes what is being optimized; what it
+must never change is the *evaluation*, which stays herbivore-steps survived.
 """
 
 from dataclasses import dataclass
@@ -122,6 +133,10 @@ class MultiAgentWorldEnv:
         entity_name: Which entity the policy controls.
         survival_reward: Reward per step an individual remains alive.
         reproduction_reward: Reward for dividing.
+        foraging_reward: Reward per unit of biomass gained across the step,
+            measured at the individual's own new cell. Dense and strongly
+            action-dependent, unlike the other two. Zero by default because it
+            is reward shaping; see the module docstring.
         device: Torch device for the simulation.
     """
 
@@ -132,12 +147,14 @@ class MultiAgentWorldEnv:
         entity_name: str = DEFAULT_ENTITY,
         survival_reward: float = 1.0,
         reproduction_reward: float = 10.0,
+        foraging_reward: float = 0.0,
         device: Optional[str] = None,
     ):
         self.config_path = config_path
         self.entity_name = entity_name
         self.survival_reward = survival_reward
         self.reproduction_reward = reproduction_reward
+        self.foraging_reward = foraging_reward
         self.device = torch.device(device) if device is not None else torch.get_default_device()
 
         config = load_config(config_path)
@@ -235,6 +252,39 @@ class MultiAgentWorldEnv:
     # ------------------------------------------------------------------
     # Interaction
     # ------------------------------------------------------------------
+    def _reward(self, transition, biomass_before: torch.Tensor):
+        """Reward, liveness and successor for one completed step.
+
+        Shared by :meth:`step` and :meth:`rule_based_step` so the learned policy
+        and the baseline are scored by exactly the same rules. If these ever
+        drift apart the comparison stops meaning anything.
+        """
+        acted = transition.acted
+        successor = transition.successor.clamp(min=0)
+
+        entity = self.entity
+        biomass_flat = entity.biomass.data.reshape(-1)
+        # An individual is alive afterwards if the cell it moved into holds
+        # enough biomass to survive. Same predicate the simulation applies at
+        # the top of the next step.
+        alive_after = (biomass_flat[successor] >= entity.config.survival_threshold) & acted
+
+        reward = (
+            alive_after.float() * self.survival_reward
+            + transition.reproduced.float() * self.reproduction_reward
+        )
+
+        if self.foraging_reward:
+            # Follow the individual: it started at this cell and its biomass now
+            # lives at its successor cell, so the difference is its own change,
+            # not the change of whatever is standing here afterwards.
+            gained = (
+                biomass_flat[successor].reshape(*self.size).float() - biomass_before.float()
+            )
+            reward = reward + alive_after.float() * gained * self.foraging_reward
+
+        return reward, alive_after, successor, acted
+
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Restart the ecology. Returns (observation, acted mask).
 
@@ -259,6 +309,7 @@ class MultiAgentWorldEnv:
         """
         action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
         observation = self._build_observation()
+        biomass_before = self.entity.biomass.data.clone()
 
         self.world.update(TensorDict({self.entity_name: action}, batch_size=[]))
 
@@ -269,22 +320,7 @@ class MultiAgentWorldEnv:
                 "should have been enabled by this environment's constructor."
             )
 
-        acted = transition.acted
-        successor = transition.successor.clamp(min=0)
-
-        # An individual is alive afterwards if the cell it moved into holds
-        # enough biomass to survive. This is the same predicate the simulation
-        # applies at the top of the next step.
-        entity = self.entity
-        biomass_flat = entity.biomass.data.reshape(-1)
-        alive_after = (
-            biomass_flat[successor] >= entity.config.survival_threshold
-        ) & acted
-
-        reward = (
-            alive_after.float() * self.survival_reward
-            + transition.reproduced.float() * self.reproduction_reward
-        )
+        reward, alive_after, successor, acted = self._reward(transition, biomass_before)
         done = acted & ~alive_after
 
         return AgentBatch(
@@ -305,20 +341,11 @@ class MultiAgentWorldEnv:
         :meth:`step`, differing only in where the movement decision came from.
         """
         observation = self._build_observation()
+        biomass_before = self.entity.biomass.data.clone()
         self.world.update()
 
         transition = self.entity.last_transition
-        acted = transition.acted
-        successor = transition.successor.clamp(min=0)
-        entity = self.entity
-        biomass_flat = entity.biomass.data.reshape(-1)
-        alive_after = (
-            biomass_flat[successor] >= entity.config.survival_threshold
-        ) & acted
-        reward = (
-            alive_after.float() * self.survival_reward
-            + transition.reproduced.float() * self.reproduction_reward
-        )
+        reward, alive_after, successor, acted = self._reward(transition, biomass_before)
 
         # The simulation's chosen direction is not reported back, so record
         # "stay" rather than inventing one. Callers that need real actions from

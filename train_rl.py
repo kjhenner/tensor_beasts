@@ -47,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
     world.add_argument("--survival-reward", type=float, default=None)
     world.add_argument("--reproduction-reward", type=float, default=None)
     world.add_argument(
+        "--foraging-reward",
+        type=float,
+        default=None,
+        help=(
+            "Reward per unit of biomass gained per step. Dense and strongly "
+            "action-dependent, unlike survival, which sits near 99.4% per step "
+            "and so carries almost no signal. Reward shaping: it changes what is "
+            "optimized, never what is evaluated."
+        ),
+    )
+    world.add_argument(
         "--no-normalize-values",
         dest="normalize_values",
         action="store_const",
@@ -121,6 +132,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "entity": args.entity,
         "survival_reward": args.survival_reward,
         "reproduction_reward": args.reproduction_reward,
+        "foraging_reward": args.foraging_reward,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
         "device": args.device,

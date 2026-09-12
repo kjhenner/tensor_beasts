@@ -56,6 +56,7 @@ SEARCH_SPACE: Dict[str, List[Any]] = {
     "gae_lambda": [0.9, 0.95, 0.99],
     "epochs": [2, 4, 8],
     "reproduction_reward": [0.0, 3.0, 10.0, 30.0],
+    "foraging_reward": [0.0, 0.1, 0.5, 2.0],
     "segment_steps": [32, 64, 128],
 }
 
@@ -74,6 +75,7 @@ TRAINER_KEYS = {
     "segment_steps",
     "reproduction_reward",
     "survival_reward",
+    "foraging_reward",
     "total_world_steps",
     "normalize_values",
 }

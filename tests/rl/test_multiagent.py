@@ -182,3 +182,45 @@ def test_unknown_entity_is_rejected():
 
     with pytest.raises(ValueError, match="not in"):
         MultiAgentWorldEnv(size=SIZE, entity_name="Dragon")
+
+
+def test_foraging_reward_tracks_the_individuals_own_biomass_change():
+    """The dense term must follow the individual, not the cell it left.
+
+    A cell-indexed version would credit an individual with the biomass of
+    whichever animal moved in behind it, which is the same class of mistake the
+    advantage recursion has to avoid.
+    """
+    env = build(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0)
+    env.reset(seed=0)
+
+    for _ in range(12):
+        entity = env.entity
+        before = entity.biomass.data.clone()
+        batch = env.step(torch.randint(0, 5, SIZE))
+
+        after_flat = entity.biomass.data.reshape(-1)
+        survived = batch.acted & ~batch.done
+        if not bool(survived.any()):
+            continue
+
+        expected = (
+            after_flat[batch.successor].reshape(*SIZE).float() - before.float()
+        )[survived]
+        assert torch.allclose(batch.reward[survived], expected, atol=1e-4)
+
+
+def test_foraging_reward_is_off_by_default():
+    """It is reward shaping, so it must be opt-in."""
+    env = build()
+    assert env.foraging_reward == 0.0
+
+    env.reset(seed=0)
+    survivors = 0
+    total = 0.0
+    for _ in range(8):
+        batch = env.step(torch.randint(0, 5, SIZE))
+        survivors += int((batch.acted & ~batch.done).sum())
+        total += float(batch.reward.sum())
+    # With the default weights, reward is survival plus 10 per reproduction.
+    assert total >= survivors, "default reward should not include a biomass term"

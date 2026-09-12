@@ -58,6 +58,10 @@ class TrainerConfig:
             so that the summed reward is literally herbivore-steps survived,
             the number ``evaluate_policy.py`` reports.
         reproduction_reward: Reward for dividing.
+        foraging_reward: Reward per unit of biomass an individual gains in a
+            step. Dense and action-dependent, unlike survival, which is nearly
+            constant at 99.4% per step. Zero by default because it is reward
+            shaping; evaluation stays herbivore-steps survived either way.
         arch: Network name from ``tensor_beasts.rl.networks.ARCHITECTURES``.
         arch_kwargs: Extra constructor arguments for that network.
         device: "auto", "cpu", "mps", "cuda".
@@ -87,6 +91,7 @@ class TrainerConfig:
     entity: str = "Herbivore"
     survival_reward: float = 1.0
     reproduction_reward: float = 10.0
+    foraging_reward: float = 0.0
 
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
@@ -299,6 +304,7 @@ class Trainer:
             entity_name=config.entity,
             survival_reward=config.survival_reward,
             reproduction_reward=config.reproduction_reward,
+            foraging_reward=config.foraging_reward,
             device=str(self.device),
         )
 

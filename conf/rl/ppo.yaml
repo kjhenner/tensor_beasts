@@ -18,6 +18,11 @@ trainer:
   # survived", which is the number evaluate_policy.py reports for the baseline.
   survival_reward: 1.0
   reproduction_reward: 10.0
+  # Dense biomass-change reward. Off by default: it is reward shaping. Turn it
+  # on if the policy will not move, which is the failure mode survival reward
+  # produces, since herbivores survive about 99.4% of steps and the per-step
+  # reward is therefore nearly constant.
+  foraging_reward: 0.0
 
   arch: conv
   arch_kwargs: {}
