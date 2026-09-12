@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional, Union, List, Dict, Callable, Tuple
 
 import torch
@@ -16,8 +17,38 @@ from tensor_beasts.features.animal_features import IdFeature, OffspringCount, Bi
 from tensor_beasts.util import safe_sub, safe_add
 
 
+@dataclass
+class TransitionInfo:
+    """Where each acting individual ended up during one step.
+
+    This is what makes per-individual reinforcement learning trajectories
+    possible. An individual is identified by the cell it occupied when it chose
+    its action; ``successor`` says which cell that same individual occupies once
+    the step is over, so a learner can follow it through time and bootstrap a
+    value from the right place.
+
+    Held as an attribute rather than written into the world TensorDict, so that
+    turning tracking on cannot change simulation state or the golden hashes.
+
+    Attributes:
+        acted: (H, W) bool, cells that held an individual which chose an action.
+        successor: (H, W) int64, flat index of that individual's cell once the
+            step is over, or -1 where nothing acted. An individual that stayed
+            put, or whose move was blocked, is its own successor.
+        reproduced: (H, W) bool, indexed by the cell the individual acted from,
+            true where it divided this step.
+    """
+
+    acted: torch.Tensor
+    successor: torch.Tensor
+    reproduced: torch.Tensor
+
+
 @register_entity
 class Animal(Entity):
+    # Most recent TransitionInfo, or None when track_transitions is off.
+    # Deliberately unannotated: EntityMeta scans annotations to collect features.
+    last_transition = None
     energy: Energy
     biomass: Biomass
     gradient_ema: GradientEMA
@@ -92,6 +123,13 @@ class Animal(Entity):
             "mutation_scale": 0.1,    # Magnitude of parameter mutations
             "log_interval": 0,        # Log genetic status every N steps (0 = disabled)
         },
+
+        # Reinforcement learning support
+        # Records, each step, which individuals acted, where each ended up, and
+        # which reproduced. Needed to stitch per-individual trajectories: the id
+        # feature cannot do it, because offspring draw their id from the world's
+        # uint8 random field, so only 256 distinct ids ever exist.
+        "track_transitions": False,
 
         # Debugging
         "verbose": False,  # Log metabolism details per step
@@ -366,6 +404,7 @@ class Animal(Entity):
             move_probability=action.move_probability,
             verbose=verbose,
             positions=positions if verbose else None,
+            acting_mask=alive if self.config.track_transitions else None,
         )
 
         # After movement, find new positions for logging
@@ -471,6 +510,7 @@ class Animal(Entity):
         move_probability: torch.Tensor,
         verbose: bool = False,
         positions: Optional[List[Tuple[int, int]]] = None,
+        acting_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Execute movement and reproduction.
@@ -480,6 +520,8 @@ class Animal(Entity):
             move_probability: (H, W) float - probability of attempting move
             verbose: Whether to log movement details
             positions: Positions to log (if verbose)
+            acting_mask: (H, W) bool - individuals that chose an action this
+                step. When given, a TransitionInfo is recorded on the entity.
 
         Returns:
             did_move: (H, W) bool - which cells actually moved
@@ -500,6 +542,11 @@ class Animal(Entity):
 
         # Movement cost (flat cost per move)
         movement_cost = torch.full_like(energy, self.config.base_movement_cost)
+
+        # Reproduction is decided inside perform_move against biomass as it
+        # stands right now, after metabolism and before eating, so capture it
+        # here to reconstruct that same decision.
+        biomass_at_move = biomass.clone() if acting_mask is not None else None
 
         # Prepare offspring slot assignment function
         offspring_slot_fn = self._make_offspring_slot_fn()
@@ -533,7 +580,43 @@ class Animal(Entity):
             move_cost=movement_cost,
         )
 
+        if acting_mask is not None:
+            self._record_transition(direction, did_move, acting_mask, biomass_at_move)
+
         return did_move
+
+    def _record_transition(
+        self,
+        direction: torch.Tensor,
+        did_move: torch.Tensor,
+        acting_mask: torch.Tensor,
+        biomass_at_move: torch.Tensor,
+    ) -> None:
+        """Record where each acting individual ended up. See TransitionInfo.
+
+        Direction encoding matches pad_matrix: 1 moves to the row above, 2 to
+        the row below, 3 one column left, 4 one column right.
+        """
+        height, width = did_move.shape[-2:]
+        flat = torch.arange(height * width, device=did_move.device).reshape(height, width)
+
+        moved = did_move.bool()
+        chosen = direction.reshape(height, width).long()
+        successor = flat.clone()
+        for code, offset in ((1, -width), (2, width), (3, -1), (4, 1)):
+            successor = torch.where(moved & (chosen == code), flat + offset, successor)
+        # Moves off the edge are already blocked by the clearance check, which
+        # treats the boundary as occupied; clamp anyway so a bad index can never
+        # escape into a gather.
+        successor = successor.clamp_(0, height * width - 1)
+
+        reproduced = moved & (biomass_at_move > self.config.reproduction_threshold)
+
+        self.last_transition = TransitionInfo(
+            acted=acting_mask.clone(),
+            successor=torch.where(acting_mask, successor, torch.full_like(successor, -1)),
+            reproduced=reproduced & acting_mask,
+        )
 
     def _make_offspring_slot_fn(self) -> Callable:
         """

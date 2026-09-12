@@ -1,0 +1,345 @@
+"""Per-individual reinforcement learning over a tensor-beasts world.
+
+The framing
+-----------
+
+Every living herbivore is its own agent. They all share one set of policy
+weights, they each get their own reward, and each one's episode runs from birth
+to death. This is parameter-sharing multi-agent reinforcement learning, and it
+is the framing the simulation was already built for:
+
+* The observation each individual receives is local. Nobody sees the global map.
+* The rule-based policy is already a shared, translation-equivariant function
+  from that local observation to a direction. In substance it is a linear model:
+  navigation weights dotted against local scent gradients. A convolutional
+  network over the same inputs can represent it exactly, so a learned policy
+  that loses to it lost on optimization rather than on expressiveness.
+* Because the policy is shared and the observation is spatially laid out, every
+  agent's action comes from a single convolutional forward pass over the grid.
+  Treating individuals as separate agents therefore costs nothing at runtime
+  compared to treating the world as one controller. Only the reward and the
+  trajectory bookkeeping differ, and those are the parts that decide whether
+  learning works at all.
+
+What this module does not do is pretend the agents are independent. They eat the
+same plants and they are each other's scent field, so every agent's environment
+shifts as the shared policy changes. That non-stationarity is inherent to an
+ecology and is the most likely source of training instability.
+
+Identity
+--------
+
+Following an individual through time needs identity, and the simulation's ``id``
+feature cannot provide it: offspring draw their id from the world's uint8 random
+field, so only 256 distinct ids exist across thousands of animals. Instead the
+``Animal`` entity records a :class:`~tensor_beasts.entities.animal.TransitionInfo`
+each step, giving the cell each acting individual moved to. Measured over 55,000
+agent-steps at 256x256, no two individuals ever share a successor cell, so the
+mapping is one-to-one in practice as well as in intent.
+
+Reward
+------
+
+Survival plus reproduction, both per individual:
+
+* ``survival_reward`` for each step the individual is still alive afterwards.
+* ``reproduction_reward`` when it divides.
+* Its episode ends when it dies.
+
+The metric this is a surrogate for is the one the project actually cares about,
+total herbivore-steps survived, which is what ``evaluate_policy.py`` reports for
+the rule-based baseline. Survival reward tracks it directly; reproduction reward
+credits an individual for the future population it creates, which survival
+reward alone would attribute entirely to the offspring.
+"""
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
+import torch
+from tensordict import TensorDict
+
+from tensor_beasts.config import load_config
+from tensor_beasts.observations import get_observation
+from tensor_beasts.world import World
+
+# Direction encoding shared with the simulation.
+NUM_ACTIONS = 5
+DIRECTION_NAMES = ("stay", "up", "down", "left", "right")
+
+DEFAULT_CONFIG = "conf/basic_config.yaml"
+DEFAULT_ENTITY = "Herbivore"
+
+
+@dataclass
+class AgentBatch:
+    """One step of per-individual transitions, kept in grid layout.
+
+    Every field is indexed by the cell an individual acted from, so they line up
+    with each other and with the observation. ``acted`` selects the entries that
+    refer to a real individual; everything else is padding and must be masked
+    out before it reaches a loss.
+
+    Attributes:
+        observation: (C, H, W) float32, the field the policy reads.
+        acted: (H, W) bool, cells holding an individual that chose an action.
+        action: (H, W) int64, the direction each one chose.
+        reward: (H, W) float32.
+        done: (H, W) bool, true where the individual died during this step.
+        successor: (H, W) int64, flat index of the cell that individual occupies
+            next, for bootstrapping a value from the right place. Meaningless
+            where ``done``.
+        reproduced: (H, W) bool.
+    """
+
+    observation: torch.Tensor
+    acted: torch.Tensor
+    action: torch.Tensor
+    reward: torch.Tensor
+    done: torch.Tensor
+    successor: torch.Tensor
+    reproduced: torch.Tensor
+
+    @property
+    def num_agents(self) -> int:
+        return int(self.acted.sum())
+
+
+class MultiAgentWorldEnv:
+    """A tensor-beasts world exposed as many individuals sharing one policy.
+
+    Unlike a Gymnasium environment this has no global episode. The world is a
+    persistent ecology that runs indefinitely; episodes belong to individuals,
+    who are born and die inside it. A learner collects fixed-length segments of
+    world time and reads per-individual episode boundaries out of ``done``.
+
+    Args:
+        config_path: Simulation config to load.
+        size: Optional (height, width) override. The ecology is strongly
+            size-dependent: below roughly 256 the predator population collapses
+            and the three-species dynamic degenerates, so prefer 512 for
+            anything whose result is meant to mean something.
+        entity_name: Which entity the policy controls.
+        survival_reward: Reward per step an individual remains alive.
+        reproduction_reward: Reward for dividing.
+        device: Torch device for the simulation.
+    """
+
+    def __init__(
+        self,
+        config_path: str = DEFAULT_CONFIG,
+        size: Optional[Tuple[int, int]] = None,
+        entity_name: str = DEFAULT_ENTITY,
+        survival_reward: float = 1.0,
+        reproduction_reward: float = 10.0,
+        device: Optional[str] = None,
+    ):
+        self.config_path = config_path
+        self.entity_name = entity_name
+        self.survival_reward = survival_reward
+        self.reproduction_reward = reproduction_reward
+        self.device = torch.device(device) if device is not None else torch.get_default_device()
+
+        config = load_config(config_path)
+        if size is not None:
+            config.world.size = list(size)
+        self.world_config = config.world
+        self.size: Tuple[int, int] = tuple(config.world.size)
+
+        if entity_name not in config.world.entities:
+            raise ValueError(
+                f"Entity {entity_name!r} is not in {config_path}. "
+                f"Available: {sorted(config.world.entities)}"
+            )
+        # Transition tracking is what makes per-individual trajectories possible.
+        config.world.entities[entity_name].track_transitions = True
+
+        self.world = World(self.world_config)
+        self.world.initialize()
+
+        self._flat_index = torch.arange(
+            self.size[0] * self.size[1], device=self.device
+        ).reshape(*self.size)
+
+        self.observation_channels = self._build_observation().shape[0]
+        self.channel_names = self._channel_names()
+
+    # ------------------------------------------------------------------
+    # Entity access
+    # ------------------------------------------------------------------
+    @property
+    def entity(self):
+        return self.world.entity_dict[self.entity_name]
+
+    def _alive(self) -> torch.Tensor:
+        entity = self.entity
+        return entity.biomass.data >= entity.config.survival_threshold
+
+    def population(self) -> int:
+        return int(self._alive().sum())
+
+    # ------------------------------------------------------------------
+    # Observation
+    # ------------------------------------------------------------------
+    def _perception(self) -> List[Tuple[Tuple[str, str], int]]:
+        return [(p.key, p.kernel_size) for p in self.entity.config.perception]
+
+    def _channel_names(self) -> List[str]:
+        names: List[str] = []
+        for key, _ in self._perception():
+            label = ":".join(key)
+            names.append(f"{label}/here")
+            names.extend(f"{label}/{d}" for d in ("up", "down", "left", "right"))
+        names.extend(["self/energy", "self/biomass", "self/gradient_ema", "self/alive"])
+        return names
+
+    def _build_observation(self) -> torch.Tensor:
+        """Stack the individual's local view into a (C, H, W) field.
+
+        Each perceived feature contributes its value at the individual's own
+        cell plus the four neighbouring values, which are exactly the inputs the
+        rule-based policy uses. The raw neighbour values are included rather
+        than only a summary so a convolutional policy starts from the same
+        information the baseline has, and own state is appended because
+        metabolism and movement both depend on it.
+
+        Values are scaled to roughly the unit interval. Scent and energy are
+        uint8-derived, biomass likewise; gradient EMA is already small.
+        """
+        entity = self.entity
+        observation = get_observation(
+            td=self.world.td,
+            perception=self._perception(),
+            energy=entity.energy.data,
+            biomass=entity.biomass.data,
+            gradient_ema=entity.gradient_ema.data,
+            survival_threshold=entity.config.survival_threshold,
+            log_scale=entity.config.log_scale,
+            step=self.world.step,
+        )
+
+        channels: List[torch.Tensor] = []
+        for key, _ in self._perception():
+            current = observation.current[key].float() / 255.0
+            directional = observation.directional[key].float() / 255.0
+            channels.append(current)
+            channels.extend(directional[i] for i in range(directional.shape[0]))
+
+        channels.append(observation.energy.float() / 255.0)
+        channels.append(observation.biomass.float() / 255.0)
+        channels.append(observation.gradient_ema.float())
+        channels.append(observation.alive_mask.float())
+
+        return torch.stack(channels, dim=0)
+
+    # ------------------------------------------------------------------
+    # Interaction
+    # ------------------------------------------------------------------
+    def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Restart the ecology. Returns (observation, acted mask).
+
+        Note this resets the *world*, not an agent episode. Individual episodes
+        begin and end inside a running world.
+        """
+        if seed is not None:
+            torch.manual_seed(seed)
+        self.world.reset()
+        return self._build_observation(), self._alive()
+
+    def step(self, action: torch.Tensor) -> AgentBatch:
+        """Advance one simulation step under a per-cell direction field.
+
+        Args:
+            action: (H, W) int64 in [0, 5). Entries at cells with no individual
+                are ignored by the simulation.
+
+        Returns:
+            An :class:`AgentBatch` whose ``observation`` is the state *before*
+            the step, matching the actions that were taken from it.
+        """
+        action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        observation = self._build_observation()
+
+        self.world.update(TensorDict({self.entity_name: action}, batch_size=[]))
+
+        transition = self.entity.last_transition
+        if transition is None:
+            raise RuntimeError(
+                f"{self.entity_name} recorded no transition. track_transitions "
+                "should have been enabled by this environment's constructor."
+            )
+
+        acted = transition.acted
+        successor = transition.successor.clamp(min=0)
+
+        # An individual is alive afterwards if the cell it moved into holds
+        # enough biomass to survive. This is the same predicate the simulation
+        # applies at the top of the next step.
+        entity = self.entity
+        biomass_flat = entity.biomass.data.reshape(-1)
+        alive_after = (
+            biomass_flat[successor] >= entity.config.survival_threshold
+        ) & acted
+
+        reward = (
+            alive_after.float() * self.survival_reward
+            + transition.reproduced.float() * self.reproduction_reward
+        )
+        done = acted & ~alive_after
+
+        return AgentBatch(
+            observation=observation,
+            acted=acted,
+            action=action,
+            reward=reward,
+            done=done,
+            successor=successor,
+            reproduced=transition.reproduced,
+        )
+
+    def rule_based_step(self) -> AgentBatch:
+        """Advance one step using the simulation's own policy.
+
+        The baseline has to be scored through identical reward bookkeeping for
+        the comparison to mean anything, so this returns the same AgentBatch as
+        :meth:`step`, differing only in where the movement decision came from.
+        """
+        observation = self._build_observation()
+        self.world.update()
+
+        transition = self.entity.last_transition
+        acted = transition.acted
+        successor = transition.successor.clamp(min=0)
+        entity = self.entity
+        biomass_flat = entity.biomass.data.reshape(-1)
+        alive_after = (
+            biomass_flat[successor] >= entity.config.survival_threshold
+        ) & acted
+        reward = (
+            alive_after.float() * self.survival_reward
+            + transition.reproduced.float() * self.reproduction_reward
+        )
+
+        # The simulation's chosen direction is not reported back, so record
+        # "stay" rather than inventing one. Callers that need real actions from
+        # the baseline should read them from the policy directly.
+        return AgentBatch(
+            observation=observation,
+            acted=acted,
+            action=torch.zeros(self.size, dtype=torch.long, device=self.device),
+            reward=reward,
+            done=acted & ~alive_after,
+            successor=successor,
+            reproduced=transition.reproduced,
+        )
+
+    def stats(self) -> Dict[str, float]:
+        """Cheap per-step diagnostics, for logging during training."""
+        world = self.world
+        out: Dict[str, float] = {"population": float(self.population())}
+        for name, entity in world.entity_dict.items():
+            if hasattr(entity, "biomass"):
+                out[f"{name.lower()}_population"] = float((entity.biomass.data > 0).sum())
+            elif hasattr(entity, "energy"):
+                out[f"{name.lower()}_cells"] = float((entity.energy.data > 0).sum())
+        return out

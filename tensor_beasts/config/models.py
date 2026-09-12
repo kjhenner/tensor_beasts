@@ -337,6 +337,11 @@ class AnimalEntityConfig(BaseModel):
     genetics: Optional[GeneticsConfig] = None
 
     # Debugging
+    # Reinforcement learning support. Records per-individual transitions on the
+    # entity each step so trajectories can be stitched together. Off by default
+    # because it costs a few tensor ops per step and nothing else reads it.
+    track_transitions: bool = False
+
     verbose: bool = False
 
 
