@@ -99,7 +99,18 @@ and the reasoning behind it are in `planning/04-reinforcement-learning.md`; the
 environment is `tensor_beasts/rl/multiagent.py`.
 
 Algorithms are `ppo`, `vtrace` and `awr`; architectures are `linear`, `conv`,
-`residual` and `dilated`. `linear` is a diagnostic rather than a contender: it
+`residual` and `dilated`. Three flags extend what the learner controls:
+
+```bash
+python train_rl.py --imitation-coef 1.0                  # anchor to the rule-based policy, fading out
+python train_rl.py --metabolic-levels 4                  # learn the metabolic rate as well as direction
+python train_rl.py --memory-size 4 --recurrent-window 8  # a per-individual memory, trained recurrently
+```
+
+The anchor is what first beat the baseline. The metabolic lever and the
+memory are newer and their results are recorded honestly, including the
+reward artefact that neutered the first metabolic run, in
+`planning/04-reinforcement-learning.md`. `linear` is a diagnostic rather than a contender: it
 can represent the rule-based policy exactly, so it tells you whether a failure
 is in the setup or in the model.
 
