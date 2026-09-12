@@ -18,9 +18,11 @@ the README wishlist stay parked until that baseline exists.
 ## Ordered plan
 
 1. Commit the outstanding policy and genetic work. **Done.**
-2. Make the simulation faster; fix the Metal device problem. **Done, partly.**
+2. Make the simulation faster; fix the Metal device problem. **Done.** 1.8x.
 3. Rebuild the RL environment against the current API so it cannot rot. **Done.**
-4. Batch worlds so training has throughput. **Design settled, phase 1 underway.**
+4. Give training throughput. **Done, by a different route than planned.** 4.7x
+   from process-level vectorization; the batch dimension itself is groundwork
+   only.
 5. Train, compare against the rule-based policy, then ask whether the ecology
    gives an agent anything worth learning. **Not started.**
 
@@ -73,48 +75,89 @@ Metal is nonetheless **not** the answer for small worlds. It sits flat near 24
 steps per second from 64 wide to 512 wide, which is the signature of launch
 overhead, and only beats CPU at 256 and above.
 
-### Batching: the hypothesis I got wrong, and the one that held
+### Throughput: two hypotheses I got wrong, and what actually worked
 
-I predicted single-world stepping was dispatch-bound and that batching worlds
-into a leading dimension would be the big win. **That was wrong.** Batching
-alone buys about 1.7x on CPU and about 1.15x on Metal, because at these sizes
-the work is memory-bandwidth bound, not dispatch bound.
+I predicted single-world stepping was dispatch-bound, and that batching worlds
+into a leading `(B, H, W)` dimension would be the big win. **Wrong.** Batching
+alone measures about 1.7x on CPU and 1.15x on Metal, because at these sizes the
+work is memory-bandwidth bound, not dispatch bound.
 
-`torch.compile` alone is also not the answer: it *loses* at 128 x 128, where
-per-call overhead dominates, and wins 4x to 6x only once tensors get large.
+I then predicted that batching plus `torch.compile` would reach roughly 10x,
+on the strength of this microbenchmark of a representative op mix:
 
-The combination is what works. Per-world cost of a representative op mix:
+| Configuration           | us/world | vs single eager |
+|-------------------------|----------|-----------------|
+| single world, eager     | 78.7     | 1.0x            |
+| B=16 batched, compiled  | 13.3     | 5.9x            |
+| B=64 batched, compiled  | 7.5      | 10.4x           |
+| B=256 batched, compiled | 5.6      | 14.0x           |
 
-| Configuration                     | us/world | vs today |
-|-----------------------------------|----------|----------|
-| single world, eager (today)       | 78.7     | 1.0x     |
-| B=16 batched, compiled            | 13.3     | 5.9x     |
-| B=64 batched, compiled            | 7.5      | 10.4x    |
-| B=256 batched, compiled           | 5.6      | 14.0x    |
+**Also wrong, and this one is worth remembering.** That microbenchmark is a
+single fusable graph. The real `World.update` is not. Dynamo traces it into 44
+graphs with 43 breaks, capturing 2263 ops, and the breaks come from
+data-dependent control flow (`if not actually_dead.any(): return`) and from
+torch calls returning non-tensors. Compiled, the real step is *slower*:
 
-Batching makes tensors big enough that fusion pays, and fusion removes the
-memory traffic that batching alone cannot. Neither half gets there by itself.
+| World     | Eager | Compiled | Ratio |
+|-----------|-------|----------|-------|
+| 128 x 128 | 103.4 | 57.7     | 0.56x |
+| 256 x 256 | 19.0  | 13.5     | 0.71x |
+| 512 x 512 | 9.7   | 5.2      | 0.54x |
 
-Caveat worth keeping honest: that table is an elementwise-heavy microbenchmark.
-The real step also does convolutions, rolls and argmax-like reductions, so
-expect less. The direction is solid; the multiplier is not a promise.
+Steps per second. Each graph break costs a guard check and a re-entry, and the
+fused segments are not large enough to pay for it. Compilation would only
+become interesting after the data-dependent branches are removed throughout the
+simulation, which is a real project rather than a flag.
 
-### How batching gets built: rank-agnostic first
+**What worked was much dumber.** Reinforcement learning needs total environment
+steps per second, and independent worlds are embarrassingly parallel. Running
+them in separate processes, with torch threads divided between workers:
 
-Rather than a single invasive `(B, H, W)` rewrite, this goes in two phases:
+| Processes | Threads each | Per process | Total env-steps/s |
+|-----------|--------------|-------------|-------------------|
+| 1         | 8            | 103.6       | 103.6             |
+| 2         | 4            | 92.3        | 184.6             |
+| 4         | 2            | 71.6        | 286.3             |
+| 8         | 1            | 49.1        | 392.7             |
+| 12        | 1            | 34.9        | 418.7             |
 
-**Phase 1** converts every spatial operation to address dimensions from the end
-(`dims=-2/-1`, `x[..., 0, :]`, `shape[-2]`). The code becomes rank-agnostic, so
-it works unchanged on `(H, W)` and on `(..., H, W)`. Behaviour must not change
-at all, which the golden harness can verify absolutely.
+4.7x, for a few dozen lines, in `tensor_beasts/rl/envs/vector.py`. Combined with
+the 1.8x single-world work, throughput went from 56 to 419 world-steps per
+second at 128 x 128, which is 7.5x overall.
 
-**Phase 2** adds the actual batch dimension. Because phase 1 left the single
-world path untouched, B=1 must reproduce today's hashes exactly, which is a
-strong signal that phase 2 is correct rather than merely plausible.
+The thread split is the part that is easy to miss. Torch gives each process
+every core by default, so uncapped workers contend and scaling is far worse.
 
-The hazard, flagged to whoever does phase 1: many `dim=0` uses refer to a
-*stacked axis of direction candidates*, not to a spatial axis. Those must stay
-leading. Confusing the two is the main way this goes wrong.
+### Where batching still matters
+
+Not on CPU, where processes are cheaper and better. On GPU: Metal sits flat near
+24 steps per second from 64 wide to 512 wide, extra processes do not help a
+single device, and one small world cannot fill it. At 512 x 512 Metal already
+does 5.19 Mcell-steps/s against the CPU's 2.30. Batching is the only way to feed
+it properly.
+
+So the groundwork went in, but the batch dimension itself did not.
+
+**Phase 1 is done**: every spatial operation now addresses dimensions from the
+end, so the code runs unchanged on `(H, W)` and `(..., H, W)`, proven by 35
+tests that compare a batched call against a stack of individual calls. All
+golden hashes are unchanged.
+
+**Phase 2, the actual batch dimension, is not done**, and three things block it:
+
+1. `get_direction_masks` strips a singleton batch dimension by rank, for the RL
+   path. A real B=1 world batch is indistinguishable from that and would be
+   silently eaten. This is a hard blocker and must be fixed first.
+2. `_flatten_feature` and `Feature.render` dispatch on `ndim` to tell an
+   unchannelled `(H, W)` feature from a channelled `(H, W, C)` one. `(B, H, W)`
+   has the same rank as `(H, W, C)`, so this is undecidable from shape alone
+   and needs an explicit channel flag on `Feature`.
+3. `torch_correlate_3d` is channel-trailing while everything else is
+   spatial-trailing, and it is on the hot path in `Scent.diffuse`.
+
+Two semantic decisions also need making, not just shape work: whether B worlds
+share one RNG draw, which would make a batched run not bit-identical to B
+separate runs, and whether B worlds share one genetic slot registry.
 
 ### The RL environment contract
 
