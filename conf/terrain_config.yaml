@@ -89,6 +89,9 @@ world:
     HydrodynamicPlant:
       initial_energy: 32
       init_prob: 0.02
+      scent:
+        energy_key: "${key:hydrodynamicplant,energy}"
+        emission_rate: 1.0
       seed:
         energy_key: "${key:hydrodynamicplant,energy}"
         crowding_key: "${key:hydrodynamicplant,crowding}"

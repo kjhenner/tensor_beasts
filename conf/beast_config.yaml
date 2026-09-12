@@ -130,6 +130,9 @@ world:
       init_prob: 0.02
       nutrients_key: "terrain:nutrients"
       nutrient_consumption_rate: 0.5
+      scent:
+        energy_key: "${key:hydrodynamicplant,energy}"
+        emission_rate: 1.0
       seed:
         energy_key: "${key:hydrodynamicplant,energy}"
         crowding_key: "${key:hydrodynamicplant,crowding}"
@@ -144,6 +147,11 @@ world:
       initial_biomass: 120
       init_prob: 0.001
       toy_init: False
+
+      # Scent based on biomass - higher emission for predator tracking
+      scent:
+        energy_key: "${key:herbivore,biomass}"
+        emission_rate: 6.0
 
       # Eating
       eat_max: 5
@@ -173,11 +181,9 @@ world:
 
       # Movement cost
       base_movement_cost: 0
-      mass_cost_factor: 0.0005
 
       # Death & Reproduction
       survival_threshold: 10
-      nutrients_key: "terrain:nutrients"
       reproduction_threshold: 200
 
     Predator:
@@ -186,6 +192,11 @@ world:
       initial_biomass: 180
       init_prob: 0.001
       toy_init: False
+
+      # Scent based on biomass
+      scent:
+        energy_key: "${key:predator,biomass}"
+        emission_rate: 2.0
 
       # Eating
       eat_max: 8
@@ -215,9 +226,7 @@ world:
 
       # Movement cost
       base_movement_cost: 0
-      mass_cost_factor: 0.001
 
       # Death & Reproduction
       survival_threshold: 15
-      nutrients_key: "terrain:nutrients"
       reproduction_threshold: 220

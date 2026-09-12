@@ -169,11 +169,14 @@ class HydrodynamicPlantEntityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     initial_energy: UInt8 = 100  # UInt8 because this sets uint8 energy tensor
     init_prob: float = 0.001
-    energy_key: Optional[str] = None
-    soil_water_volume_key: Optional[str] = None
-    soil_volume_key: Optional[str] = None
-    soil_sat_coeff_key: Optional[str] = None
-    nutrients_key: Optional[str] = None
+    # These are entity-level keys read directly via td.get(), so they must be
+    # parsed into (entity, feature) tuples here - unlike nested feature configs,
+    # entity-level config bypasses OmegaConf interpolation.
+    energy_key: TensorDictKey = None
+    soil_water_volume_key: TensorDictKey = None
+    soil_volume_key: TensorDictKey = None
+    soil_sat_coeff_key: TensorDictKey = None
+    nutrients_key: TensorDictKey = None
     nutrient_consumption_rate: float = 0.5
     soil_porosity: float = 0.4
     ideal_growth_rate: float = 4e-4
