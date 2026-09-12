@@ -56,11 +56,11 @@ otherwise runs forever.
 Caveats
 -------
 
-* ``World.reset()`` is currently broken for shared features (``td.clear()``
-  leaves the shared-feature slice registry populated, so every reset grows the
-  shared ``scent``/``energy`` tensors by an extra slice dimension). This env
-  therefore builds a *fresh* ``World`` on every ``reset()``. If ``World.reset()``
-  is fixed, ``_build_world`` can be simplified.
+* The world is built once and reused across episodes via ``World.reset()``,
+  which is about five times cheaper than rebuilding. ``reset()`` re-randomises
+  from the current global RNG state, so a fresh episode is not bit-identical to
+  a freshly constructed world; seeding makes it repeatable, which is what
+  matters here.
 * The env does not touch ``torch.set_default_device``. If you want the
   simulation on a non-CPU device, set the default device yourself before
   constructing the env, the way ``tensor_beasts/main.py`` does.
@@ -156,11 +156,7 @@ class TensorBeastsEnv(_EnvBase):
     # Internals
     # ------------------------------------------------------------------
     def _build_world(self) -> World:
-        """Construct and initialize a fresh World.
-
-        A new World is built per reset rather than calling ``World.reset()``,
-        which currently corrupts shared-feature shapes (see module docstring).
-        """
+        """Construct and initialize a World."""
         world = World(self.world_config)
         world.initialize()
         return world
@@ -211,7 +207,9 @@ class TensorBeastsEnv(_EnvBase):
             # global RNG, so this is what actually makes an episode reproducible.
             torch.manual_seed(seed)
 
-        self.world = self._build_world()
+        # Reusing the world costs about a fifth of rebuilding it, which matters
+        # when an agent resets thousands of times during training.
+        self.world.reset()
         self._elapsed_steps = 0
         return self._observation(), self._info()
 

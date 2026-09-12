@@ -198,16 +198,6 @@ class World:
 
         self.step += 1
 
-    def entity_scores(self, entity: Union[Entity | str], reward_mode: str = "default"):
-        if isinstance(entity, str):
-            entity = self.entities[entity.lower()]
-        reward = entity.get_feature("offspring_count").type(torch.float32) * 255 + entity.get_feature("energy")
-
-        total_reward = torch.sum(reward)
-        normalized_reward = torch.clamp(total_reward / (self.size[0] * self.size[1]) * 2 - 1, -1, 1)
-
-        return normalized_reward
-
     def inspect(self, x: int, y: int):
         output = f"World at ({x}, {y})\n"
         for entity in self.entity_dict.values():

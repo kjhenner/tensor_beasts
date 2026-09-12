@@ -1,9 +1,9 @@
 """Whole-simulation invariants for reproduction bookkeeping.
 
-offspring_count feeds World.entity_scores, which is the reward signal for the
-reinforcement learning environment. It previously counted steps rather than
-offspring, and accumulated on empty cells, so these guard the property that
-matters rather than any particular number.
+offspring_count is the simulation's record of how much reproduction has
+happened, and is a natural ingredient for a reward signal. It previously
+counted steps rather than offspring, and accumulated on empty cells, so these
+guard the property that matters rather than any particular number.
 """
 
 import torch

@@ -236,10 +236,14 @@ class SharedFeature(Feature, abc.ABC):
         return self._registry_ref[self._effective_shared_name]["count"]
 
     def zero_init(self):
+        # self.shape stays the 2-D slice shape. It used to have the slice count
+        # appended to it here, which made this method non-idempotent: calling it
+        # twice produced (H, W, C, C) and broke World.reset(), and in fact broke
+        # a first initialize() too, since zero_init runs more than once there.
         count = self._get_shared_count()
-        self.shape = self.shape + (count,)
+        shared_shape = self.shape + (count,)
         if self._shared_key not in self.td:
-            self.td[self._shared_key] = torch.zeros(self.shape, dtype=self.dtype)
+            self.td[self._shared_key] = torch.zeros(shared_shape, dtype=self.dtype)
         if self.key not in self.td:
             self.td[self.key] = self.td[self._shared_key][:, :, self.idx]
         self.data = torch.zeros_like(self.td[self.key])
