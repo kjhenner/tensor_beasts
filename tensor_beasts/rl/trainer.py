@@ -100,6 +100,8 @@ class TrainerConfig:
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
     metabolic_levels: int = 0
+    # Channels of learned memory each individual carries; 0 disables it.
+    memory_size: int = 0
     device: str = "auto"
     seed: int = 0
 
@@ -272,6 +274,7 @@ class Trainer:
                 self.config.arch,
                 self.observation_channels,
                 num_metabolic_levels=self.config.metabolic_levels,
+                memory_size=self.config.memory_size,
                 **dict(self.config.arch_kwargs),
             )
         self.network: ActorCritic = network.to(self.device)
@@ -313,6 +316,7 @@ class Trainer:
             foraging_reward=config.foraging_reward,
             device=str(self.device),
             num_metabolic_levels=config.metabolic_levels,
+            memory_size=config.memory_size,
         )
 
     def _init_wandb(self) -> None:
@@ -347,10 +351,10 @@ class Trainer:
     @torch.no_grad()
     def act(
         self, observation: torch.Tensor, deterministic: bool = False
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Sample an action for every cell.
 
-        Returns (action, log_prob, value, metabolic_action). ``metabolic_action``
+        Returns (action, log_prob, value, metabolic_action, memory). ``metabolic_action``
         is None unless the network has a metabolic head, in which case both
         heads are sampled independently and ``log_prob`` is the joint
         log-probability, the quantity the PPO ratio is defined over.
@@ -370,7 +374,12 @@ class Trainer:
         # The advantage recursion mixes rewards and bootstrapped values, so it
         # has to run in real return units, not normalized ones.
         value = self.value_normalizer.denormalize(out["value"])
-        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0), metabolic_action
+        # Deterministic memory write; not an action in the policy-gradient
+        # sense, so it carries no log-probability. Stage 1 of the memory
+        # design: the read is learnable, the write is a fixed function of the
+        # observation until recurrent training exists.
+        memory = out["memory"].squeeze(0) if "memory" in out else None
+        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0), metabolic_action, memory
 
     # ------------------------------------------------------------------
     # Collection
@@ -386,8 +395,8 @@ class Trainer:
 
         for _ in range(steps):
             observation = policy_input(_observe(self.env))
-            action, log_prob, value, metabolic_action = self.act(observation)
-            batch = self.env.step(action, metabolic_action)
+            action, log_prob, value, metabolic_action, memory = self.act(observation)
+            batch = self.env.step(action, metabolic_action, memory)
             # The env rebuilt the observation itself; overwrite it with the
             # exact tensor the network saw, so stored and recomputed
             # log-probabilities agree bit for bit.
@@ -444,7 +453,7 @@ class Trainer:
                 batch = env.rule_based_step()
             else:
                 observation = policy_input(_observe(env))
-                action, _, _, metabolic_action = self.act(
+                action, _, _, metabolic_action, memory = self.act(
                     observation, deterministic=self.config.eval_deterministic
                 )
                 batch = env.step(action, metabolic_action)
@@ -519,6 +528,7 @@ class Trainer:
             # viewer's controller rebuilds the right head without knowing the
             # trainer's field names.
             "num_metabolic_levels": self.config.metabolic_levels,
+            "memory_size": self.config.memory_size,
             "world_steps": self.world_steps,
             "agent_steps": self.agent_steps,
             "updates": self.updates,
@@ -544,6 +554,12 @@ class Trainer:
             raise ValueError(
                 f"Checkpoint was trained with {levels} metabolic levels, this trainer "
                 f"has {self.config.metabolic_levels}. Pass --metabolic-levels {levels}."
+            )
+        memory = int(payload.get("memory_size", 0))
+        if memory != self.config.memory_size:
+            raise ValueError(
+                f"Checkpoint was trained with memory size {memory}, this trainer has "
+                f"{self.config.memory_size}. Pass --memory-size {memory}."
             )
         self.network.load_state_dict(payload["network"])
         if load_optimizer:

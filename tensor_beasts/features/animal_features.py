@@ -58,3 +58,27 @@ class SlotId(Feature):
         super().initialize_data()
         default_slot = self.config.get("default_slot", 0)
         self.data.fill_(default_slot)
+
+
+@register_feature
+class Memory(Feature):
+    """A small vector each individual writes at one step and reads at the next.
+
+    Generalizes gradient_ema, the scalar the simulation already carries with an
+    animal through movement and halves into its offspring. Memory is ``size``
+    float32 channels per cell, carried unchanged on movement and copied into
+    offspring on reproduction, so a lineage can carry state across
+    generations. It is written only by an external (learned) policy through
+    the action override; the rule-based policy never touches it, and with
+    ``size`` at its default of 0 the feature is empty and nothing changes.
+    """
+    name = "memory"
+    dtype = torch.float32
+    default_tags = set()
+    default_config = DictConfig({"size": 0})
+    depends_on = {}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.size = int(self.config.get("size", 0))
+        self.shape = tuple(self.shape) + (self.size,)

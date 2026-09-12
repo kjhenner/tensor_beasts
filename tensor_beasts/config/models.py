@@ -332,6 +332,7 @@ class AnimalEntityConfig(BaseModel):
     gradient_ema: Optional[GradientEMAConfig] = None
     scent: Optional[ScentConfig] = None
     slot_id: Optional[Dict[str, Any]] = None  # SlotId feature config
+    memory: Optional[Dict[str, Any]] = None  # Memory feature config: {size: K}
 
     # Genetic algorithm
     genetics: Optional[GeneticsConfig] = None

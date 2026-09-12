@@ -90,6 +90,17 @@ def build_parser() -> argparse.ArgumentParser:
             "--resume take the value from the checkpoint when this is not given."
         ),
     )
+    model.add_argument(
+        "--memory-size",
+        type=int,
+        default=None,
+        help=(
+            "Channels of learned memory each individual writes at one step and "
+            "reads at the next, carried with it when it moves and copied into its "
+            "offspring. 0 disables (default). Stage 1: the read is learnable, the "
+            "write is a fixed function of the observation; see planning/04."
+        ),
+    )
     model.add_argument("--device", default=None, help="auto, cpu, mps or cuda")
 
     loop = parser.add_argument_group("loop")
@@ -166,6 +177,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "normalize_values": args.normalize_values,
         "arch": args.arch,
         "metabolic_levels": args.metabolic_levels,
+        "memory_size": args.memory_size,
         "device": args.device,
         "seed": args.seed,
         "total_world_steps": args.steps,

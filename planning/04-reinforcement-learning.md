@@ -532,6 +532,24 @@ produced. Memory costs one extra forward pass per step of the segment during
 the update, which is the same cost as one epoch, so the budget is unchanged at
 one epoch and doubled at two.
 
+### Stage 1 has landed
+
+The `memory` feature, its carry through movement and copy into offspring, the
+observation channels, the write head, the action override, the trainer flag
+`--memory-size`, and the viewer, which sets the feature width from the
+checkpoint before building its world. Default off; with it off the simulation
+is bit-for-bit identical to before over 300 steps at 128, checked against a
+worktree of the previous commit.
+
+Two things the implementation turned up. Movement carries features with
+`safe_add`, whose uint8 wraparound guard rewrites any cell that went *down*
+after an add to 255. No carried float had ever been negative, so it never
+fired, but memory lives in [-1, 1]; the guard is now integer-only. And a
+memory write has to be masked to living cells, because movement *adds* an
+arriving animal's carried features onto its destination, so a stale value left
+on an empty cell would be summed into whoever moved there next. The test that
+caught it compares what an individual wrote with what its new cell holds.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same

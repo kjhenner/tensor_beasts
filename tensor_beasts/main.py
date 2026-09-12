@@ -102,6 +102,13 @@ def main(config: DictConfig, policy_path: str = None, deterministic: bool = Fals
     height, width = config.world.size
     print(f"Height: {height}, Width: {width}")
 
+    if policy_path is not None:
+        # A checkpoint with learned memory needs the entity built with that
+        # many memory channels, which has to happen before the world exists.
+        from tensor_beasts.rl.controller import apply_checkpoint_requirements
+
+        apply_checkpoint_requirements(config, policy_path)
+
     world = World(config.world)
     world.initialize()
 

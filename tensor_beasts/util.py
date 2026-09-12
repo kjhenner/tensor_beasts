@@ -81,10 +81,20 @@ def directional_kernel_set(size: int):
 
 
 def safe_add(a, b, inplace=True):
+    """Saturating add for uint8 grids; a plain add for floating grids.
+
+    The guard rewrites cells that went *down* after the add, which is how uint8
+    wraparound shows up. It used to run on floats too, where it is meaningless
+    and dangerous: a negative float added to another lands below ``b`` and was
+    rewritten to 255. No existing float feature is ever negative, so nothing
+    tripped it, but the learned memory feature lives in [-1, 1] and travels
+    through this function when an animal moves.
+    """
     if not inplace:
         a = a.clone()
     a += b
-    a[a < b] = 255
+    if not a.is_floating_point():
+        a[a < b] = 255
     return a
 
 

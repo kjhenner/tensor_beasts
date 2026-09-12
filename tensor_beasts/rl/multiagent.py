@@ -212,6 +212,7 @@ class MultiAgentWorldEnv:
         foraging_reward: float = 0.0,
         device: Optional[str] = None,
         num_metabolic_levels: int = 0,
+        memory_size: int = 0,
     ):
         self.config_path = config_path
         self.entity_name = entity_name
@@ -234,6 +235,10 @@ class MultiAgentWorldEnv:
             )
         # Transition tracking is what makes per-individual trajectories possible.
         config.world.entities[entity_name].track_transitions = True
+        if memory_size:
+            # Learned memory lives on the entity as a feature; its width is set
+            # here, before the world exists, and read back by memory_size.
+            config.world.entities[entity_name].memory = {"size": int(memory_size)}
 
         self.world = World(self.world_config)
         self.world.initialize()
@@ -287,6 +292,11 @@ class MultiAgentWorldEnv:
     @property
     def entity(self):
         return self.world.entity_dict[self.entity_name]
+
+    @property
+    def memory_size(self) -> int:
+        """Channels of learned memory the controlled entity carries (0 = none)."""
+        return int(self.entity.memory.size)
 
     def _alive(self) -> torch.Tensor:
         entity = self.entity
@@ -343,6 +353,7 @@ class MultiAgentWorldEnv:
             label = ":".join(key)
             names.extend(f"{label}/grad_{d}" for d in ("up", "down", "left", "right"))
         names.extend(["self/energy", "self/biomass", "self/gradient_ema", "self/alive"])
+        names.extend(f"memory/{k}" for k in range(self.memory_size))
         return names
 
     def _rule_decision(self, observation):
@@ -467,6 +478,10 @@ class MultiAgentWorldEnv:
         channels.append(observation.biomass.float() / 255.0)
         channels.append(observation.gradient_ema.float())
         channels.append(observation.alive_mask.float())
+        if self.memory_size > 0:
+            # What this individual wrote last step, carried to wherever it is now.
+            memory = entity.memory.data
+            channels.extend(memory[..., k].float() for k in range(self.memory_size))
 
         return torch.stack(channels, dim=0), observation
 
@@ -518,13 +533,18 @@ class MultiAgentWorldEnv:
         return self._build_observation(), self._alive()
 
     def step(
-        self, action: torch.Tensor, metabolic_action: Optional[torch.Tensor] = None
+        self,
+        action: torch.Tensor,
+        metabolic_action: Optional[torch.Tensor] = None,
+        memory: Optional[torch.Tensor] = None,
     ) -> AgentBatch:
         """Advance one simulation step under a per-cell direction field.
 
         Args:
             action: (H, W) int64 in [0, 5). Entries at cells with no individual
                 are ignored by the simulation.
+            memory: Optional (K, H, W) float32 in [-1, 1], the memory each
+                individual writes for its next step. None leaves memory as is.
             metabolic_action: Optional (H, W) int64 in [0, num_metabolic_levels).
                 Mapped to a rate through :meth:`metabolic_level_to_rate` and
                 sent to the simulation, which clamps it to what the individual's
@@ -543,19 +563,19 @@ class MultiAgentWorldEnv:
         rule_metabolic_level = self._rule_metabolic_level(decision)
         biomass_before = self.entity.biomass.data.clone()
 
-        if metabolic_action is None:
+        if metabolic_action is None and memory is None:
             entity_action = action
         else:
-            metabolic_action = metabolic_action.reshape(*self.size).to(
-                device=self.device, dtype=torch.long
-            )
-            entity_action = TensorDict(
-                {
-                    "direction": action,
-                    "metabolic_rate": self.metabolic_level_to_rate(metabolic_action),
-                },
-                batch_size=[],
-            )
+            fields = {"direction": action}
+            if metabolic_action is not None:
+                metabolic_action = metabolic_action.reshape(*self.size).to(
+                    device=self.device, dtype=torch.long
+                )
+                fields["metabolic_rate"] = self.metabolic_level_to_rate(metabolic_action)
+            if memory is not None:
+                # Network layout is (K, H, W); the feature is (H, W, K).
+                fields["memory"] = memory.reshape(self.memory_size, *self.size).permute(1, 2, 0).to(self.device)
+            entity_action = TensorDict(fields, batch_size=[])
         self.world.update(TensorDict({self.entity_name: entity_action}, batch_size=[]))
 
         transition = self.entity.last_transition

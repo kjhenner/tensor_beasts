@@ -67,7 +67,7 @@ class ActorCritic(nn.Module):
             controls movement only and the simulation's rules set the rate.
     """
 
-    def __init__(self, in_channels: int, trunk_channels: int, num_metabolic_levels: int = 0):
+    def __init__(self, in_channels: int, trunk_channels: int, num_metabolic_levels: int = 0, memory_size: int = 0):
         super().__init__()
         self.in_channels = in_channels
         self.trunk_channels = trunk_channels
@@ -80,6 +80,14 @@ class ActorCritic(nn.Module):
             )
         else:
             self.metabolic_head = None
+        # Learned memory write: K channels in [-1, 1] per cell, deterministic.
+        # Unit gain, not the policy heads' 0.01: a near-zero write carries no
+        # information, and there is no "collapse" risk for a state variable.
+        self.memory_size = int(memory_size)
+        if self.memory_size > 0:
+            self.memory_head = orthogonal_init(nn.Conv2d(trunk_channels, self.memory_size, 1), gain=1.0)
+        else:
+            self.memory_head = None
 
     @property
     def has_metabolic_head(self) -> bool:
@@ -109,6 +117,8 @@ class ActorCritic(nn.Module):
         }
         if self.metabolic_head is not None:
             out["metabolic_logits"] = self.metabolic_head(features)
+        if self.memory_head is not None:
+            out["memory"] = torch.tanh(self.memory_head(features))
         return out
 
     @property
@@ -134,8 +144,8 @@ class LinearPolicy(ActorCritic):
     everything below is a waste of time until that is fixed.
     """
 
-    def __init__(self, in_channels: int, num_metabolic_levels: int = 0):
-        super().__init__(in_channels, in_channels, num_metabolic_levels)
+    def __init__(self, in_channels: int, num_metabolic_levels: int = 0, memory_size: int = 0):
+        super().__init__(in_channels, in_channels, num_metabolic_levels, memory_size)
         self.trunk = nn.Identity()
 
     def features(self, observation: torch.Tensor) -> torch.Tensor:
@@ -152,9 +162,10 @@ class ConvActorCritic(ActorCritic):
     """
 
     def __init__(
-        self, in_channels: int, hidden_channels: int = 64, depth: int = 3, num_metabolic_levels: int = 0
+        self, in_channels: int, hidden_channels: int = 64, depth: int = 3, num_metabolic_levels: int = 0,
+        memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
         layers = []
         channels = in_channels
         for _ in range(depth):
@@ -218,9 +229,10 @@ class ResidualActorCritic(ActorCritic):
     """
 
     def __init__(
-        self, in_channels: int, hidden_channels: int = 64, blocks: int = 4, num_metabolic_levels: int = 0
+        self, in_channels: int, hidden_channels: int = 64, blocks: int = 4, num_metabolic_levels: int = 0,
+        memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
         self.stem = orthogonal_init(nn.Conv2d(in_channels, hidden_channels, 3, padding=1), gain=2.0**0.5)
         self.blocks = nn.Sequential(*[ResidualBlock(hidden_channels) for _ in range(blocks)])
         self.out_norm = ChannelNorm(hidden_channels)
@@ -246,8 +258,9 @@ class DilatedActorCritic(ActorCritic):
         hidden_channels: int = 48,
         dilations: Tuple[int, ...] = (1, 2, 4, 8),
         num_metabolic_levels: int = 0,
+        memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels)
+        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
         layers = []
         channels = in_channels
         for dilation in dilations:

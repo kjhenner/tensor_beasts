@@ -59,6 +59,7 @@ class LearnedController:
         self.num_metabolic_levels = int(
             payload.get("num_metabolic_levels", trainer_config.get("metabolic_levels", 0))
         )
+        self.memory_size = int(payload.get("memory_size", trainer_config.get("memory_size", 0)))
 
         self.env = MultiAgentWorldEnv.attach(
             world, self.entity_name, num_metabolic_levels=self.num_metabolic_levels
@@ -73,10 +74,18 @@ class LearnedController:
                 "differs from the one the policy was trained on."
             )
 
+        if self.env.memory_size != self.memory_size:
+            raise ValueError(
+                f"Checkpoint carries {self.memory_size} memory channels but the world's "
+                f"{self.entity_name} has {self.env.memory_size}. Call "
+                "apply_checkpoint_requirements(config, checkpoint) before building the world."
+            )
+
         self.network = build_network(
             trainer_config["arch"],
             self.env.observation_channels,
             num_metabolic_levels=self.num_metabolic_levels,
+            memory_size=self.memory_size,
             **(trainer_config.get("arch_kwargs") or {}),
         )
         self.network.load_state_dict(payload["network"])
@@ -104,14 +113,16 @@ class LearnedController:
         observation = self.env._build_observation().to(self.device)
         out = self.network.forward_all(observation.unsqueeze(0))
         direction = self._sample(out["logits"]).to(self.env.device)
-        if "metabolic_logits" not in out:
+        if "metabolic_logits" not in out and "memory" not in out:
             return TensorDict({self.entity_name: direction}, batch_size=[])
-        level = self._sample(out["metabolic_logits"]).to(self.env.device)
-        entity_action = TensorDict(
-            {"direction": direction, "metabolic_rate": self.env.metabolic_level_to_rate(level)},
-            batch_size=[],
-        )
-        return TensorDict({self.entity_name: entity_action}, batch_size=[])
+        fields = {"direction": direction}
+        if "metabolic_logits" in out:
+            level = self._sample(out["metabolic_logits"]).to(self.env.device)
+            fields["metabolic_rate"] = self.env.metabolic_level_to_rate(level)
+        if "memory" in out:
+            # Network layout (K, H, W) to the feature's (H, W, K).
+            fields["memory"] = out["memory"].squeeze(0).permute(1, 2, 0).to(self.env.device)
+        return TensorDict({self.entity_name: TensorDict(fields, batch_size=[])}, batch_size=[])
 
     def describe(self) -> str:
         steps = f", trained for {self.trained_world_steps} world steps" if self.trained_world_steps else ""
@@ -122,3 +133,20 @@ class LearnedController:
             else ", movement only"
         )
         return f"learned {self.arch} policy on {self.entity_name} ({mode}{levers}{steps})"
+
+
+def apply_checkpoint_requirements(config, checkpoint: Path, entity_name: Optional[str] = None) -> None:
+    """Make a world config match what a checkpoint needs, before the world exists.
+
+    A checkpoint trained with learned memory expects the controlled entity to
+    carry that many memory channels, which is an entity feature fixed at world
+    construction. The viewer builds its world from a plain config, so this sets
+    the feature width from the checkpoint. Harmless for checkpoints without
+    memory.
+    """
+    payload = torch.load(Path(checkpoint), map_location="cpu", weights_only=False)
+    trainer_config = payload.get("trainer_config", {})
+    entity = entity_name or trainer_config.get("entity", "Herbivore")
+    memory_size = int(payload.get("memory_size", trainer_config.get("memory_size", 0)))
+    if memory_size > 0:
+        config.world.entities[entity].memory = {"size": memory_size}

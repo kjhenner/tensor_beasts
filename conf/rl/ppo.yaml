@@ -30,6 +30,8 @@ trainer:
   # max_metabolic_rate, still capped by carried biomass. 0 leaves the rate to
   # the rules and learns movement only; existing runs reproduce with 0.
   metabolic_levels: 0
+  # Learned memory channels per individual. 0 disables. See planning/04.
+  memory_size: 0
   device: auto
   seed: 0
 

@@ -44,7 +44,10 @@ def state_hash(world: World) -> str:
     digest = hashlib.sha256()
     for key in sorted(world.td.keys(True, True), key=str):
         value = world.td.get(key)
-        if isinstance(value, torch.Tensor):
+        # An empty tensor carries no state. Optional features register a
+        # zero-width tensor when disabled, and their presence must not read as
+        # a behaviour change.
+        if isinstance(value, torch.Tensor) and value.numel() > 0:
             digest.update(str(key).encode())
             digest.update(value.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()[:16]

@@ -14,7 +14,7 @@ from tensor_beasts.policy.metabolism import clamp_metabolic_rate, effective_max_
 from tensor_beasts.policy.rule_based import RuleBasedPolicy
 from tensor_beasts.policy.parameterized import ParameterizedPolicy
 
-from tensor_beasts.features.animal_features import IdFeature, OffspringCount, Biomass, GradientEMA, SlotId
+from tensor_beasts.features.animal_features import Memory, IdFeature, OffspringCount, Biomass, GradientEMA, SlotId
 from tensor_beasts.util import safe_sub, safe_add
 
 
@@ -57,6 +57,7 @@ class Animal(Entity):
     id_feature: IdFeature
     offspring_count: OffspringCount
     slot_id: SlotId
+    memory: Memory
     default_config = DictConfig({
         # Initialization
         "initial_energy": 50,
@@ -193,6 +194,7 @@ class Animal(Entity):
         self.offspring_count.initialize_data()
         self.id_feature.initialize_data()
         self.slot_id.initialize_data()
+        self.memory.initialize_data()
 
         energy = self.energy.data
         biomass = self.biomass.data
@@ -310,7 +312,10 @@ class Animal(Entity):
         alive = ~actually_dead
         for feature in self.features():
             if not isinstance(feature, SharedFeature):
-                feature.data *= alive
+                # Trailing channel axes (memory is (H, W, K)) broadcast against
+                # the 2-D mask only if the mask gains matching trailing dims.
+                extra = feature.data.ndim - alive.ndim
+                feature.data *= alive.reshape(*alive.shape, *([1] * extra)) if extra > 0 else alive
 
     def _log_metabolism(self, positions, label, **values):
         """Log metabolism values for entities at given positions."""
@@ -330,7 +335,7 @@ class Animal(Entity):
 
     @staticmethod
     def _split_external_action(action):
-        """Return (direction, metabolic_rate) from an external action override.
+        """Return (direction, metabolic_rate, memory) from an external action override.
 
         Two forms are accepted. A bare (H, W) int64 tensor is a direction
         override and nothing else, which is what the first learned policies
@@ -339,10 +344,14 @@ class Animal(Entity):
         overrides the throttle as well. Either entry may be None.
         """
         if action is None:
-            return None, None
+            return None, None, None
         if isinstance(action, torch.Tensor):
-            return action, None
-        return action.get("direction", None), action.get("metabolic_rate", None)
+            return action, None, None
+        return (
+            action.get("direction", None),
+            action.get("metabolic_rate", None),
+            action.get("memory", None),
+        )
 
     def update(self, action: Optional[Union[torch.Tensor, Dict[str, torch.Tensor]]] = None):
         """
@@ -361,7 +370,7 @@ class Animal(Entity):
                 cannot burn what it does not carry, whoever sets the throttle.
         """
         # Capture external action before policy call produces local 'action' variable
-        external_action, external_rate = self._split_external_action(action)
+        external_action, external_rate, external_memory = self._split_external_action(action)
         biomass = self.biomass.data
         energy = self.energy.data
         gradient_ema = self.gradient_ema.data
@@ -398,6 +407,17 @@ class Animal(Entity):
 
         # Step 4: Write back updated gradient EMA from policy
         gradient_ema[:] = action.gradient_ema
+
+        # A learned policy's memory write lands here, before movement, so the
+        # value carried to the individual's next cell is the one it just wrote.
+        # The rule-based policy never writes memory. See features Memory.
+        if external_memory is not None and self.memory.size > 0:
+            # Only living cells hold memory. An unmasked write would leave stale
+            # values on empty cells, and movement ADDS an arriving animal's
+            # carried features onto its destination, so a stale value would be
+            # summed into whoever moved there next.
+            new_memory = external_memory.reshape(self.memory.data.shape).to(self.memory.data.dtype)
+            self.memory.data[:] = torch.where(alive.unsqueeze(-1), new_memory, torch.zeros_like(new_memory))
 
         # External metabolic rate overrides the policy's, subject to the same
         # biomass cap the policy applies to itself (see policy/metabolism.py).
@@ -562,6 +582,8 @@ class Animal(Entity):
         id_feature = self.id_feature.data
         gradient_ema = self.gradient_ema.data
         slot_id = self.slot_id.data
+        # Each memory channel rides along as its own carried 2-D slice (a view).
+        memory_slices = [self.memory.data[..., k] for k in range(self.memory.size)]
         random = self.world.td.get("random")
 
         # Stochastic movement based on probability
@@ -590,20 +612,22 @@ class Animal(Entity):
             divide_feature=biomass,
             divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
             divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
-            carried_features_self=[offspring_count, id_feature, biomass, gradient_ema, slot_id],
+            carried_features_self=[offspring_count, id_feature, biomass, gradient_ema, slot_id, *memory_slices],
             carried_feature_fns_self=[
                 lambda x: safe_add(x, 1, inplace=False),  # must be pure; see perform_move
                 lambda x: x,
                 lambda x: (x.float() * 0.5).to(x.dtype),
                 lambda x: x,
                 lambda x: x,  # slot_id unchanged for parent
+                *([lambda x: x] * len(memory_slices)),  # memory travels unchanged
             ],
-            carried_features_offspring=[id_feature, biomass, gradient_ema, slot_id],
+            carried_features_offspring=[id_feature, biomass, gradient_ema, slot_id, *memory_slices],
             carried_feature_fns_offspring=[
                 lambda x: random,
                 lambda x: (x.float() * 0.5).to(x.dtype),
                 lambda x: x * 0.5,
                 offspring_slot_fn,  # slot assignment for offspring
+                *([lambda x: x] * len(memory_slices)),  # offspring inherit a copy
             ],
             agent_action=direction,
             move_mask=move_mask,
