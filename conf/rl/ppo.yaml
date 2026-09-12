@@ -62,3 +62,9 @@ ppo:
   normalize_advantage: true
   # Null disables the early stop. Set to ~0.02 if updates start diverging.
   target_kl: null
+  # Imitation of the rule-based policy, cross-faded out as agreement rises.
+  # Weight each update = imitation_coef * max(0, 1 - conformance / target).
+  # Off by default so the plain-PPO result stays reproducible; 1.0 is a
+  # sensible strength when turning it on.
+  imitation_coef: 0.0
+  imitation_target_conformance: 0.9

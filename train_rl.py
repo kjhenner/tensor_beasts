@@ -97,6 +97,18 @@ def build_parser() -> argparse.ArgumentParser:
     hyper.add_argument("--gamma", type=float, default=None)
     hyper.add_argument("--gae-lambda", type=float, default=None)
     hyper.add_argument("--target-kl", type=float, default=None)
+    hyper.add_argument(
+        "--imitation-coef",
+        type=float,
+        default=None,
+        help=(
+            "Anchor to the rule-based policy: cross-entropy to its action, cross-"
+            "faded to zero as conformance rises to --imitation-target. Starts the "
+            "learner near the baseline instead of at random."
+        ),
+    )
+    hyper.add_argument("--imitation-target", type=float, default=None,
+                       help="conformance at which the imitation weight reaches zero (default 0.9)")
 
     evaluation = parser.add_argument_group("evaluation")
     evaluation.add_argument("--eval-interval", type=int, default=None)
@@ -162,6 +174,8 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "gamma": args.gamma,
         "gae_lambda": args.gae_lambda,
         "target_kl": args.target_kl,
+        "imitation_coef": args.imitation_coef,
+        "imitation_target_conformance": args.imitation_target,
     }
 
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})

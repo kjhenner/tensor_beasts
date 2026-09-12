@@ -60,7 +60,8 @@ def iter_minibatches_with_value(
     grows a ``value`` output, delete this and use it.
 
     Yields:
-        (observation, acted, action, log_prob, value, advantage, ret).
+        (observation, acted, action, log_prob, value, advantage, ret, rule_action),
+        where rule_action is None if the rollout does not carry one.
     """
     if shuffle:
         order = torch.randperm(rollout.steps, generator=generator)
@@ -76,6 +77,7 @@ def iter_minibatches_with_value(
             rollout.value[index],
             rollout.advantage[index],
             rollout.ret[index],
+            rollout.rule_action[index] if rollout.rule_action is not None else None,
         )
 
 
@@ -139,6 +141,16 @@ class PPOConfig:
     clip_range: float = 0.2
     value_clip_range: Optional[float] = None
     entropy_coef: float = 0.01
+    # Imitation of the simulation's rule-based policy, cross-faded out as the
+    # learned policy comes to agree with it. The weight applied each update is
+    #     imitation_coef * max(0, 1 - conformance / imitation_target_conformance)
+    # where conformance is the fraction of acting cells whose most likely
+    # action matched the rule-based action during the previous update. So it
+    # starts at full strength, anchoring a random policy to the baseline, and
+    # reaches zero once agreement hits the target, leaving only the real
+    # rewards. Zero disables it.
+    imitation_coef: float = 0.0
+    imitation_target_conformance: float = 0.9
     value_coef: float = 0.5
     epochs: int = 4
     minibatch_steps: int = 16
@@ -201,6 +213,17 @@ class PPO:
         # global clipping leaves the policy with a thousandth of its intended
         # step. See tensor_beasts/rl/normalization.py for the measurement.
         self.value_normalizer = value_normalizer or ValueNormalizer(enabled=False)
+        # Agreement with the rule-based policy measured during the last update.
+        # Starts at zero so the first update imitates at full strength.
+        self.conformance = 0.0
+
+    def imitation_weight(self) -> float:
+        """Current cross-fade weight on the imitation term. See PPOConfig."""
+        config = self.config
+        if config.imitation_coef <= 0.0:
+            return 0.0
+        remaining = 1.0 - self.conformance / max(config.imitation_target_conformance, 1e-8)
+        return config.imitation_coef * max(0.0, remaining)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
@@ -237,9 +260,13 @@ class PPO:
         old_value: torch.Tensor,
         advantage: torch.Tensor,
         ret: torch.Tensor,
+        rule_action: Optional[torch.Tensor] = None,
     ):
         config = self.config
-        log_prob, entropy, value = self.evaluate_actions(network, observation, action)
+        logits, value = network(observation)
+        log_probs = F.log_softmax(logits, dim=1)
+        log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
+        entropy = -(log_probs.exp() * log_probs).sum(dim=1)
 
         mask = acted.float()
         log_ratio = (log_prob - old_log_prob) * mask
@@ -268,6 +295,22 @@ class PPO:
         entropy_mean = masked_mean(entropy, mask)
         loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_mean
 
+        # Imitation of the rule-based policy: cross-entropy to its action,
+        # weighted by the cross-fade. Conformance is measured whether or not
+        # the term is active, so the log shows how far from the rules the
+        # policy has drifted even when nothing is pulling it back.
+        imitation_loss = torch.zeros((), device=loss.device)
+        conformance = float("nan")
+        if rule_action is not None:
+            rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
+            imitation_loss = -masked_mean(rule_log_prob, mask)
+            weight = self.imitation_weight()
+            if weight > 0.0:
+                loss = loss + weight * imitation_loss
+            with torch.no_grad():
+                agrees = (logits.argmax(dim=1) == rule_action).float()
+                conformance = float(masked_mean(agrees, mask))
+
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
             approx_kl = masked_mean((ratio - 1.0) - log_ratio, mask)
@@ -284,14 +327,17 @@ class PPO:
             "approx_kl": float(approx_kl),
             "clip_fraction": float(clip_fraction),
             "ratio_max_deviation": float(ratio_deviation),
+            "imitation_loss": float(imitation_loss.detach()),
+            "imitation_weight": self.imitation_weight(),
+            "conformance": conformance,
         }
         return loss, diagnostics
 
     def minibatch_loss(self, network: nn.Module, batch) -> torch.Tensor:
         """Loss for one :func:`iter_minibatches_with_value` tuple. For tests."""
-        observation, acted, action, old_log_prob, old_value, advantage, ret = batch
+        observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action = batch
         loss, _ = self._losses(
-            network, observation, acted, action, old_log_prob, old_value, advantage, ret
+            network, observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action
         )
         return loss
 
@@ -339,7 +385,7 @@ class PPO:
             for batch in iter_minibatches_with_value(
                 rollout, config.minibatch_steps, shuffle=True, generator=generator
             ):
-                observation, acted, action, old_log_prob, old_value, advantage, ret = batch
+                observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action = batch
                 agent_steps = float(acted.sum())
                 if agent_steps == 0:
                     # No individuals in these timesteps. Nothing to learn from,
@@ -347,7 +393,7 @@ class PPO:
                     continue
 
                 loss, diagnostics = self._losses(
-                    network, observation, acted, action, old_log_prob, old_value, advantage, ret
+                    network, observation, acted, action, old_log_prob, old_value, advantage, ret, rule_action
                 )
 
                 optimizer.zero_grad(set_to_none=True)
@@ -367,6 +413,9 @@ class PPO:
                     break
 
         result = accumulator.mean()
+        measured = result.get("conformance", float("nan"))
+        if measured == measured:  # not NaN: the rollout carried rule actions
+            self.conformance = measured
         result["explained_variance"] = explained_variance(
             rollout.value, rollout.ret, rollout.acted
         )

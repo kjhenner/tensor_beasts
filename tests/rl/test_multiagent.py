@@ -224,3 +224,19 @@ def test_foraging_reward_is_off_by_default():
         total += float(batch.reward.sum())
     # With the default weights, reward is survival plus 10 per reproduction.
     assert total >= survivors, "default reward should not include a biomass term"
+
+
+
+def test_batch_carries_the_rule_based_action_for_acting_cells():
+    """The rule action is what the imitation term anchors to, so it must be a
+    valid direction wherever an individual acted, on both step paths."""
+    env = build()
+    env.reset(seed=0)
+    for stepper in (lambda: env.step(torch.randint(0, 5, SIZE)), env.rule_based_step):
+        batch = stepper()
+        assert batch.rule_action is not None
+        assert batch.rule_action.shape == SIZE
+        assert batch.rule_action.dtype == torch.long
+        acting = batch.rule_action[batch.acted]
+        assert acting.numel() > 0
+        assert acting.min() >= 0 and acting.max() <= 4

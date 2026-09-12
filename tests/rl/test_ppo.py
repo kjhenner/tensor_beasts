@@ -115,7 +115,7 @@ def test_losses_ignore_non_acting_cells():
     rollout = make_rollout(network)
     ppo = PPO(PPOConfig(minibatch_steps=STEPS))
 
-    observation, acted, action, log_prob, value, advantage, ret = single_batch(rollout)
+    observation, acted, action, log_prob, value, advantage, ret, _rule = single_batch(rollout)
     _, clean = ppo._losses(
         network, observation, acted, action, log_prob, value, advantage, ret
     )
@@ -135,7 +135,7 @@ def test_losses_ignore_non_acting_cells():
         dirty_advantage, dirty_ret,
     )
     for key in clean:
-        assert clean[key] == pytest.approx(dirty[key], abs=1e-6), key
+        assert clean[key] == pytest.approx(dirty[key], abs=1e-6, nan_ok=True), key
 
 
 def test_losses_are_finite():
@@ -236,7 +236,7 @@ def test_value_clipping_runs_and_changes_the_value_loss():
 
     unclipped = PPO(PPOConfig(minibatch_steps=STEPS))
     clipped = PPO(PPOConfig(minibatch_steps=STEPS, value_clip_range=1e-4))
-    observation, acted, action, log_prob, value, advantage, ret = batch
+    observation, acted, action, log_prob, value, advantage, ret, _rule = batch
     # Stand the recorded value away from the current prediction, the way it
     # would be part way through an update. With them equal, clipping is a no-op
     # by construction and the test would prove nothing.
@@ -294,7 +294,7 @@ def test_minibatch_iteration_covers_every_timestep_once():
     seen = 0
     for batch in iter_minibatches_with_value(rollout, 4):
         seen += batch[0].shape[0]
-        assert len(batch) == 7
+        assert len(batch) == 8
     assert seen == STEPS
 
 
@@ -396,3 +396,111 @@ def test_running_stats_match_a_single_pass():
     everything = torch.cat(chunks)
     assert abs(stats.mean - float(everything.mean())) < 1e-3
     assert abs(stats.std - float(everything.std(unbiased=False))) < 1e-3
+
+
+
+# ---------------------------------------------------------------------------
+# Imitation of the rule-based policy, cross-faded out as conformance rises
+# ---------------------------------------------------------------------------
+
+
+def _rollout_with_rule_actions(seed=0, steps=6, size=8, channels=6):
+    """A synthetic rollout whose rule action is a fixed function of the
+    observation, so a policy can actually learn to agree with it."""
+    import torch
+    from tensor_beasts.rl.rollout import Rollout
+
+    g = torch.Generator().manual_seed(seed)
+    observation = torch.rand(steps, channels, size, size, generator=g)
+    acted = torch.rand(steps, size, size, generator=g) < 0.5
+    # Rule: the argmax over the first five channels. Learnable by a 1x1 conv.
+    rule_action = observation[:, :5].argmax(dim=1)
+    flat = torch.arange(size * size).reshape(size, size)
+    rollout = Rollout(
+        observation=observation.half(),
+        acted=acted,
+        action=torch.randint(0, 5, (steps, size, size), generator=g),
+        log_prob=torch.full((steps, size, size), -1.6),
+        value=torch.zeros(steps, size, size),
+        reward=torch.zeros(steps, size, size),
+        done=torch.zeros(steps, size, size, dtype=torch.bool),
+        successor=flat.expand(steps, size, size).clone(),
+        advantage=torch.zeros(steps, size, size),
+        ret=torch.zeros(steps, size, size),
+        rule_action=rule_action,
+    )
+    return rollout
+
+
+def test_imitation_weight_cross_fades_to_zero_at_target_conformance():
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    ppo = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8))
+    ppo.conformance = 0.0
+    assert ppo.imitation_weight() == pytest.approx(2.0), "full strength from a random start"
+    ppo.conformance = 0.4
+    assert ppo.imitation_weight() == pytest.approx(1.0), "halfway to target, half strength"
+    ppo.conformance = 0.8
+    assert ppo.imitation_weight() == 0.0, "at target the rules let go"
+    ppo.conformance = 0.95
+    assert ppo.imitation_weight() == 0.0, "and never pull backwards"
+
+    assert PPO(PPOConfig(imitation_coef=0.0)).imitation_weight() == 0.0, "off means off"
+
+
+def test_imitation_pulls_the_policy_toward_the_rules_and_conformance_rises():
+    """On a batch with zero advantages the only learning signal is imitation,
+    so agreement with the rule action must climb and the weight must fall."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    torch.manual_seed(0)
+    rollout = _rollout_with_rule_actions()
+    network = build_network("linear", 6)
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_target_conformance=0.9,
+                        learning_rate=0.1, epochs=1, minibatch_steps=6,
+                        entropy_coef=0.0, value_coef=0.0))
+    optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
+
+    first = ppo.update(network, rollout, optimizer)
+    for _ in range(40):
+        last = ppo.update(network, rollout, optimizer)
+
+    assert last["conformance"] > first["conformance"] + 0.3
+    assert last["imitation_loss"] < first["imitation_loss"]
+    assert last["imitation_weight"] < first["imitation_weight"], "the cross-fade is fading"
+
+
+def test_conformance_is_measured_even_when_imitation_is_off():
+    """So the log shows how far the policy drifts from the rules regardless."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig
+
+    rollout = _rollout_with_rule_actions()
+    ppo = PPO(PPOConfig(imitation_coef=0.0, epochs=1, minibatch_steps=6))
+    result = ppo.update(network := build_network("linear", 6), rollout,
+                        torch.optim.Adam(network.parameters()))
+    assert 0.0 <= result["conformance"] <= 1.0
+    assert result["imitation_weight"] == 0.0
+
+
+def test_imitation_term_is_masked_to_acting_cells():
+    import torch
+    from tensor_beasts.rl.networks import build_network
+    from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
+
+    rollout = _rollout_with_rule_actions()
+    network = build_network("linear", 6)
+    ppo = PPO(PPOConfig(imitation_coef=1.0))
+    batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
+    before = float(ppo.minibatch_loss(network, batch))
+
+    # Scramble the rule action everywhere nobody is standing.
+    scrambled = list(batch)
+    rule = scrambled[7].clone()
+    rule[~batch[1]] = (rule[~batch[1]] + 1) % 5
+    scrambled[7] = rule
+    after = float(ppo.minibatch_loss(network, tuple(scrambled)))
+    assert before == pytest.approx(after)

@@ -60,6 +60,9 @@ class Rollout:
     # the segment ends. Without it they have to reuse the last step's own value,
     # which is a step stale and biases every segment boundary the same way.
     last_value: Optional[torch.Tensor] = None
+    # (T, H, W) int64, the rule-based policy's direction at each cell, or None
+    # if the environment did not supply it. Used by the imitation term.
+    rule_action: Optional[torch.Tensor] = None
 
     @property
     def steps(self) -> int:
@@ -83,6 +86,7 @@ class RolloutBuffer:
         self._reward: List[torch.Tensor] = []
         self._done: List[torch.Tensor] = []
         self._successor: List[torch.Tensor] = []
+        self._rule_action: List[torch.Tensor] = []
 
     def __len__(self) -> int:
         return len(self._observation)
@@ -101,6 +105,8 @@ class RolloutBuffer:
         self._reward.append(batch.reward.detach())
         self._done.append(batch.done.detach())
         self._successor.append(batch.successor.detach())
+        if batch.rule_action is not None:
+            self._rule_action.append(batch.rule_action.detach())
 
     def build(self) -> Rollout:
         return Rollout(
@@ -112,6 +118,11 @@ class RolloutBuffer:
             reward=torch.stack(self._reward),
             done=torch.stack(self._done),
             successor=torch.stack(self._successor),
+            rule_action=(
+                torch.stack(self._rule_action)
+                if len(self._rule_action) == len(self._successor)
+                else None
+            ),
         )
 
     def clear(self) -> None:
@@ -124,6 +135,7 @@ class RolloutBuffer:
             self._reward,
             self._done,
             self._successor,
+            self._rule_action,
         ):
             store.clear()
 

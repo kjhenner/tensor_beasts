@@ -110,6 +110,12 @@ class AgentBatch:
     done: torch.Tensor
     successor: torch.Tensor
     reproduced: torch.Tensor
+    # (H, W) int64: the direction the simulation's own rule-based policy would
+    # have chosen from this same observation. Free to compute, since the rules
+    # are a function of the observation, and it is what lets a learner anchor
+    # to the baseline before the real rewards take over. Tie-breaks inside the
+    # rules are random, so this is a sample from the rule policy, not its mode.
+    rule_action: Optional[torch.Tensor] = None
 
     @property
     def num_agents(self) -> int:
@@ -210,8 +216,17 @@ class MultiAgentWorldEnv:
         names.extend(["self/energy", "self/biomass", "self/gradient_ema", "self/alive"])
         return names
 
+    def _rule_action(self, observation) -> torch.Tensor:
+        """What the entity's own rule-based policy would do from ``observation``."""
+        with torch.no_grad():
+            return self.entity.policy(observation).move_direction.to(torch.long)
+
     def _build_observation(self) -> torch.Tensor:
-        """Stack the individual's local view into a (C, H, W) field.
+        """Stack the individual's local view into a (C, H, W) field."""
+        return self._observe()[0]
+
+    def _observe(self):
+        """Return the (C, H, W) policy input and the raw Observation it came from.
 
         Each perceived feature contributes its value at the individual's own
         cell plus the four neighbouring values, which are exactly the inputs the
@@ -247,7 +262,7 @@ class MultiAgentWorldEnv:
         channels.append(observation.gradient_ema.float())
         channels.append(observation.alive_mask.float())
 
-        return torch.stack(channels, dim=0)
+        return torch.stack(channels, dim=0), observation
 
     # ------------------------------------------------------------------
     # Interaction
@@ -308,7 +323,8 @@ class MultiAgentWorldEnv:
             the step, matching the actions that were taken from it.
         """
         action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
-        observation = self._build_observation()
+        observation, raw = self._observe()
+        rule_action = self._rule_action(raw)
         biomass_before = self.entity.biomass.data.clone()
 
         self.world.update(TensorDict({self.entity_name: action}, batch_size=[]))
@@ -331,6 +347,7 @@ class MultiAgentWorldEnv:
             done=done,
             successor=successor,
             reproduced=transition.reproduced,
+            rule_action=rule_action,
         )
 
     def rule_based_step(self) -> AgentBatch:
@@ -340,7 +357,8 @@ class MultiAgentWorldEnv:
         the comparison to mean anything, so this returns the same AgentBatch as
         :meth:`step`, differing only in where the movement decision came from.
         """
-        observation = self._build_observation()
+        observation, raw = self._observe()
+        rule_action = self._rule_action(raw)
         biomass_before = self.entity.biomass.data.clone()
         self.world.update()
 
@@ -358,6 +376,7 @@ class MultiAgentWorldEnv:
             done=acted & ~alive_after,
             successor=successor,
             reproduced=transition.reproduced,
+            rule_action=rule_action,
         )
 
     def stats(self) -> Dict[str, float]:
