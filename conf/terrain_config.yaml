@@ -73,13 +73,27 @@ world:
       elevation:
         ramp:
       surface_water_volume:
-        rainfall_rate: 5.7e-6
+        # Rain is delivered on every cell for the first half of each 1000-step
+        # cycle (the season is hard-coded in SurfaceWaterVolume.update).
+        # It must exceed infiltration_rate or there is never any runoff, and it
+        # must be within an order of magnitude of soil evaporation or the soil
+        # can never wet up. At 1.5e-3 roughly a third of the rain runs off.
+        rainfall_rate: 1.5e-3
+        # NOTE: on a `ramp` with elevation_scale 100 the head difference between
+        # adjacent cells (~0.8) dwarfs the water depth, so `flow` always takes
+        # its "outflow exceeds available water" branch and empties each cell
+        # completely every step. flow_rate and relaxation_factor therefore have
+        # no effect on surface water here.
         flow_rate: 0.15
         relaxation_factor: 1.0
         steps: 1
       soil_water_volume:
         field_capacity: 0.55
-        infiltration_rate: 2e-7
+        # Was 2e-7: five thousand times below this feature's own default and
+        # forty times below evaporation, so the soil could only ever dry out and
+        # plant growth (ideal saturation 0.65 +/- 0.2) never once fired.
+        infiltration_rate: 1e-3
+        evaporation_rate: 2e-4
         flow_rate: 0.1
         saturation_gradient_coeff: 0.3
       soil_volume:

@@ -139,7 +139,7 @@ class SoilWaterVolume(Feature):
     def update(self, step: int):
         elevation = self.td.get(self.config.elevation_key)
         surface_water_volume = self.td.get(self.config.surface_water_volume_key)
-        original_total = self.data.sum() + surface_water_volume.sum()
+        original_soil, original_surface = self.data.sum(), surface_water_volume.sum()
 
         soil_capacity = self.td.get(self.config.soil_volume_key) * self.config.soil_porosity
 
@@ -178,16 +178,27 @@ class SoilWaterVolume(Feature):
         surface_water_volume += torch.clamp(self.data - soil_capacity, min=0)
         self.data = torch.clamp(torch.clamp(self.data, max=soil_capacity), min=0)
         soil_saturation = torch.nan_to_num(self.data / soil_capacity, 1.0, 1.0, 1.0)
-        self.td.set(self.config.soil_water_saturation_key, soil_saturation, inplace=True)
         logger = logging.getLogger(__name__)
         logger.debug("SoilWaterVolume gradient max: %s", gradient.sum(dim=(-1, -2)).max())
         logger.debug("SoilWaterVolume gradient shape: %s", gradient.shape)
-        assert torch.isclose(surface_water_volume.sum() + self.data.sum(), original_total)
+        assert torch.isclose(
+            surface_water_volume.sum() + self.data.sum(),
+            original_surface + original_soil,
+        ), "infiltration + soil flow did not conserve water"
 
         evaporation = self.config.evaporation_rate * torch.sigmoid(soil_saturation + 1)
         logger.debug("SoilWaterVolume evaporation total: %s", torch.sum(evaporation))
         self.data -= evaporation
         self.data = torch.clamp(self.data, min=0)
+
+        # Publish saturation *after* evaporation so the exported field matches
+        # the water that is actually in the soil. It used to be written before
+        # the evaporation subtraction, leaving every consumer a step stale.
+        self.td.set(
+            self.config.soil_water_saturation_key,
+            torch.nan_to_num(self.data / soil_capacity, 1.0, 1.0, 1.0),
+            inplace=True,
+        )
 
 
 @register_feature

@@ -1,3 +1,4 @@
+import logging
 from typing import Optional
 
 import torch
@@ -8,6 +9,45 @@ from tensor_beasts.registry import register_entity
 from tensor_beasts.features.shared_features import Energy, Scent
 from tensor_beasts.features.plant_features import Seed, Crowding
 from tensor_beasts.util import safe_add, safe_sub
+
+logger = logging.getLogger(__name__)
+
+# Keys already reported as missing, so a misconfigured world warns once rather
+# than once per step.
+_WARNED_NUTRIENT_KEYS = set()
+
+
+def _apply_nutrient_limit(td, key, energy, growth, consumption_rate, owner):
+    """Gate `growth` on available nutrients and debit what the growth consumes.
+
+    Returns the gated growth mask.
+
+    This used to live inline behind a bare ``except KeyError: pass``. That
+    swallowed a typo'd or dangling ``nutrients_key`` -- nutrient limitation was
+    then silently off for the whole run -- and it also swallowed any KeyError
+    raised by the surrounding growth code. Resolve the key explicitly instead,
+    and say so out loud when it does not exist.
+    """
+    if key is None:
+        return growth
+    if key not in td:
+        if key not in _WARNED_NUTRIENT_KEYS:
+            _WARNED_NUTRIENT_KEYS.add(key)
+            logger.warning(
+                "%s: nutrients_key %r is not present in the world state; "
+                "nutrient-limited growth is disabled. Available top-level "
+                "entities: %s",
+                owner, key, sorted(str(k) for k in td.keys()),
+            )
+        return growth
+
+    nutrients = td.get(key)
+    # Can only grow where there is enough nutrient left to pay for the growth.
+    growth = growth & (nutrients >= consumption_rate)
+    growth_mask = (energy > 0) & growth
+    nutrients -= growth_mask.float() * consumption_rate
+    nutrients.clamp_(min=0)
+    return growth
 
 
 @register_entity
@@ -93,19 +133,14 @@ class HydrodynamicPlant(Entity):
         death = torch.rand(energy.shape) < death_prob
 
         # Nutrient-limited growth
-        if self.config.nutrients_key is not None:
-            try:
-                nutrients = self.td.get(self.config.nutrients_key)
-                # Can only grow where nutrients are available
-                nutrient_available = nutrients >= self.config.nutrient_consumption_rate
-                growth = growth & nutrient_available
-
-                # Consume nutrients where growth occurs
-                growth_mask = (energy > 0) & growth
-                nutrients -= growth_mask.float() * self.config.nutrient_consumption_rate
-                nutrients.clamp_(min=0)
-            except KeyError:
-                pass  # No nutrients feature, grow without nutrient constraint
+        growth = _apply_nutrient_limit(
+            self.td,
+            self.config.nutrients_key,
+            energy,
+            growth,
+            self.config.nutrient_consumption_rate,
+            type(self).__name__,
+        )
 
         self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
         self.energy.data *= ~ death
@@ -194,17 +229,14 @@ class SimplePlant(Entity):
         death = torch.rand(energy.shape) < death_prob
 
         # Nutrient-limited growth (optional)
-        if self.config.nutrients_key is not None:
-            try:
-                nutrients = self.td.get(self.config.nutrients_key)
-                nutrient_available = nutrients >= self.config.nutrient_consumption_rate
-                growth = growth & nutrient_available
-
-                growth_mask = (energy > 0) & growth
-                nutrients -= growth_mask.float() * self.config.nutrient_consumption_rate
-                nutrients.clamp_(min=0)
-            except KeyError:
-                pass
+        growth = _apply_nutrient_limit(
+            self.td,
+            self.config.nutrients_key,
+            energy,
+            growth,
+            self.config.nutrient_consumption_rate,
+            type(self).__name__,
+        )
 
         self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
         # Death from bad conditions OR energy depleted to 0
