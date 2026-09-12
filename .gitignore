@@ -90,3 +90,4 @@ multirun/
 # Local experiment output
 rl_baseline_512.txt
 runs/
+sweeps/
