@@ -463,6 +463,84 @@ against the unchanged rules. Learning the predator as well is the more
 exciting experiment and belongs after a two-lever herbivore exists to be
 hunted.
 
+## Design: per-individual memory
+
+The repo owner's suggestion: give each individual a small vector it can read
+at one step and write for the next, a channel for communicating with its own
+future, and groundwork for communication between individuals later. Recorded
+here before any code, so the design can be argued with.
+
+### The simulation already has a one-dimensional version
+
+`gradient_ema` is a scalar every animal writes each step, carries with it when
+it moves, halves into its offspring on reproduction, and reads back next step.
+The policy's `Action` returns the new value and `Animal.update` writes it into
+the feature. Memory is that, generalized: a `memory` feature of `K` float32
+channels per cell, off when `K` is 0 so the golden hashes cannot move.
+
+Carried on movement exactly like `gradient_ema`, with each channel passed as a
+carried-feature slice. On reproduction the offspring receives a copy of the
+parent's memory. That is a choice, and a deliberate one: inheritance means a
+lineage can carry state across generations, which is the seed of the
+coordination idea. The alternative, offspring start blank, is one line to
+switch and worth testing as an ablation.
+
+### What the policy sees and writes
+
+The `K` memory channels join the observation as they are; the write head
+bounds them with `tanh`, so no scaling is needed. The network gains a memory
+head, `(B, K, H, W)` in `[-1, 1]`, and `forward_all` returns it beside the
+action logits. The environment writes it back through the same override path
+as the metabolic rate, so the viewer drives all three levers from one
+checkpoint. A memory channel can be visualised as a colour layer, which is
+worth doing early: the fastest way to learn what the agents chose to remember
+is to look.
+
+### The learning rule is the hard part, and it comes in two stages
+
+**Stage 1, no recurrence.** The write is a deterministic function of the
+current observation and is treated like any other output; no gradient crosses
+the step boundary. The agent can still learn to *read* memory, but it cannot
+learn what to *write* except by accident: the write head is a fixed projection
+of the current observation that the next step happens to find useful or not.
+This is cheap, it lands with the plumbing, and it is the control the real
+thing has to beat.
+
+**Stage 2, backpropagation through the individual.** For the write to be
+learned, the gradient at a step's decision must flow back through the memory it
+read to the earlier step that wrote it, and it must follow the individual, not
+the cell, because the individual moved in between. That is exactly what
+`compute_gae` already does for advantages: a gather through the successor map
+at every step of a backward recursion. The recurrent training does the same in
+the forward direction. During the update the segment is replayed in time order
+rather than as shuffled minibatches: the network computes each step's memory
+write from the stored observation, that write is gathered through the
+successor map into the memory slots of the next step's observation, and the
+loss at every step is summed before the backward pass. Truncated at the
+segment boundary, detached there, as ordinary truncated backpropagation through
+time.
+
+Three consequences to design around. Memory read at a step must come from the
+network's own recomputed write, not from the stored observation, or there is
+no path for the gradient; the stored observation supplies everything except
+those `K` channels. Individuals born inside the segment start from the copied
+parent memory, which is itself a recomputed write, so inheritance is inside the
+gradient path too. And PPO's ratio still needs the behaviour policy's
+log-probability from collection time, which is stored as now; the recurrent
+recomputation only changes how the current policy's log-probability is
+produced. Memory costs one extra forward pass per step of the segment during
+the update, which is the same cost as one epoch, so the budget is unchanged at
+one epoch and doubled at two.
+
+### What would count as "big if true"
+
+A learned memory has to beat the same recipe with `K` set to 0 on the same
+seeds, at 512, over the long window. The stage-1 control has to be run as well,
+because if the fixed random write already helps, the credit belongs to the
+extra channels rather than to anything learned. And something should be visible:
+a memory channel that tracks time since eating, or distance travelled from a
+predator, would be a result a person can look at and believe.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
