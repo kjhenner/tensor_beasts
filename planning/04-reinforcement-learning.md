@@ -518,6 +518,33 @@ Seed variance of the direction-only recipe at 256, step 1664: 1.075x, 1.041x,
 0.969x, 0.963x. The 256
 edge is small and partly the draw; the 512 results are the ones to trust.
 
+### The claim, with variance: five training seeds at 512
+
+Every checkpoint of the winning recipe, one per training seed, scored at 512
+on the same three paired evaluation seeds over 400 steps:
+
+| Training seed | At 256, step 1664 | At 512 | Survived agent-steps |
+|---|---|---|---|
+| 0 | 1.075x | 1.331x | 537,030 |
+| 1 | 1.041x | 1.183x | 477,162 |
+| 2 | 0.969x | 1.110x | 447,902 |
+| 3 | 0.963x | 1.261x | 508,834 |
+| 4 | not evaluated | 1.124x | 453,519 |
+| Rule-based | 1.000x | 1.000x | 403,426 |
+
+Mean 1.20x, range 1.11x to 1.33x, five of five above parity. Three of those
+checkpoints looked like losses on the 256 world. The 256 evaluation was
+measuring noise around parity: a world where the predators are extinct is too
+small and too degenerate to show the edge, so the size trap documented for the
+ecology applies to evaluation as well as training.
+
+**The claim is therefore: the anchored recipe beats the rule-based policy by
+11 to 33 percent on herbivore-steps survived at 512, across five training
+seeds.** Training-seed variance is real and the spread is the honest number,
+not the best draw. The remaining caveats are the ones already recorded: a
+400-step window against long cycles, though the seed-0 checkpoint held 1.155x
+over 1200, and policies trained at 256 rather than 512.
+
 ## Design: per-individual memory
 
 The repo owner's suggestion: give each individual a small vector it can read
