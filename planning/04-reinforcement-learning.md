@@ -662,6 +662,40 @@ recipe's own seeds span there, 0.96x to 1.08x. No benefit and no harm, which
 is what a fixed random projection of the observation should give. This is the
 number the recurrent run has to beat.
 
+### Stage 2 result at 256: parity with the control
+
+Same recipe, four memory channels, recurrent window 8: 0.945x at step 1664
+against the fixed-write control's 0.942x. The write head trained, mean write
+magnitude 0.73 and the highest rule agreement of any run at 0.88, so the
+machinery works; it did not turn into survival at this budget on this world.
+Since the 256 evaluation is noise around parity for every policy, both memory
+checkpoints are being scored at 512 before any conclusion is drawn. The
+honest expectation is modest: a task the memory could help with has not been
+identified, and a memory that helps only shows up where remembering pays.
+
+### The throttle finding, tested directly
+
+The direction-only winner was scored at 512 twice on each of three seeds: as
+trained, with the rule setting its throttle, and with its throttle pinned to
+the basal rate.
+
+| Seed | Rule-based | Direction-only | Pinned to basal |
+|---|---|---|---|
+| 0 | 560,162 | 869,149 (1.55x) | 1,112,931 (1.99x) |
+| 1 | 502,892 | 968,322 (1.93x) | 1,211,045 (2.41x) |
+| 2 | 593,987 | 914,787 (1.54x) | 1,050,141 (1.77x) |
+| Total | | 1.66x | **2.04x** |
+
+Survived agent-steps over 400 steps. The absolute ratios are not comparable to
+the standard evaluation's 1.331x, because this quick script counts the
+baseline's acting cells rather than its survivors; the within-table comparison
+is what matters, and it is clean: pinning the throttle to basal beats the
+rule's throttle on every seed, by about 23 percent in total. **The rule-based
+metabolism burns more than it needs.** That is the mechanism behind the cold
+two-lever checkpoint's 1.389x, and it is a statement about the ecology's
+hand-written rules rather than about learning. An apples-to-apples number
+through the standard evaluation is the next measurement.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same
