@@ -706,6 +706,46 @@ two-lever checkpoint's 1.389x, and it is a statement about the ecology's
 hand-written rules rather than about learning. An apples-to-apples number
 through the standard evaluation is the next measurement.
 
+### Memory at 512, measured with memory actually written
+
+| Checkpoint | Survived agent-steps | Ratio |
+|---|---|---|
+| Fixed write (stage 1) | 494,259 | 1.225x |
+| Recurrent (stage 2) | 393,597 | **0.976x** |
+| Direction-only, same seed, no memory | 537,030 | 1.331x |
+
+The fixed write sits inside the five-seed band of the plain recipe, which is
+what a random projection of the observation should do. The recurrent policy is
+the only checkpoint in the recipe family to fall below parity at 512. The
+write head trained, the agreement with the rules was the highest of any run,
+and the result is worse. The plausible reading is that the policy learned to
+rely on a memory whose content is not worth relying on: the learning signal
+for *what* to write is the same weak survival signal everything else has,
+and a memory trained on it is noise the policy has been taught to trust.
+Memory is not a win at this budget. What it would take is a task where
+remembering demonstrably pays, and evidence in a memory channel that a person
+can read; neither exists yet.
+
+### The throttle finding, apples to apples
+
+Through the standard paired evaluation at 512, the direction-only winner with
+its throttle pinned to the basal rate:
+
+| | Survived | Reproductions | Population | Lifespan | Ratio |
+|---|---|---|---|---|---|
+| Direction-only, rule's throttle | 537,030 | 4,175 | 1,353 | 85.2 | 1.331x |
+| Direction-only, throttle pinned to basal | 663,881 | 5,526 | 1,674 | 92.4 | **1.646x** |
+| Rule-based | 403,426 | 2,575 | 1,015 | 88.3 | 1.000x |
+
+Pinning the throttle adds 24 percent on top of learned movement and is worth
+more than everything the policy learned about where to go. Herbivores live
+longer, sustain a two-thirds larger population and reproduce twice as often
+as under the rules. The rule-based metabolism burns more than it needs, and
+the cold two-lever checkpoint's 1.389x was this effect arriving through the
+anchor rather than through learning. Whether the rule-based policy *itself*
+improves with its throttle pinned is the next measurement; if it does, this
+is a finding about the ecology's tuning rather than about learning.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same
