@@ -796,6 +796,37 @@ Every ratio recorded above this point was measured against the truncating
 rules and should be re-measured before being quoted against the new ones.
 The golden baseline moves for every config with animals, in its own commit.
 
+### Rounding is not enough: energy goes float
+
+The repo owner's objection to the rounding fix was right: energy is a uint8
+grid, so rounding removes the cliff at basal and keeps the staircase. A burn
+of 2.0 to 2.5 biomass yields exactly 7, 3.0 yields 10, nothing between exists,
+and the amount burned truncates from the other side, so a rate of 2.5 costs 2.
+The throttle cannot be a smooth trade-off on integers.
+
+Whether the integers buy anything is measurable. At 512x512 the per-step
+accounting ops that touch energy and biomass, metabolism, dissipation, eating,
+death and reproduction checks:
+
+| Representation | Accounting ops per step | Share of a full step | Grid memory |
+|---|---|---|---|
+| uint8 | 2.50 ms | 1.5% | 0.5 MB |
+| float32 | 1.18 ms | 0.7% | 2.1 MB |
+
+uint8 is *slower*, because the saturating add-and-fix-up helpers it needs cost
+more than its bandwidth saves, and the memory difference is a rounding error
+beside the float16 scent field. The integers cost the staircase, the
+truncation bug, fourteen saturating-helper call sites, twenty explicit casts
+and a workaround for a PyTorch bug comparing uint8 against values above 255,
+and give nothing back.
+
+Decision: energy and biomass become float32 on the same 0..255 scale, so every
+config, threshold and renderer stays valid, with every truncation, rounding
+and saturation hack removed. The rounding commit above is therefore an interim
+step and is superseded. Every ratio in this document was measured against the
+integer simulation; the first predator run was started against the rounded
+integer simulation and will be rerun against float before it is quoted.
+
 ### Memory: closed for now, on a clean negative
 
 At its own training size the recurrent checkpoint scores 1.065x against 1.247x
