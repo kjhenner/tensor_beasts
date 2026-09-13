@@ -769,6 +769,33 @@ tuning observation for `conf/basic_config.yaml`, not a claim about learning,
 and it is the repo owner's call whether the rules should change: a cooler rule
 is a stronger baseline, and every ratio above would shrink against it.
 
+### Correction: the rules were not running hot, the arithmetic was truncating
+
+Cooling the rule's metabolic sensitivity from 2.5 to 0.5 changed herbivore
+survival by 1.5 percent; the last step to exactly zero changed it by 21. A
+cliff at an exact value is not "too hot". The cause is that energy conversion
+truncated to uint8: at exactly the basal rate an animal burned 2 biomass for
+2 x 3.5 = 7 energy, while at a rate of 2.05 it burned the same 2 biomass for
+int(6.975) = 6. Every setting except one exact value paid a 14 percent tax
+for nothing, and the learned throttle "chose cold" because it found the one
+tax-free point. The over-burn story above is wrong and is left in place so
+the correction can be read against it.
+
+Two remedies, measured rule against rule at 512 on three seeds:
+
+| Change | Herbivore agent-steps | Mean predators |
+|---|---|---|
+| None | 1,247,564 (1.000x) | 132 |
+| Sensitivity 0, pin at basal | 1,510,900 (1.211x) | 142 |
+| Round energy instead of truncating | 1,435,007 (1.150x) | 142 |
+
+Rounding is the change made. It is a simulation fix rather than a tuning, it
+keeps the sprint response and makes the throttle a real trade-off again, and
+the 5 percent it leaves behind is the genuine cost of burning above basal.
+Every ratio recorded above this point was measured against the truncating
+rules and should be re-measured before being quoted against the new ones.
+The golden baseline moves for every config with animals, in its own commit.
+
 ### Memory: closed for now, on a clean negative
 
 At its own training size the recurrent checkpoint scores 1.065x against 1.247x

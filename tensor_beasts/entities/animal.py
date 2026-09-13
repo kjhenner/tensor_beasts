@@ -526,8 +526,14 @@ class Animal(Entity):
         # Burn biomass, limited by available biomass
         biomass_burned = torch.min(metabolic_rate, biomass.float()).to(torch.uint8)
 
-        # Energy gained = biomass * efficiency
-        energy_gained = (biomass_burned.float() * efficiency).to(torch.uint8)
+        # Energy gained = biomass * efficiency, ROUNDED. Truncation made the
+        # throttle a cliff rather than a trade-off: at exactly the basal rate an
+        # animal got 2 * 3.5 = 7 energy, while at 2.05 it got int(6.975) = 6 for
+        # the same 2 biomass, a 14% tax on every setting except one exact value.
+        # Measured rule-vs-rule at 512, rounding is worth 1.15x herbivore-steps
+        # and lifts predators too; pinning the rate at basal, which dodges the
+        # cliff by deleting the sprint response, was worth 1.21x.
+        energy_gained = torch.round(biomass_burned.float() * efficiency).to(torch.uint8)
 
         safe_add(energy, energy_gained)
         safe_sub(biomass, biomass_burned)

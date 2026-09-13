@@ -198,3 +198,24 @@ def test_carried_feature_fn_is_applied_exactly_once():
 
     assert calls["self"] == 1, f"carried self fn called {calls['self']} times, expected 1"
     assert calls["offspring"] == 1, f"carried offspring fn called {calls['offspring']} times, expected 1"
+
+
+
+def test_energy_conversion_rounds_rather_than_truncates():
+    """At exactly the basal rate an animal burned 2 biomass for 7 energy; at a
+    rate of 2.05 it burned the same 2 biomass for 6, because 6.975 truncated.
+    That made every metabolic setting except one exact value a 14% tax, and
+    it was mistaken for the rule 'running too hot'."""
+    from tensor_beasts.config import load_config
+    from tensor_beasts.world import World
+
+    config = load_config("conf/basic_config.yaml")
+    config.world.size = [8, 8]
+    world = World(config.world)
+    world.initialize()
+    herbivore = world.entity_dict["Herbivore"]
+    herbivore.biomass.data[:] = 200
+    herbivore.energy.data[:] = 0
+    herbivore._execute_metabolism(torch.full((8, 8), 2.05))
+    assert int(herbivore.energy.data[0, 0]) == 7, "2 * 3.4875 = 6.975 must round to 7, not truncate to 6"
+    assert int(herbivore.biomass.data[0, 0]) == 198
