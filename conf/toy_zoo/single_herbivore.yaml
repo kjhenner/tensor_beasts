@@ -1,0 +1,184 @@
+# Toy Zoo: Single Herbivore
+# Tiny world with one plant patch, one herbivore, neutral water
+# For observing individual behavior and debugging
+
+display:
+  color_displays:
+    # Combined view: biomass (intensity) + energy (color warmth)
+    - title: "biomass_energy"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleterrain,simple_water}"
+          threshold: 0.1
+          color_min: [0, 0, 32]
+          color_max: [0, 0, 128]
+          input_range: [0, 1]
+        - key: "${key:simpleplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:herbivore,energy}"
+          threshold: 1
+          color_min: [64, 64, 0]
+          color_max: [255, 255, 0]
+          input_range: [0, 255]
+
+    # RGB scent view: R=herbivore, G=plant, B=water
+    - title: "scents_rgb"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleterrain,simple_water}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 0, 255]
+          input_range: [0, 1]
+        - key: "${key:simpleplant,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+        - key: "${key:herbivore,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+
+    # Plant scent only
+    - title: "plant_scent"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+
+    # Water level
+    - title: "water"
+      fn_name: "default"
+      key: "${key:simpleterrain,simple_water}"
+      input_range: [0, 1]
+
+    # Histogram: Plant energy distribution
+    - title: "hist_plant_energy"
+      fn_name: "histogram"
+      key: "${key:simpleplant,energy}"
+      bins: 32
+      range: [0, 255]
+      filter_zeros: true
+      color: [0, 255, 100]
+      background: [20, 20, 30]
+      show_stats: true
+      screen_height: 256
+      screen_width: 512
+
+    # Histogram: Herbivore biomass distribution
+    - title: "hist_herb_biomass"
+      fn_name: "histogram"
+      key: "${key:herbivore,biomass}"
+      bins: 32
+      range: [0, 255]
+      filter_zeros: true
+      color: [100, 100, 255]
+      background: [20, 20, 30]
+      show_stats: true
+      screen_height: 256
+      screen_width: 512
+
+    # Histogram: Water level distribution
+    - title: "hist_water"
+      fn_name: "histogram"
+      key: "${key:simpleterrain,simple_water}"
+      bins: 32
+      range: [0, 1]
+      filter_zeros: false
+      color: [50, 150, 255]
+      background: [20, 20, 30]
+      show_stats: true
+      screen_height: 256
+      screen_width: 512
+
+world:
+  device: auto
+  running: True
+  max_ups: 10  # Slow for observation
+  size: [64, 64]
+
+  entities:
+    SimpleTerrain:
+      oscillator:
+        frequency: 0.0001
+        amplitude: 0.0  # Neutral - no oscillation effect
+        offset: 0.5
+        phase: 0.0
+      simple_water:
+        perlin_scale: [4, 4]
+        perlin_octaves: 2
+        oscillator_amplitude: 0.0  # No water level changes
+      nutrients:
+        initial_nutrients: 100.0
+        diffusion_rate: 0.01
+
+    SimplePlant:
+      initial_energy: 64
+      init_prob: 0.3  # Moderate coverage
+      ideal_water_level: 0.5
+      water_tolerance: 0.5  # Wide tolerance
+      nutrients_key: "simpleterrain:nutrients"
+      nutrient_consumption_rate: 0.2
+      ideal_growth_rate: 0.1
+      seed:
+        energy_key: "${key:simpleplant,energy}"
+        crowding_key: "${key:simpleplant,crowding}"
+        germination_prob: 0.02
+        seed_prob: 0.05
+      crowding:
+        energy_key: "${key:simpleplant,energy}"
+
+    Herbivore:
+      # Single herbivore in center
+      initial_energy: 100
+      initial_biomass: 150
+      init_prob: 0.0
+      toy_init: True
+
+      # Eating
+      eat_max: 5
+      food_keys:
+        - "simpleplant:energy"
+
+      # Perception
+      perception:
+        - key: "simpleplant:scent"
+          kernel_size: 1
+        - key: "herbivore:scent"
+          kernel_size: 1
+
+      # Navigation weights: positive = attract, negative = repel
+      navigation_weights:
+        "simpleplant:scent": 1.0
+        "herbivore:scent": 0.0  # No avoidance of self
+
+      # Metabolism
+      basal_rate: 2
+      max_metabolic_rate: 4
+      gradient_ema_alpha: 0.1
+
+      # Dissipation
+      dissipation_rate: 0.01
+      dissipation_floor: 1
+
+      # Movement cost
+      base_movement_cost: 0
+      mass_cost_factor: 0.0
+
+      # Death & Reproduction
+      survival_threshold: 5
+      nutrients_key: "simpleterrain:nutrients"
+      reproduction_threshold: 250  # High to prevent reproduction initially

@@ -1,0 +1,87 @@
+import torch
+from omegaconf import DictConfig
+
+from tensor_beasts.features.feature import Feature
+from tensor_beasts.registry import register_feature
+
+
+@register_feature
+class IdFeature(Feature):
+    name = "id"
+    dtype = torch.int32
+
+
+@register_feature
+class OffspringCount(Feature):
+    name = "offspring_count"
+    dtype = torch.int32
+
+
+@register_feature
+class Biomass(Feature):
+    """Biomass storage - what animals gain from eating.
+
+    Float32 on a 0..255 scale, clamped to [0, 255] by its holders. See Energy.
+    """
+    name = "biomass"
+    dtype = torch.float32
+    default_tags = {"observable"}
+    default_config = DictConfig({})
+    depends_on = {}
+
+
+@register_feature
+class GradientEMA(Feature):
+    """EMA of scent gradient strength - used to modulate metabolism."""
+    name = "gradient_ema"
+    dtype = torch.float32
+    default_tags = {"observable"}
+    default_config = DictConfig({})
+    depends_on = {}
+
+
+@register_feature
+class SlotId(Feature):
+    """
+    Genetic slot identifier for each individual.
+
+    Used by the genetic algorithm system to track which genome/lineage
+    each individual belongs to. Slot 0 is the default slot.
+    """
+    name = "slot_id"
+    dtype = torch.uint8
+    default_tags = set()
+    default_config = DictConfig({
+        "default_slot": 0,  # Default slot for all individuals
+    })
+    depends_on = {}
+
+    def initialize_data(self):
+        """Initialize all individuals to default slot."""
+        super().initialize_data()
+        default_slot = self.config.get("default_slot", 0)
+        self.data.fill_(default_slot)
+
+
+@register_feature
+class Memory(Feature):
+    """A small vector each individual writes at one step and reads at the next.
+
+    Generalizes gradient_ema, the scalar the simulation already carries with an
+    animal through movement and halves into its offspring. Memory is ``size``
+    float32 channels per cell, carried unchanged on movement and copied into
+    offspring on reproduction, so a lineage can carry state across
+    generations. It is written only by an external (learned) policy through
+    the action override; the rule-based policy never touches it, and with
+    ``size`` at its default of 0 the feature is empty and nothing changes.
+    """
+    name = "memory"
+    dtype = torch.float32
+    default_tags = set()
+    default_config = DictConfig({"size": 0})
+    depends_on = {}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.size = int(self.config.get("size", 0))
+        self.shape = tuple(self.shape) + (self.size,)

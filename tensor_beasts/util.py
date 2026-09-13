@@ -1,16 +1,40 @@
 import math
 import random
-from typing import List
+from contextlib import nullcontext
+from typing import List, Union, Tuple, SupportsAbs, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
-from functools import lru_cache
+from functools import lru_cache, wraps
 
 import time
 import statistics
 
+from tensordict import TensorDict, NestedKey
+
 # Initialize a dictionary to store function execution times
 execution_times = {}
+
+
+def device_lru_cache(fn):
+    """lru_cache for functions returning tensors, keyed by device as well as args.
+
+    A plain lru_cache here caches a kernel built on whichever device happened to
+    be default at the first call. Any later call under a different default
+    device then gets a kernel on the wrong device, which surfaces as
+    "Input type (MPSFloatType) and weight type (torch.FloatTensor) should be the
+    same" from conv2d rather than as anything that names the cache.
+    """
+    cached = lru_cache(maxsize=None)(lambda _device, *args, **kwargs: fn(*args, **kwargs))
+
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        return cached(torch.get_default_device(), *args, **kwargs)
+
+    wrapper.cache_clear = cached.cache_clear
+    return wrapper
+
 
 
 DIRECTION_NAMES = {
@@ -46,7 +70,7 @@ def get_mean_execution_times():
     }
 
 
-@lru_cache
+@device_lru_cache
 def directional_kernel_set(size: int):
     return {
         1: generate_direction_kernel(size, 1),
@@ -54,40 +78,6 @@ def directional_kernel_set(size: int):
         3: generate_direction_kernel(size, 3),
         4: generate_direction_kernel(size, 4)
     }
-
-
-def safe_add(a, b, inplace=True):
-    if not inplace:
-        a = a.clone()
-    a += b
-    a[a < b] = 255
-    return a
-
-
-def safe_sum(matrices: List[torch.Tensor]):
-    original_dtype = matrices[0].dtype
-    return torch.stack(matrices).type(torch.int16).sum(dim=0).clamp(0, 255).type(original_dtype)
-
-
-def safe_sub(a, b, inplace=True):
-    if not inplace:
-        a = a.clone()
-    a -= b
-    a[a > 255 - b] = 0
-    return a
-
-
-def safe_mult(a, b, inplace=True):
-    if not inplace:
-        a = a.clone()  # Create a copy to avoid modifying the original tensor if inplace is False
-
-    result = a.to(torch.uint16) * b.to(torch.uint16)
-
-    overflow_mask = result > 255
-    result = torch.where(overflow_mask, torch.tensor(255, dtype=torch.uint8), result)
-
-    a[:] = result.to(torch.uint8)
-    return a
 
 
 def generate_direction_kernel(size, direction):
@@ -124,39 +114,47 @@ def generate_direction_kernel(size, direction):
 
 
 def pad_matrix(mat, direction):
+    """Shift (..., H, W) by one cell in `direction`, zero-filling the vacated edge.
+
+    F.pad counts from the last dimension backwards, so the pad tuples below are
+    already rank-agnostic; only the slicing needed to move off the leading axes.
+    """
     if direction == 1:  # Up
-        return torch.nn.functional.pad(mat[1:], (0, 0, 0, 1), value=0)
+        return torch.nn.functional.pad(mat[..., 1:, :], (0, 0, 0, 1), value=0)
     elif direction == 2:  # Down
-        return torch.nn.functional.pad(mat[:-1], (0, 0, 1, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :-1, :], (0, 0, 1, 0), value=0)
     elif direction == 3:  # Left
-        return torch.nn.functional.pad(mat[:, 1:], (0, 1, 0, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :, 1:], (0, 1, 0, 0), value=0)
     elif direction == 4:  # Right
-        return torch.nn.functional.pad(mat[:, :-1], (1, 0, 0, 0), value=0)
+        return torch.nn.functional.pad(mat[..., :, :-1], (1, 0, 0, 0), value=0)
 
 
-@lru_cache
+@device_lru_cache
 def get_edge_mask(shape: tuple):
     mask = torch.zeros(shape, dtype=torch.float32)
-    mask[0, :] = 1
-    mask[-1, :] = 1
-    mask[:, 0] = 1
-    mask[:, -1] = 1
+    mask[..., 0, :] = 1
+    mask[..., -1, :] = 1
+    mask[..., :, 0] = 1
+    mask[..., :, -1] = 1
     return mask
 
 
 def get_direction_matrix(matrix, random_choices=None):
-    down = torch.roll(matrix, shifts=-1, dims=0)
-    up = torch.roll(matrix, shifts=1, dims=0)
-    right = torch.roll(matrix, shifts=-1, dims=1)
-    left = torch.roll(matrix, shifts=1, dims=1)
+    down = torch.roll(matrix, shifts=-1, dims=-2)
+    up = torch.roll(matrix, shifts=1, dims=-2)
+    right = torch.roll(matrix, shifts=-1, dims=-1)
+    left = torch.roll(matrix, shifts=1, dims=-1)
 
     # Setting the boundaries to 0 to avoid wrapping around behavior
-    up[-1, :] = 0
-    down[0, :] = 0
-    left[:, -1] = 0
-    right[:, 0] = 0
+    up[..., -1, :] = 0
+    down[..., 0, :] = 0
+    left[..., :, -1] = 0
+    right[..., :, 0] = 0
 
-    # Stack matrices to work with all directions together
+    # Stack matrices to work with all directions together. dim=-1 here is the
+    # *stacked* direction axis (5 candidates), not a spatial axis; it is trailing
+    # and stays trailing at any input rank, so the reductions below are already
+    # rank-agnostic.
     stacked = torch.stack([matrix, up, down, left, right], dim=-1)
 
     # Step 2: Compute the maximum values across the stacked axis
@@ -177,27 +175,44 @@ def get_direction_matrix(matrix, random_choices=None):
     return direction_indices
 
 
+def as_conv_batch(input: torch.Tensor) -> Tuple[torch.Tensor, torch.Size]:
+    """Collapse every leading dimension of a (..., H, W) tensor into conv2d's N.
+
+    Returns the (N, 1, H, W) view and the leading shape needed to restore it.
+    Using reshape rather than unsqueeze/squeeze keeps this correct at any rank,
+    including the degenerate cases where a leading dimension happens to be 1 --
+    a bare .squeeze() would silently drop those.
+    """
+    if input.dim() < 2:
+        raise ValueError(f"Expected at least 2 dimensions (..., H, W), got shape {tuple(input.shape)}")
+    leading = input.shape[:-2]
+    return input.reshape(-1, 1, *input.shape[-2:]), leading
+
+
 def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     """
     Mimic scipy.ndimage.correlate using PyTorch's conv2d.
 
+    Rank-agnostic: any leading dimensions are folded into the conv batch and
+    restored afterwards.
+
     Parameters:
-    - input: 2D torch tensor, the input image.
+    - input: (..., H, W) torch tensor, the input.
     - kernel: 2D torch tensor, the kernel for correlation.
     - mode: str, boundary mode (only 'constant' mode implemented similar to scipy.ndimage.correlate).
     - cval: float, value to fill pad when mode is 'constant'.
 
     Returns:
-    - result: 2D torch tensor, result of correlation.
+    - result: (..., H, W) torch tensor, result of correlation.
     """
+    if mode != 'constant':
+        raise ValueError("Only 'constant' mode is implemented.")
+
     input_dtype = input.dtype
     input = input.type(torch.float32)
     kernel = kernel.type(torch.float32)
-    # Ensure kernel and input are in the right format
-    if input.dim() == 2:
-        input = input.unsqueeze(0).unsqueeze(0)
-    elif input.dim() == 3:
-        input = input.unsqueeze(1)
+
+    input_4d, leading = as_conv_batch(input)
 
     if kernel.dim() == 2:
         kernel = kernel.unsqueeze(0).unsqueeze(0)
@@ -206,47 +221,91 @@ def torch_correlate_2d(input: torch.Tensor, kernel, mode='constant', cval=0):
     pad_size = (kernel.shape[-1] // 2, kernel.shape[-2] // 2)
     pad = (pad_size[0], pad_size[0], pad_size[1], pad_size[1])
 
-    if mode == 'constant':
-        input_padded = F.pad(input, pad=pad, mode='constant', value=cval)
-    else:
-        raise ValueError("Only 'constant' mode is implemented.")
+    input_padded = F.pad(input_4d, pad=pad, mode='constant', value=cval)
 
     result = F.conv2d(input_padded, kernel)
 
-    # Remove the extra dimensions added earlier
-    result = result.squeeze()
+    # Restore the original leading dimensions.
+    result = result.reshape(*leading, *result.shape[-2:])
     return result.type(input_dtype)
+
+
+@device_lru_cache
+def directional_kernel_bank(size: int) -> torch.Tensor:
+    """The four directional kernels stacked as conv2d weights of shape (4, 1, K, K).
+
+    Index d-1 holds the kernel for direction d, matching directional_kernel_set.
+    """
+    kernels = directional_kernel_set(size)
+    return torch.stack([kernels[d].type(torch.float32) for d in range(1, 5)]).unsqueeze(1)
+
+
+def torch_correlate_2d_bank(input: torch.Tensor, kernels: torch.Tensor, cval: float = 0) -> torch.Tensor:
+    """Correlate a 2D input against a bank of kernels in a single conv2d.
+
+    Equivalent to stacking torch_correlate_2d(input, k) over each kernel in the
+    bank, but pays the pad and dispatch cost once rather than once per kernel.
+
+    Rank-agnostic: the kernel axis is inserted just before the spatial axes, so a
+    (H, W) input still gives (K, H, W) while a (B, H, W) input gives (B, K, H, W).
+    Index it as result[..., d, :, :] rather than result[d].
+
+    Parameters:
+    - input: (..., H, W) tensor.
+    - kernels: (K, 1, kh, kw) conv2d weights.
+    - cval: constant boundary fill value.
+
+    Returns:
+    - (..., K, H, W) tensor.
+    """
+    pad_h, pad_w = kernels.shape[-2] // 2, kernels.shape[-1] // 2
+    input_4d, leading = as_conv_batch(input.type(torch.float32))
+    input_padded = F.pad(
+        input_4d,
+        pad=(pad_w, pad_w, pad_h, pad_h),
+        mode='constant',
+        value=cval,
+    )
+    result = F.conv2d(input_padded, kernels)
+    return result.reshape(*leading, *result.shape[-3:])
 
 
 def torch_correlate_3d(input_tensor, weights):
     """
-    Apply a batched 2D convolution to a (H, W, C) tensor using (H, W) weights and return (H, W, C) tensor.
-    Each channel in the input tensor is treated as a separate batch for 2D convolution.
+    Apply a batched 2D convolution to a (..., H, W, C) tensor using (K, K) weights.
+
+    Each channel is convolved independently with the same kernel.
+
+    NOTE: unlike most tensors in the simulation, this one is *channel-trailing* --
+    the spatial axes are -3 and -2, not -2 and -1. Any leading dimensions (e.g. a
+    world batch) are folded into the conv batch and restored afterwards.
 
     Parameters:
-    - input_tensor: torch.Tensor of shape (H, W, C)
+    - input_tensor: torch.Tensor of shape (..., H, W, C)
     - weights: torch.Tensor of shape (K, K)
 
     Returns:
-    - output_tensor: torch.Tensor of shape (H, W, C)
+    - output_tensor: torch.Tensor of shape (..., H, W, C)
     """
-    # Ensure input_tensor is of shape (H, W, C)
-    assert len(input_tensor.shape) == 3, "input_tensor must be of shape (H, W, C)"
+    assert input_tensor.dim() >= 3, "input_tensor must be of shape (..., H, W, C)"
 
     # Ensure weights is of shape (K, K)
     assert len(weights.shape) == 2, "weights must be 2D"
 
-    # Convert input_tensor to shape (C, 1, H, W) to treat channels as separate batches
-    input_4d = input_tensor.permute(2, 0, 1).unsqueeze(1)
+    leading = input_tensor.shape[:-3]
+    H, W, C = input_tensor.shape[-3:]
+
+    # Move the channel axis in front of the spatial axes and fold everything
+    # before H, W into the conv batch: (..., C, H, W) -> (N, 1, H, W)
+    input_4d = input_tensor.movedim(-1, -3).reshape(-1, 1, H, W)
 
     # Convert weights to shape (1, 1, K, K) to apply the same kernel on all channels
     weight_4d = weights.unsqueeze(0).unsqueeze(0)
 
-    # Apply 2D convolution for each channel separately using conv2d with groups=C
     conv_output = F.conv2d(input_4d, weight_4d, stride=1, padding='same', groups=1)
 
-    # Convert output back to (H, W, C) by inverting the initial permutation
-    output_tensor = conv_output.squeeze(1).permute(1, 2, 0)
+    # Restore (..., C, H, W) and then move the channel axis back to the end.
+    output_tensor = conv_output.reshape(*leading, C, H, W).movedim(-3, -1)
 
     return output_tensor
 
@@ -270,7 +329,6 @@ def generate_maze(size: int):
 
         for dx, dy in directions:
             nx, ny = x + dx, y + dy
-            print(nx, ny)
             if (nx >= 0) and (ny >= 0) and (nx < size) and (ny < size) and maze[2*nx, 2*ny] == 1:
                 maze[2*nx, 2*ny] = 0
                 maze[2*x+dx, 2*y+dy] = 0
@@ -285,7 +343,7 @@ def generate_maze(size: int):
     return maze.repeat_interleave(8, dim=0).repeat_interleave(8, dim=1)
 
 
-@lru_cache
+@device_lru_cache
 def _generate_diffusion_kernel():
     kernel = torch.tensor([
         [0, 0, 1, 0, 0],
@@ -297,7 +355,7 @@ def _generate_diffusion_kernel():
     return kernel / torch.sum(kernel)
 
 
-@lru_cache
+@device_lru_cache
 def generate_diffusion_kernel(size: int = 7, sigma: float = 1.0, slice_height: float = 0.1):
     """
     Generate a 2D slice of a hemispherical diffusion kernel on a flat plane.
@@ -333,7 +391,7 @@ def generate_diffusion_kernel(size: int = 7, sigma: float = 1.0, slice_height: f
 
     return kernel
 
-@lru_cache
+@device_lru_cache
 def generate_plant_crowding_kernel():
     return torch.tensor([
         [0, 1, 1, 1, 0],
@@ -342,6 +400,44 @@ def generate_plant_crowding_kernel():
         [1, 1, 2, 1, 1],
         [0, 1, 1, 1, 0],
     ], dtype=torch.uint8)
+
+
+@device_lru_cache
+def generate_direction_kernels(eight_directions: bool = False, include_center: bool = False):
+    if not include_center:
+        if eight_directions:
+            # Create kernels for the 8 directions
+            return torch.tensor([
+                [-1, -1], [-1, 0], [-1, 1],
+                [ 0, -1],          [ 0, 1],
+                [ 1, -1], [ 1, 0], [ 1, 1]
+            ], dtype=torch.float32)
+        else:
+            # Create kernels for the 4 directions
+            return torch.tensor([
+                          [-1, 0],
+                [ 0, -1],          [ 0, 1],
+                          [ 1, 0]
+            ], dtype=torch.float32)
+    else:
+        if eight_directions:
+            # Create kernels for the 8 directions
+            return torch.tensor([
+                [-1, -1], [-1, 0], [-1, 1],
+                [ 0, -1], [ 0, 0], [ 0, 1],
+                [ 1, -1], [ 1, 0], [ 1, 1]
+            ], dtype=torch.float32)
+        else:
+            # Create kernels for the 4 directions
+            return torch.tensor([
+                [-1, 0], [ 0, -1], [ 0, 0], [ 0, 1], [ 1, 0]
+            ], dtype=torch.float32)
+
+
+@lru_cache
+def lru_distance(dx, dy, scale: float = 1.0):
+    """LRU distance function for efficient 8 direction distance calculation."""
+    return torch.sqrt(dx**2 + dy**2) * scale
 
 
 def fade(t):
@@ -361,49 +457,140 @@ def gradient(h, x, y):
     return g[..., 0] * x + g[..., 1] * y
 
 
-def perlin_noise(size, res):
-    delta = (res[0] / size[0], res[1] / size[1])
+def perlin_noise(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
+    # Run on CPU to avoid MPS advanced indexing race conditions, then move to target device
+    target_device = torch.get_default_device()
+    run_on_cpu = target_device is not None and target_device.type == 'mps'
 
-    grid = torch.stack(torch.meshgrid(
-        torch.arange(0, res[0], delta[0], dtype=torch.float32),
-        torch.arange(0, res[1], delta[1], dtype=torch.float32)
-    ), dim=-1)
+    if run_on_cpu:
+        torch.mps.synchronize()  # Ensure all MPS ops complete first
 
-    grid0 = grid.to(torch.int32)
-    grid1 = grid0 + 1
+    def generate_noise(x, y, res):
+        grid0_x, grid0_y = x.to(torch.int32), y.to(torch.int32)
+        grid1_x, grid1_y = grid0_x + 1, grid0_y + 1
 
-    # Generate random gradients between -1 and 1
-    random_grid = torch.rand((res[0] + 1, res[1] + 1, 2), dtype=torch.float32) * 2 - 1
+        random_grid = torch.rand((res[0] + 1, res[1] + 1, 2), dtype=torch.float32) * 2 - 1
 
-    def gradient(hash, x, y):
-        return hash[..., 0] * x + hash[..., 1] * y
+        def gradient(hash, x, y):
+            return hash[..., 0] * x + hash[..., 1] * y
 
-    dot00 = gradient(
-        random_grid[grid0[..., 0], grid0[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid0[..., 1]
+        dot00 = gradient(random_grid[grid0_x, grid0_y], x - grid0_x, y - grid0_y)
+        dot01 = gradient(random_grid[grid0_x, grid1_y], x - grid0_x, y - grid1_y)
+        dot10 = gradient(random_grid[grid1_x, grid0_y], x - grid1_x, y - grid0_y)
+        dot11 = gradient(random_grid[grid1_x, grid1_y], x - grid1_x, y - grid1_y)
+
+        def fade(t):
+            return 6 * t**5 - 15 * t**4 + 10 * t**3
+
+        u = fade(x - grid0_x)
+        v = fade(y - grid0_y)
+
+        def lerp(a, b, t):
+            return a + t * (b - a)
+
+        nx0 = lerp(dot00, dot10, u)
+        nx1 = lerp(dot01, dot11, u)
+        nxy = lerp(nx0, nx1, v)
+
+        return nxy
+
+    def domain_warp(x, y, warp_amount=0.1):
+        warp_res = (max(1, res[0]//2), max(1, res[1]//2))
+        # Scale coordinates to match the warp resolution
+        sx = x * (warp_res[0] / res[0])
+        sy = y * (warp_res[1] / res[1])
+        wx = x + warp_amount * generate_noise(sx, sy, warp_res)
+        wy = y + warp_amount * generate_noise(sx, sy, warp_res)
+        return wx, wy
+
+    # Generate on CPU if MPS to avoid race conditions
+    with torch.device('cpu') if run_on_cpu else nullcontext():
+        # Exclude endpoint so coordinates stay in [0, res) — prevents out-of-bounds grid indexing
+        base_x = torch.linspace(0, res[0], size[0] + 1)[:-1]
+        base_y = torch.linspace(0, res[1], size[1] + 1)[:-1]
+        x, y = torch.meshgrid(base_x, base_y, indexing='ij')
+
+        # Apply domain warping, then clamp to valid range
+        x, y = domain_warp(x, y)
+        x = torch.clamp(x, 0, res[0] - 1e-6)
+        y = torch.clamp(y, 0, res[1] - 1e-6)
+
+        # Generate fractal Brownian motion (fBm)
+        noise = torch.zeros(size)
+        frequency = 1
+        amplitude = 1
+        for _ in range(octaves):
+            noise += amplitude * generate_noise(x * frequency, y * frequency, (int(res[0]*frequency), int(res[1]*frequency)))
+            frequency *= lacunarity
+            amplitude *= persistence
+
+        # Normalize the noise
+        noise = (noise - noise.min()) / (noise.max() - noise.min())
+
+    # Move to target device if we ran on CPU
+    if run_on_cpu:
+        noise = noise.to(target_device)
+
+    return noise
+
+
+def pyramid_elevation(size: tuple, inverted: True, max_height: float = 1) -> torch.Tensor:
+    """
+    Create an inverted pyramid (cone) elevation map with the lowest point in the center.
+
+    Args:
+        size (tuple): The size of the elevation map (height, width).
+        max_height (float): The maximum elevation at the edges of the map.
+
+    Returns:
+        torch.Tensor: The elevation map as a 2D tensor.
+    """
+    height, width = size
+    center_y, center_x = height // 2, width // 2
+
+    y, x = torch.meshgrid(torch.arange(height), torch.arange(width), indexing='ij')
+
+    # Calculate distance from center
+    distance = torch.maximum(
+        torch.abs(y - center_y),
+        torch.abs(x - center_x)
     )
-    dot01 = gradient(
-        random_grid[grid0[..., 0], grid1[..., 1]], grid[..., 0] - grid0[..., 0], grid[..., 1] - grid1[..., 1]
-    )
-    dot10 = gradient(
-        random_grid[grid1[..., 0], grid0[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid0[..., 1]
-    )
-    dot11 = gradient(
-        random_grid[grid1[..., 0], grid1[..., 1]], grid[..., 0] - grid1[..., 0], grid[..., 1] - grid1[..., 1]
-    )
 
-    def fade(t):
-        return 6 * t**5 - 15 * t**4 + 10 * t**3
+    # Normalize distance to [0, 1] range
+    max_distance = max(center_y, center_x)
+    normalized_distance = distance.float() / max_distance
 
-    u = fade(grid - grid0)
+    # Create inverted pyramid
+    if inverted:
+        elevation = normalized_distance * max_height
+    else:
+        elevation = (1 - normalized_distance) * max_height
 
-    def lerp(a, b, t):
-        return a + t * (b - a)
+    return elevation
 
-    nx0 = lerp(dot00, dot10, u[..., 0])
-    nx1 = lerp(dot01, dot11, u[..., 0])
-    nxy = lerp(nx0, nx1, u[..., 1])
 
-    return torch.clamp(nxy + 0.5, 0, 1)
+def range_elevation(size) -> torch.Tensor:
+    tensor = torch.arange(0, size[0] * size[1])
+    tensor = tensor.reshape(size)
+    return tensor
+
+
+def ramp_elevation(size: tuple, max_height: 255, dimension: int) -> torch.Tensor:
+    """
+    Create an inverted pyramid (cone) elevation map with the lowest point in the center.
+
+    Args:
+        size (tuple): The size of the elevation map (height, width).
+        max_height (float): The maximum elevation at the edges of the map.
+
+    Returns:
+        torch.Tensor: The elevation map as a 2D tensor.
+    """
+    height, width = size
+    if dimension == 0:
+        return torch.arange(width).repeat(height, 1)
+    elif dimension == 1:
+        return torch.arange(height).repeat(width, 1).T
 
 
 def scale_tensor(input_tensor, floor=64):
@@ -424,3 +611,326 @@ def scale_tensor(input_tensor, floor=64):
     scaled_tensor = scaled_tensor.to(torch.uint8)
 
     return scaled_tensor
+
+
+def roll_with_padding(
+    input: torch.Tensor,
+    shifts: Union[int, Tuple[int, ...]],
+    dims: Union[int, Tuple[int, ...]],
+    padding_mode: str ='constant',
+    padding_value: float = 0.0
+):
+    if isinstance(shifts, int):
+        shifts = (shifts,)
+    if isinstance(dims, int):
+        dims = (dims,)
+
+    if len(shifts) != len(dims):
+        raise ValueError("Length of shifts must match length of dims")
+
+    ndim = input.dim()
+    # Normalize dims so negative (from-the-end) indices work, which is what makes
+    # this rank-agnostic: callers pass dims=(-2, -1) for the spatial axes.
+    dims = tuple(d % ndim for d in dims)
+
+    # F.pad counts pairs from the LAST dimension backwards, while dims are
+    # counted from the front, so the pair for dim d sits at index 2*(ndim-1-d).
+    paddings = [0] * (ndim * 2)
+    for shift, dim in zip(shifts, dims):
+        pad_left = max(0, shift)
+        pad_right = max(0, -shift)
+        base = 2 * (ndim - 1 - dim)
+        paddings[base] = pad_left
+        paddings[base + 1] = pad_right
+
+    if padding_mode == 'constant':
+        result = F.pad(input, paddings, mode='constant', value=padding_value)
+    elif padding_mode in ['reflect', 'replicate', 'circular']:
+        result = F.pad(input, paddings, mode=padding_mode)
+    else:
+        raise ValueError(f"Unsupported padding mode: {padding_mode}")
+
+    result = torch.roll(result, shifts, dims)
+
+    slices = [slice(None)] * input.dim()
+    for shift, dim in zip(shifts, dims):
+        if shift > 0:
+            slices[dim] = slice(shift, None)
+        elif shift < 0:
+            slices[dim] = slice(None, shift)
+
+    return result[tuple(slices)]
+
+
+def neighbors(
+    input: torch.Tensor,
+    padding_value: float = 0,
+    padding_mode: str = 'constant',
+    eight_direction: bool = False,
+    reverse: bool = False
+) -> torch.Tensor:
+    kernels = generate_direction_kernels(eight_direction)
+    # If we roll the input tensor by the negative of the kernel direction, the resulting tensor will
+    # contain the neighbor in the direction of the kernel.
+    if not reverse:
+        # NOT in place: generate_direction_kernels is device_lru_cached, so `*=`
+        # mutated the cached tensor and flipped the sign on every subsequent call.
+        kernels = kernels * -1
+    if eight_direction:
+        neighbors_tensor = torch.zeros(input.shape + (8,), dtype=input.dtype)
+    else:
+        neighbors_tensor = torch.zeros(input.shape + (4,), dtype=input.dtype)
+    for i, (dy, dx) in enumerate(kernels):
+        neighbors_tensor[..., i] = roll_with_padding(
+            input,
+            shifts=(int(dy), int(dx)),
+            dims=(-2, -1),
+            padding_mode=padding_mode,
+            padding_value=padding_value
+        )
+    return neighbors_tensor
+
+
+def pad_and_view(td: TensorDict, key: NestedKey, pad: Tuple[int, ...], value: Union[int, float] = 0):
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    if padded_key not in td:
+        original = td[key]
+        padded = torch.nn.functional.pad(original, pad, mode='constant', value=value)
+        td[padded_key] = padded
+
+        # F.pad consumes pairs from the LAST dimension backwards, so the pad pairs
+        # map onto the trailing dims in reverse order. Leading (e.g. batch) dims
+        # are left alone via the Ellipsis.
+        slices = (Ellipsis,) + tuple(
+            slice(pad[i * 2], -pad[i * 2 + 1] if pad[i * 2 + 1] else None)
+            for i in reversed(range(len(pad) // 2))
+        )
+        view = td[padded_key][slices]
+        td[key] = view
+    assert td[key].storage().data_ptr() == td[padded_key].storage().data_ptr()
+
+
+def unfold_neighbors(td: TensorDict, key: NestedKey, kernel_size: Tuple[int, ...], pad_value: float = 0.0):
+    neighbors_key = f"{key}_neighbors" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_neighbors",)
+    if neighbors_key in td:
+        return td[neighbors_key]
+    # Ensure we have a padded version
+    padding = (kernel_size[0] - 1) // 2
+    # Only the two spatial dims are padded; any leading dims are untouched.
+    pad = (padding,) * 4
+    pad_and_view(td, key, pad, pad_value)
+
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    x_padded = td[padded_key]
+    assert td[key].storage().data_ptr() == x_padded.storage().data_ptr()
+
+    leading = td[key].shape[:-2]
+    H, W = td[key].shape[-2:]
+    kH, kW = kernel_size
+
+    # Calculate strides
+    stride = x_padded.stride()
+
+    # Create the unfolded view. Leading dims keep their own size/stride; the
+    # spatial strides are reused for the kernel window axes.
+    unfolded = torch.as_strided(
+        x_padded,
+        size=(*leading, H, W, kH, kW),
+        stride=(*stride[:-2], stride[-2], stride[-1], stride[-2], stride[-1]),
+    )
+    assert unfolded.storage().data_ptr() == x_padded.storage().data_ptr()
+
+    # Store the result
+    td[neighbors_key] = unfolded
+    return unfolded
+
+
+def fold_neighbors(td: TensorDict, key: NestedKey):
+    inverse_neighbors_key = f"{key}_inverse" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_inverse",)
+    if inverse_neighbors_key in td:
+        return td[inverse_neighbors_key]
+
+    pad = (0, 0, 0, 0, 1, 1, 1, 1)
+    pad_and_view(td, key, pad, 0)
+
+    padded_key = f"{key}_padded" if isinstance(key, str) else key[:-1] + (f"{key[-1]}_padded",)
+    x_padded = td[padded_key].contiguous()
+
+    leading = x_padded.shape[:-4]
+    H, W, kH, kW = x_padded.shape[-4:]
+    H_orig, W_orig = H - 2, W - 2
+    assert kH == 3 and kW == 3, "This function assumes a 3x3 neighborhood"
+
+    # Calculate the correct strides (x_padded was made contiguous above)
+    s0 = W * kH * kW
+    s1 = kH * kW
+    leading_strides = x_padded.stride()[:-4]
+
+    inverse_neighbors = torch.as_strided(
+        x_padded,
+        size=(*leading, H_orig, W_orig, 3, 3),
+        stride=(*leading_strides, s0, s1, W, 1),
+        storage_offset=s0 + s1
+    )
+
+    td[inverse_neighbors_key] = inverse_neighbors
+    return inverse_neighbors
+
+
+def custom_filter_operation(input_tensor, kernels):
+    leading = input_tensor.shape[:-2]
+    H, W = input_tensor.shape[-2:]
+
+    # Pad the input tensor (F.pad already counts from the last dim backwards)
+    padded = F.pad(input_tensor, (1, 1, 1, 1))
+
+    # Unfold the padded tensor to create patches. Each unfold replaces its dim
+    # with the window count and appends the window, so unfolding dim -2 twice
+    # walks H then W: (..., H+2, W+2) -> (..., H, W+2, 3) -> (..., H, W, 3, 3).
+    patches = padded.unfold(-2, 3, 1).unfold(-2, 3, 1)
+
+    # Reshape patches and kernels for batched matrix multiplication
+    patches = patches.reshape(*leading, H, W, 9)
+    kernels = kernels.reshape(*leading, H, W, 9)
+
+    # Perform batched matrix multiplication
+    result = torch.sum(patches * kernels, dim=-1)
+
+    return result
+
+
+def apply_kernels(td, input_key, kernels):
+    input_patches = unfold_neighbors(td, input_key, (3, 3))
+
+    # Apply the kernels through einstein summation
+    updated = torch.einsum('...ijkl, ...ijkl -> ...ij', input_patches, kernels)
+    td.set(input_key, updated, inplace=True)
+
+
+def flow_gradient(input, apply_distances=True):
+    """Per-cell 3x3 outward gradient of a (..., H, W) field, returned as (..., H, W, 3, 3)."""
+    device = input.device
+    leading = input.shape[:-2]
+    H, W = input.shape[-2:]
+    # The unsqueeze(0)/squeeze() round trip this used to do was a no-op for a 2D
+    # input and would have dropped any size-1 leading dim for a batched one.
+    padded_input = torch.nn.functional.pad(
+        input,
+        (1, 1, 1, 1),
+        mode="constant",
+        value=0
+    )
+    stride = padded_input.stride()
+    unfolded = torch.as_strided(
+        padded_input,
+        size=(*leading, H, W, 3, 3),
+        stride=(*stride[:-2], stride[-2], stride[-1], stride[-2], stride[-1])
+    )
+
+    expanded_input = input.reshape(*leading, H, W, 1, 1).expand(*leading, H, W, 3, 3)
+
+    if apply_distances:
+        euclidean_distance_matrix = torch.tensor(
+            [[1.4142, 1.0000, 1.4142],
+             [1.0000, 1.0000, 1.0000],
+             [1.4142, 1.0000, 1.4142]],
+            dtype=input.dtype,
+            device=device
+        )
+        gradient = (expanded_input - unfolded) / euclidean_distance_matrix.unsqueeze(0).unsqueeze(0)
+    else:
+        gradient = (expanded_input - unfolded)
+
+    # Zero the flows that would leave the grid. The first two indices are the
+    # spatial axes, the last two the 3x3 window.
+    gradient[..., 0, :, 0, :] = 0
+    gradient[..., -1, :, -1, :] = 0
+    gradient[..., :, 0, :, 0] = 0
+    gradient[..., :, -1, :, -1] = 0
+    assert not torch.isnan(gradient).any()
+    assert not torch.isinf(gradient).any()
+
+    return gradient
+
+
+def flow(
+    input: torch.tensor,
+    gradient: Optional[torch.tensor] = None,
+    outflow: Optional[torch.tensor] = None,
+    flow_rate=0.1,
+    relaxation_factor=1.0
+):
+    if gradient is None:
+        assert outflow is not None, "Outflow must be provided if gradient is not provided."
+        outflow = outflow.clone()
+        outflow *= flow_rate
+
+    if outflow is None:
+        assert gradient is not None, "Gradient must be provided if outflow is not provided."
+        outflow = gradient.clamp(min=0.0) * flow_rate
+
+    total_outflow = torch.sum(outflow, dim=(-1, -2))
+
+    condition = (total_outflow <= input).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+    adjusted_outflow = (
+        outflow *
+        torch.nan_to_num(input / total_outflow, 0.0).unsqueeze(-1).unsqueeze(-1).expand_as(outflow)
+    )
+
+    corrected_outflow = safe_where(
+        condition,
+        outflow,
+        adjusted_outflow
+    )
+
+    padded_corrected_outflow = torch.nn.functional.pad(
+        corrected_outflow,
+        (0, 0, 0, 0, 1, 1, 1, 1),
+        mode="constant", value=0
+    )
+
+    padded_input = torch.nn.functional.pad(
+        input,
+        (1, 1, 1, 1),
+        mode="constant",
+        value=0
+    )
+    inflow = torch.zeros_like(padded_input)
+    for i in range(3):
+        for j in range(3):
+            if i == 1 and j == 1:
+                continue  # Skip the center cell
+            shifted_outflow = torch.roll(
+                padded_corrected_outflow[..., i, j], shifts=(i - 1, j - 1), dims=(-2, -1)
+            )
+            inflow.add_(shifted_outflow)
+
+    inflow = inflow[..., 1:-1, 1:-1]
+
+    assert torch.isclose(torch.sum(inflow), torch.sum(corrected_outflow))
+
+    result = (input + inflow) - (torch.sum(corrected_outflow, dim=(-1, -2)))
+
+    if relaxation_factor != 1.0:
+        result = result * relaxation_factor + input * (1 - relaxation_factor)
+
+    return result, inflow, corrected_outflow
+
+
+def safe_where(condition, x, y):
+    """
+    Custom implementation to replace torch.where without MPS issues.
+
+    Args:
+    condition (torch.Tensor): A boolean tensor
+    x (torch.Tensor): Tensor to use where condition is True
+    y (torch.Tensor): Tensor to use where condition is False
+
+    Returns:
+    torch.Tensor: A tensor with values from x where condition is True, and values from y where condition is False
+    """
+    condition = condition.to(torch.float32)
+    return condition * x + (1 - condition) * y
+
+
+

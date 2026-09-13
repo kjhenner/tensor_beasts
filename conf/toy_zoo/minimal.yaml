@@ -1,0 +1,141 @@
+# Toy Zoo: Minimal
+# 16x16 world with single plant, herbivore, and predator
+# Starts paused for step-through debugging
+
+_base: "conf/base/simulation.yaml"
+
+display:
+  color_displays:
+    - title: "species_rgb"
+      fn_name: "rgb_species"
+      scent_max: 255
+      scent_log_scale: true
+      biomass_floor: 128
+      red:
+        scent_key: "${key:predator,scent}"
+        biomass_key: "${key:predator,biomass}"
+        biomass_range: [0, 255]
+      green:
+        scent_key: "${key:simpleplant,scent}"
+        biomass_key: "${key:simpleplant,energy}"
+        biomass_range: [0, 255]
+      blue:
+        scent_key: "${key:herbivore,scent}"
+        biomass_key: "${key:herbivore,biomass}"
+        biomass_range: [0, 255]
+
+    - title: "biomass_energy"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleterrain,simple_water}"
+          threshold: 0.1
+          color_min: [0, 0, 32]
+          color_max: [0, 0, 64]
+          input_range: [0, 1]
+        - key: "${key:simpleplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+        - key: "${key:herbivore,biomass}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,biomass}"
+          threshold: 1
+          color_min: [64, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+
+    - title: "scents_rgb"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+          log_scale: true
+        - key: "${key:herbivore,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+          log_scale: true
+        - key: "${key:predator,scent}"
+          threshold: 0
+          color_min: [0, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+          log_scale: true
+
+    - title: "energy"
+      fn_name: "layered"
+      layers:
+        - key: "${key:simpleplant,energy}"
+          threshold: 1
+          color_min: [0, 32, 0]
+          color_max: [0, 255, 0]
+          input_range: [0, 255]
+        - key: "${key:herbivore,energy}"
+          threshold: 1
+          color_min: [0, 0, 64]
+          color_max: [0, 0, 255]
+          input_range: [0, 255]
+        - key: "${key:predator,energy}"
+          threshold: 1
+          color_min: [64, 0, 0]
+          color_max: [255, 0, 0]
+          input_range: [0, 255]
+
+world:
+  running: False  # Start paused
+  max_ups: 10
+  size: [16, 16]
+
+  entities:
+    SimpleTerrain:
+      oscillator:
+        frequency: 0.0
+        amplitude: 0.0
+        offset: 0.5
+        phase: 0.0
+      simple_water:
+        perlin_scale: [2, 2]
+        perlin_octaves: 1
+        oscillator_amplitude: 0.0
+
+    SimplePlant:
+      initial_energy: 128
+      init_prob: 0.0
+      toy_init: true
+      water_tolerance: 1.0
+      ideal_growth_rate: 0.0  # No growth
+      seed:
+        germination_prob: 0.0
+        seed_prob: 0.0
+      scent:
+        diffusion_steps: 2
+
+    Herbivore:
+      initial_energy: 100
+      initial_biomass: 150
+      init_prob: 0.0
+      toy_init: true
+      verbose: true
+      scent:
+        diffusion_steps: 2
+      survival_threshold: 5
+      reproduction_threshold: 255
+
+    Predator:
+      initial_energy: 100
+      initial_biomass: 180
+      init_prob: 0.0
+      toy_init: true
+      verbose: true
+      scent:
+        diffusion_steps: 2
+      survival_threshold: 5
+      reproduction_threshold: 255

@@ -1,0 +1,93 @@
+# PPO on per-individual herbivore survival.
+#
+# The two blocks map one-to-one onto TrainerConfig and PPOConfig in
+# tensor_beasts/rl/, so anything you can set in code you can set here, and
+# train_rl.py flags override whatever is written below.
+#
+# Size is the setting to be careful with. Below roughly 256 the predator
+# population collapses and the three-species dynamic degenerates, so a result
+# from a 64x64 world is not a result about this ecology. 256 is for iteration,
+# 512 is for anything meant to mean something.
+
+trainer:
+  config_path: conf/basic_config.yaml
+  size: 256
+  entity: Herbivore
+
+  # survival_reward 1.0 makes the summed reward literally "herbivore-steps
+  # survived", which is the number evaluate_policy.py reports for the baseline.
+  survival_reward: 1.0
+  reproduction_reward: 10.0
+  # Dense biomass-change reward. Off by default: it is reward shaping. Turn it
+  # on if the policy will not move, which is the failure mode survival reward
+  # produces, since herbivores survive about 99.4% of steps and the per-step
+  # reward is therefore nearly constant.
+  foraging_reward: 0.0
+
+  arch: conv
+  arch_kwargs: {}
+  # Second policy head over this many discrete metabolic levels, from basal to
+  # max_metabolic_rate, still capped by carried biomass. 0 leaves the rate to
+  # the rules and learns movement only; existing runs reproduce with 0.
+  metabolic_levels: 0
+  # Learned memory channels per individual. 0 disables. See planning/04.
+  memory_size: 0
+  # Supervised updates on rule-based rollouts before RL. 0 = off.
+  pretrain_updates: 0
+  device: auto
+  seed: 0
+
+  total_world_steps: 20000
+  segment_steps: 64
+  # Train on a settled ecology, not on the transient right after seeding.
+  warmup_steps: 100
+
+  eval_interval: 2000
+  eval_steps: 500
+  eval_seeds: 2
+  eval_deterministic: false
+
+  checkpoint_interval: 2000
+  output_dir: outputs/rl
+  log_name: train_log.jsonl
+
+  wandb: false
+  wandb_project: tensor-beasts-rl
+  # Local W&B server. Null defers to WANDB_BASE_URL, then wandb.ai.
+  wandb_host: http://localhost:8080
+
+ppo:
+  learning_rate: 3.0e-4
+  clip_range: 0.2
+  # Null disables value clipping. Worth trying here because returns drift with
+  # the population, which is exactly the case value clipping is meant for.
+  value_clip_range: null
+  entropy_coef: 0.01
+  value_coef: 0.5
+  epochs: 4
+  minibatch_steps: 16
+  max_grad_norm: 0.5
+  gamma: 0.99
+  gae_lambda: 0.95
+  normalize_advantage: true
+  # Null disables the early stop. Set to ~0.02 if updates start diverging.
+  target_kl: null
+  # Imitation of the rule-based policy, cross-faded out as agreement rises.
+  # Weight each update = imitation_coef * max(0, 1 - conformance / target).
+  # Off by default so the plain-PPO result stays reproducible; 1.0 is a
+  # sensible strength when turning it on.
+  imitation_coef: 0.0
+  # Below the ~0.9 practical ceiling; the rule's decisions are knife-edge.
+  imitation_target_conformance: 0.8
+  # Soft distillation toward softmax(rule scores / temperature). 0 = hard argmax.
+  imitation_temperature: 0.01
+  # Minimum anchor weight as a fraction of imitation_coef. 0 releases fully at
+  # the target, which was seen to oscillate; 0.2 keeps a permanent light pull.
+  imitation_floor: 0.0
+  # Metabolic anchor weight relative to the direction anchor. The rule rests
+  # 90% of the time, so 1.0 teaches the throttle to stay cold; 0 lets the
+  # reward decide it.
+  metabolic_imitation_scale: 1.0
+  # Backpropagate memory writes through this many steps of the individual's
+  # own trajectory. 0 = off (stage 1). See planning/04.
+  recurrent_window: 0
