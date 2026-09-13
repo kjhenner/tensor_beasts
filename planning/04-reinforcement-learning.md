@@ -746,6 +746,41 @@ anchor rather than through learning. Whether the rule-based policy *itself*
 improves with its throttle pinned is the next measurement; if it does, this
 is a finding about the ecology's tuning rather than about learning.
 
+### The throttle finding decomposes, and it is about the rules
+
+The rule-based policy with its own throttle pinned to basal, scored against
+the rule-based policy as is, three seeds at 512: 1.171x, 1.335x, 1.256x,
+1.251x in total. The advantage was available to the hand-written rules all
+along. Assembling the four measurements:
+
+| Movement | Throttle | Ratio |
+|---|---|---|
+| Rules | Rules | 1.000x |
+| Rules | Pinned to basal | 1.251x |
+| Learned | Rules | 1.331x |
+| Learned | Pinned to basal | 1.646x |
+
+The two contributions are close to independent and multiplicative: 1.331 times
+1.251 is 1.665 against 1.646 measured. Learned movement is worth about a
+third; not burning above basal is worth about a quarter; and only the first is
+a learning result. The rule's metabolism, basal 2 plus 2.5 times the smoothed
+gradient, runs the herbivores hotter than pays off in this ecology. That is a
+tuning observation for `conf/basic_config.yaml`, not a claim about learning,
+and it is the repo owner's call whether the rules should change: a cooler rule
+is a stronger baseline, and every ratio above would shrink against it.
+
+### Memory: closed for now, on a clean negative
+
+At its own training size the recurrent checkpoint scores 1.065x against 1.247x
+for the fixed-write control, so its failure at 512 was not transfer. The
+write is learnable, the synthetic test proved that; trained on the survival
+signal at this budget, what it learns to write is noise the policy then
+trusts, and the policy is worse for it everywhere. Nothing here says memory
+cannot help. It says that a memory needs a task where remembering
+demonstrably pays before its training signal is anything but noise, and that
+task has not been posed. The plumbing and the recurrent update stay, tested,
+for when it is.
+
 ### What would count as "big if true"
 
 A learned memory has to beat the same recipe with `K` set to 0 on the same

@@ -128,8 +128,8 @@ rule-based policy as a fading anchor beats the baseline at 512 by **11 to 33
 percent** across five training seeds, mean 1.20x, on three paired evaluation
 seeds over 400 steps; the best checkpoint held 1.155x over 1200 steps. The
 same checkpoint with its metabolic rate pinned to basal scores **1.646x**: the
-rule-based metabolism burns more than it needs, and that single change is
-worth more than everything learned about movement. See
+rule-based metabolism burns more than it needs: the rules themselves score
+1.25x with their throttle pinned to basal, and the two effects multiply. See
 `planning/04-reinforcement-learning.md` for the variance and the caveats.
 
 **Size matters more than anything else here.** Below roughly 256 the predator
