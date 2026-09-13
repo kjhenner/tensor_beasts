@@ -422,7 +422,7 @@ class MultiAgentWorldEnv:
         every perceived channel in roughly [0, 0.04]; a linear model then could
         not fit the rule action above 0.46 agreement on a label that is 99.8%
         self-consistent, because it had to grow its weights thirty-fold first.
-        Own energy and biomass are genuine uint8 and are divided by 255.
+        Own energy and biomass are floats on a 0..255 scale and are divided by 255.
 
         After the perceived values come explicit gradient channels, neighbour
         minus own cell for each direction, scaled by GRADIENT_GAIN. The rule

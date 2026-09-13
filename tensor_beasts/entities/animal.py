@@ -7,7 +7,7 @@ from omegaconf import DictConfig
 from tensor_beasts.entities import Entity
 from tensor_beasts.registry import register_entity
 from tensor_beasts.entities.helpers.animal_helpers import move
-from tensor_beasts.features.shared_features import Energy, Scent
+from tensor_beasts.features.shared_features import Energy, Scent, ENERGY_MAX
 from tensor_beasts.observations import get_observation
 from tensor_beasts.policy.base import Action, AnimalPolicy
 from tensor_beasts.policy.metabolism import clamp_metabolic_rate, effective_max_metabolic_rate
@@ -15,7 +15,6 @@ from tensor_beasts.policy.rule_based import RuleBasedPolicy
 from tensor_beasts.policy.parameterized import ParameterizedPolicy
 
 from tensor_beasts.features.animal_features import Memory, IdFeature, OffspringCount, Biomass, GradientEMA, SlotId
-from tensor_beasts.util import safe_sub, safe_add
 
 
 @dataclass
@@ -304,10 +303,9 @@ class Animal(Entity):
             try:
                 carrion = self.td.get(self.config.carrion_key)
                 if carrion is not None:
-                    # Add dead animal's biomass to carrion
-                    dead_biomass = (biomass * actually_dead).to(torch.uint8)
-                    carrion += dead_biomass
-                    carrion.clamp_(max=255)
+                    # Add dead animal's biomass to carrion, exactly.
+                    carrion += biomass * actually_dead
+                    carrion.clamp_(max=ENERGY_MAX)
             except KeyError:
                 pass  # No carrion feature, biomass just disappears
 
@@ -523,20 +521,18 @@ class Animal(Entity):
         # Compute efficiency (decreases at higher metabolic rates)
         efficiency = self._compute_efficiency(metabolic_rate)
 
-        # Burn biomass, limited by available biomass
-        biomass_burned = torch.min(metabolic_rate, biomass.float()).to(torch.uint8)
+        # Burn biomass, limited by available biomass. Exact: a rate of 2.5
+        # costs 2.5. When this was uint8 the burn truncated (2.5 cost 2) and
+        # the energy conversion truncated too, which made the throttle a cliff
+        # rather than a trade-off: at exactly the basal rate an animal got
+        # 2 * 3.5 = 7 energy, while at 2.05 it got int(6.975) = 6 for the same
+        # 2 biomass, a 14% tax on every setting except one exact value.
+        biomass_burned = torch.minimum(metabolic_rate.to(biomass.dtype), biomass)
+        energy_gained = biomass_burned * efficiency
 
-        # Energy gained = biomass * efficiency, ROUNDED. Truncation made the
-        # throttle a cliff rather than a trade-off: at exactly the basal rate an
-        # animal got 2 * 3.5 = 7 energy, while at 2.05 it got int(6.975) = 6 for
-        # the same 2 biomass, a 14% tax on every setting except one exact value.
-        # Measured rule-vs-rule at 512, rounding is worth 1.15x herbivore-steps
-        # and lifts predators too; pinning the rate at basal, which dodges the
-        # cliff by deleting the sprint response, was worth 1.21x.
-        energy_gained = torch.round(biomass_burned.float() * efficiency).to(torch.uint8)
-
-        safe_add(energy, energy_gained)
-        safe_sub(biomass, biomass_burned)
+        energy += energy_gained
+        energy.clamp_(max=ENERGY_MAX)
+        biomass -= biomass_burned
 
         if verbose and positions:
             self._log_metabolism(
@@ -561,9 +557,9 @@ class Animal(Entity):
         """
         energy = self.energy.data
 
-        dissipation = (energy.float() * self.config.dissipation_rate).to(torch.uint8)
-        dissipation = torch.clamp(dissipation, min=self.config.dissipation_floor)
-        safe_sub(energy, dissipation)
+        dissipation = torch.clamp(energy * self.config.dissipation_rate, min=self.config.dissipation_floor)
+        energy -= dissipation
+        energy.clamp_(min=0)
 
         if verbose and positions:
             self._log_metabolism(positions, "DISSIPATION", dissipation=dissipation, energy=energy)
@@ -624,13 +620,13 @@ class Animal(Entity):
             target_weights=None,
             divide_threshold=self.config.reproduction_threshold,
             divide_feature=biomass,
-            divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
-            divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+            divide_fn_self=lambda x: x * 0.5,
+            divide_fn_offspring=lambda x: x * 0.5,
             carried_features_self=[offspring_count, id_feature, biomass, gradient_ema, slot_id, *memory_slices],
             carried_feature_fns_self=[
-                lambda x: safe_add(x, 1, inplace=False),  # must be pure; see perform_move
+                lambda x: x + 1,  # must be pure; see perform_move
                 lambda x: x,
-                lambda x: (x.float() * 0.5).to(x.dtype),
+                lambda x: x * 0.5,
                 lambda x: x,
                 lambda x: x,  # slot_id unchanged for parent
                 *([lambda x: x] * len(memory_slices)),  # memory travels unchanged
@@ -638,7 +634,7 @@ class Animal(Entity):
             carried_features_offspring=[id_feature, biomass, gradient_ema, slot_id, *memory_slices],
             carried_feature_fns_offspring=[
                 lambda x: random,
-                lambda x: (x.float() * 0.5).to(x.dtype),
+                lambda x: x * 0.5,
                 lambda x: x * 0.5,
                 offspring_slot_fn,  # slot assignment for offspring
                 *([lambda x: x] * len(memory_slices)),  # offspring inherit a copy
@@ -647,6 +643,9 @@ class Animal(Entity):
             move_mask=move_mask,
             move_cost=movement_cost,
         )
+        # Several movers can land on one cell; perform_move saturates energy
+        # itself, biomass is a carried feature and has the same ceiling.
+        biomass.clamp_(max=ENERGY_MAX)
 
         if acting_mask is not None:
             self._record_transition(direction, did_move, acting_mask, biomass_at_move)
@@ -753,13 +752,13 @@ class Animal(Entity):
 
         return assign_offspring_slot
 
-    def _eat_from(self, food: torch.Tensor, amount: int) -> torch.Tensor:
+    def _eat_from(self, food: torch.Tensor, amount: torch.Tensor) -> torch.Tensor:
         """
         Attempt to eat from a food source.
 
         Args:
-            food: Food tensor to eat from
-            amount: Max amount to eat
+            food: Food tensor to eat from, on the 0..255 scale
+            amount: (H, W) max amount to eat per cell
 
         Returns:
             Amount actually eaten (tensor)
@@ -767,12 +766,13 @@ class Animal(Entity):
         biomass = self.biomass.data
         alive = biomass >= self.config.survival_threshold
 
-        old_food = food.clone()
-        safe_sub(food, alive.to(torch.uint8) * amount)
-        eaten = old_food - food
+        eaten = torch.minimum(food, alive * amount).to(food.dtype)
+        food -= eaten
 
-        # Food goes 100% to biomass
-        safe_add(biomass, eaten)
+        # Food goes 100% to biomass. What does not fit above the ceiling is
+        # still taken from the food, as it always was.
+        biomass += eaten
+        biomass.clamp_(max=ENERGY_MAX)
         return eaten
 
     def _eat(self):
@@ -782,7 +782,7 @@ class Animal(Entity):
         Tries food sources in config order until satiated.
         """
         eat_max = self.config.eat_max
-        total_eaten = torch.zeros_like(self.biomass.data, dtype=torch.uint8)
+        total_eaten = torch.zeros_like(self.biomass.data)
 
         for food_key in self.config.food_keys:
             food = self.td.get(food_key)
@@ -795,7 +795,7 @@ class Animal(Entity):
                 break  # Everyone is full
 
             # Eat up to remaining appetite from this source
-            eaten = self._eat_from(food, remaining_appetite.to(torch.uint8))
+            eaten = self._eat_from(food, remaining_appetite)
             total_eaten = total_eaten + eaten
 
 

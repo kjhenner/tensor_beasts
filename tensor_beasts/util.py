@@ -80,53 +80,6 @@ def directional_kernel_set(size: int):
     }
 
 
-def safe_add(a, b, inplace=True):
-    """Saturating add for uint8 grids; a plain add for floating grids.
-
-    The guard rewrites cells that went *down* after the add, which is how uint8
-    wraparound shows up. It used to run on floats too, where it is meaningless
-    and dangerous: a negative float added to another lands below ``b`` and was
-    rewritten to 255. No existing float feature is ever negative, so nothing
-    tripped it, but the learned memory feature lives in [-1, 1] and travels
-    through this function when an animal moves.
-    """
-    if not inplace:
-        a = a.clone()
-    a += b
-    if not a.is_floating_point():
-        a[a < b] = 255
-    return a
-
-
-def safe_sum(matrices: List[torch.Tensor]):
-    # dim=0 here is the *stacked* axis created by torch.stack (one entry per
-    # input matrix), not a spatial axis. It stays leading at any input rank, so
-    # this is already rank-agnostic.
-    original_dtype = matrices[0].dtype
-    return torch.stack(matrices).type(torch.int16).sum(dim=0).clamp(0, 255).type(original_dtype)
-
-
-def safe_sub(a, b, inplace=True):
-    if not inplace:
-        a = a.clone()
-    a -= b
-    a[a > 255 - b] = 0
-    return a
-
-
-def safe_mult(a, b, inplace=True):
-    if not inplace:
-        a = a.clone()  # Create a copy to avoid modifying the original tensor if inplace is False
-
-    result = a.to(torch.uint16) * b.to(torch.uint16)
-
-    overflow_mask = result > 255
-    result = torch.where(overflow_mask, torch.tensor(255, dtype=torch.uint8), result)
-
-    a[:] = result.to(torch.uint8)
-    return a
-
-
 def generate_direction_kernel(size, direction):
     if size % 2 == 0:
         raise ValueError("Size must be an odd number for symmetrical shape.")

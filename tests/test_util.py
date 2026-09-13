@@ -8,7 +8,7 @@ from tensordict import TensorDict
 import matplotlib.pyplot as plt
 
 from tensor_beasts.util import (
-    directional_kernel_set, safe_add, safe_sub, generate_direction_kernel, pad_matrix,
+    directional_kernel_set, generate_direction_kernel, pad_matrix,
     torch_correlate_3d, unfold_neighbors, fold_neighbors, apply_kernels, perlin_noise, flow_gradient,
     flow
 )
@@ -20,28 +20,6 @@ def test_directional_kernel_set_cache():
     kernel_set_1 = directional_kernel_set(size)
     kernel_set_2 = directional_kernel_set(size)
     assert kernel_set_1 is kernel_set_2  # Should be the same object due to lru_cache
-
-
-def test_safe_add():
-    a = torch.tensor([250, 200], dtype=torch.uint8)
-    b = torch.tensor([10, 100], dtype=torch.uint8)
-    result = safe_add(a, b)
-    expected = torch.tensor([255, 255], dtype=torch.uint8)
-    assert torch.equal(result, expected)
-
-
-def test_safe_sub():
-    a = torch.tensor([250, 200], dtype=torch.uint8)
-    b = torch.tensor([10, 100], dtype=torch.uint8)
-    result = safe_sub(a, b)
-    expected = torch.tensor([240, 100], dtype=torch.uint8)
-    assert torch.equal(result, expected)
-
-    a = torch.tensor([10, 200], dtype=torch.uint8)
-    b = torch.tensor([20, 100], dtype=torch.uint8)
-    result = safe_sub(a, b)
-    expected = torch.tensor([0, 100], dtype=torch.uint8)
-    assert torch.equal(result, expected)
 
 
 def test_generate_direction_kernel_invalid_size():

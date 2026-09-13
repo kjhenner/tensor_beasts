@@ -1,6 +1,5 @@
 # Tensor Beasts
-Tensor Beasts is an ecological simulation that runs mostly in `uint8` Torch
-tensors.
+Tensor Beasts is an ecological simulation that runs entirely in Torch tensors.
 <img src="./assets/img.png" alt="Tensor Beasts Screenshot" width="400"/>
 
 This is cool because:

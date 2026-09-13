@@ -115,8 +115,8 @@ class Observation:
     current: Dict[Tuple[str, str], torch.Tensor]
 
     # === Internal State ===
-    energy: torch.Tensor        # (H, W) uint8
-    biomass: torch.Tensor       # (H, W) uint8
+    energy: torch.Tensor        # (H, W) float32, 0..255 scale
+    biomass: torch.Tensor       # (H, W) float32, 0..255 scale
     gradient_ema: torch.Tensor  # (H, W) float32 - smoothed stimulus history
 
     # === Context ===
@@ -142,8 +142,8 @@ def get_observation(
         td: TensorDict containing feature data
         perception: List of (feature_key, kernel_size) tuples specifying what to perceive
                    e.g., [(("plant", "scent"), 1), (("predator", "scent"), 3)]
-        energy: Entity's energy tensor (H, W) uint8
-        biomass: Entity's biomass tensor (H, W) uint8
+        energy: Entity's energy tensor (H, W) float32, 0..255 scale
+        biomass: Entity's biomass tensor (H, W) float32, 0..255 scale
         gradient_ema: Smoothed stimulus history (H, W) float32
         survival_threshold: Biomass threshold for alive_mask
         log_compress: If True, apply log1p compression for better gradient detection

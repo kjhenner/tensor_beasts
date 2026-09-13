@@ -7,6 +7,11 @@ from tensor_beasts.features.feature import Feature, SharedFeature
 from tensor_beasts.registry import register_feature
 from tensor_beasts.util import generate_diffusion_kernel, torch_correlate_2d, torch_correlate_3d
 
+# The ceiling of the 0..255 scale that energy, biomass and carrion live on.
+# Inherited from when those tensors were uint8; kept so configs, thresholds
+# and renderers stay valid. Holders clamp to it, nothing rounds or truncates.
+ENERGY_MAX = 255.0
+
 
 @register_feature
 class Oscillator(Feature):
@@ -162,7 +167,9 @@ class Carrion(Feature):
     terrain layer, not something shared across multiple entities.
     """
     name = "carrion"
-    dtype = torch.uint8
+    # Same 0..255 scale as the animal biomass it receives, float32 so a death
+    # transfers exactly what the animal carried.
+    dtype = torch.float32
     default_tags = {"observable"}
     default_config = DictConfig({
         "decay_rate": 0.02,  # Fraction lost per step
@@ -173,17 +180,12 @@ class Carrion(Feature):
         self.data = torch.zeros(self.shape, dtype=self.dtype)
 
     def update(self, step: int):
-        # Decay: carrion slowly disappears over time
+        # Decay: carrion slowly disappears over time. The floor of one unit per
+        # step is what lets a pile actually reach zero rather than decay
+        # geometrically forever; an empty cell stays at zero through the clamp.
         if self.config.decay_rate > 0:
-            decay = (self.data.float() * self.config.decay_rate).to(torch.uint8)
-            decay = torch.clamp(decay, min=1)  # At least 1 if any carrion present
-            # Only decay where there is carrion
-            has_carrion = self.data > 0
-            self.data = torch.where(
-                has_carrion,
-                torch.clamp(self.data.int() - decay.int(), min=0).to(torch.uint8),
-                self.data
-            )
+            decay = torch.clamp(self.data * self.config.decay_rate, min=1)
+            self.data = torch.clamp(self.data - decay, min=0)
 
 
 @register_feature
@@ -208,6 +210,7 @@ class CarrionScent(Scent):
 
 @register_feature
 class Energy(SharedFeature):
+    """Energy on a 0..255 scale (see ENERGY_MAX), stored as float32."""
     name = "energy"
-    dtype = torch.uint8
+    dtype = torch.float32
     default_tags = {"observable"}

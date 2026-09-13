@@ -11,7 +11,6 @@ from tensor_beasts.config import load_config
 from tensor_beasts.entities.helpers.animal_helpers import perform_move
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
 from tensor_beasts.rl.networks import build_network
-from tensor_beasts.util import safe_add
 from tensor_beasts.world import World
 
 SIZE = (48, 48)
@@ -61,7 +60,7 @@ def test_a_write_is_readable_next_step_at_the_individuals_new_cell():
 
 def test_offspring_inherit_a_copy_of_memory():
     grid = (5, 5)
-    energy = torch.zeros(grid, dtype=torch.uint8)
+    energy = torch.zeros(grid)
     energy[2, 2] = 200
     memory = torch.zeros(*grid, K)
     memory[2, 2] = torch.tensor([0.5, -0.25, 0.9])
@@ -70,8 +69,8 @@ def test_offspring_inherit_a_copy_of_memory():
     slices = [memory[..., k] for k in range(K)]
     perform_move(
         entity_energy=energy, direction_masks=masks, divide_threshold=100,
-        divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
-        divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+        divide_fn_self=lambda x: x * 0.5,
+        divide_fn_offspring=lambda x: x * 0.5,
         carried_features_self=slices, carried_feature_fns_self=[lambda x: x] * K,
         carried_features_offspring=slices, carried_feature_fns_offspring=[lambda x: x] * K,
     )
@@ -95,12 +94,24 @@ def test_death_zeroes_memory():
     assert torch.all(entity.memory.data[survivors] == 0.7)
 
 
-def test_safe_add_no_longer_mangles_negative_floats():
-    a = torch.tensor([-0.5, 0.25])
-    out = safe_add(a.clone(), torch.tensor([0.1, 0.1]))
-    assert torch.allclose(out, torch.tensor([-0.4, 0.35]))
-    u = safe_add(torch.tensor([250], dtype=torch.uint8), torch.tensor([10], dtype=torch.uint8))
-    assert int(u) == 255, "uint8 still saturates"
+def test_negative_memory_survives_a_move_unclamped():
+    """Memory lives in [-1, 1]. Arrivals in perform_move are summed onto the
+    destination without the [0, 255] saturation that energy gets, so a
+    negative value must come through exactly and not be rewritten."""
+    grid = (5, 5)
+    energy = torch.zeros(grid)
+    energy[2, 2] = 100
+    memory = torch.zeros(*grid, K)
+    memory[2, 2] = torch.tensor([-0.5, 0.25, -1.0])
+    masks = {d: torch.zeros(grid, dtype=torch.uint8) for d in range(1, 5)}
+    masks[1][2, 2] = 1  # moves up without reproducing
+    slices = [memory[..., k] for k in range(K)]
+    perform_move(
+        entity_energy=energy, direction_masks=masks, divide_threshold=250,
+        carried_features_self=slices, carried_feature_fns_self=[lambda x: x] * K,
+    )
+    assert torch.allclose(memory[1, 2], torch.tensor([-0.5, 0.25, -1.0]))
+    assert torch.all(memory[2, 2] == 0), "the vacated cell holds no memory"
 
 
 def test_network_memory_head_is_bounded_and_optional():

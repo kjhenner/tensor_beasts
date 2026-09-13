@@ -7,10 +7,10 @@ one of them mutated its argument in place the effect landed on every cell in
 the grid, on every step, whether or not anything moved there.
 """
 
+import pytest
 import torch
 
 from tensor_beasts.entities.helpers.animal_helpers import perform_move
-from tensor_beasts.util import safe_add
 
 
 GRID = (5, 5)
@@ -18,11 +18,12 @@ UP, DOWN, LEFT, RIGHT = 1, 2, 3, 4
 
 
 def empty_masks():
+    # Direction masks are 0/1 uint8, as get_direction_masks produces them.
     return {d: torch.zeros(GRID, dtype=torch.uint8) for d in range(1, 5)}
 
 
 def test_non_reproducing_move_transfers_energy_and_vacates_origin():
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+    energy = torch.zeros(GRID)
     energy[2, 2] = 100
 
     masks = empty_masks()
@@ -36,7 +37,7 @@ def test_non_reproducing_move_transfers_energy_and_vacates_origin():
 
 
 def test_reproducing_move_splits_energy_between_origin_and_destination():
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+    energy = torch.zeros(GRID)
     energy[2, 2] = 200
 
     masks = empty_masks()
@@ -46,8 +47,8 @@ def test_reproducing_move_splits_energy_between_origin_and_destination():
         entity_energy=energy,
         direction_masks=masks,
         divide_threshold=100,  # 200 > 100, so this mover reproduces
-        divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
-        divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+        divide_fn_self=lambda x: x * 0.5,
+        divide_fn_offspring=lambda x: x * 0.5,
     )
 
     assert energy[1, 2] == 100, "half the energy should move"
@@ -61,9 +62,9 @@ def test_carried_feature_increments_once_per_reproduction():
     the entire grid, because its function was impure and was called once per
     direction. Cells with no animal in them ended up with an offspring count.
     """
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+    energy = torch.zeros(GRID)
     energy[2, 2] = 200
-    offspring_count = torch.zeros(GRID, dtype=torch.uint8)
+    offspring_count = torch.zeros(GRID)
 
     masks = empty_masks()
     masks[UP][2, 2] = 1
@@ -72,10 +73,10 @@ def test_carried_feature_increments_once_per_reproduction():
         entity_energy=energy,
         direction_masks=masks,
         divide_threshold=100,
-        divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
-        divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+        divide_fn_self=lambda x: x * 0.5,
+        divide_fn_offspring=lambda x: x * 0.5,
         carried_features_self=[offspring_count],
-        carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False)],
+        carried_feature_fns_self=[lambda x: x + 1],
     )
 
     assert offspring_count[1, 2] == 1, "the reproducing mover carries a count of exactly 1"
@@ -83,9 +84,9 @@ def test_carried_feature_increments_once_per_reproduction():
 
 
 def test_uninvolved_cells_are_untouched():
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+    energy = torch.zeros(GRID)
     energy[0, 0] = 77  # a stationary animal, in no direction mask
-    offspring_count = torch.zeros(GRID, dtype=torch.uint8)
+    offspring_count = torch.zeros(GRID)
 
     masks = empty_masks()  # nothing moves at all
 
@@ -94,7 +95,7 @@ def test_uninvolved_cells_are_untouched():
         direction_masks=masks,
         divide_threshold=10,
         carried_features_self=[offspring_count],
-        carried_feature_fns_self=[lambda x: safe_add(x, 1, inplace=False)],
+        carried_feature_fns_self=[lambda x: x + 1],
     )
 
     assert energy[0, 0] == 77, "a cell that did not move must be unchanged"
@@ -108,11 +109,11 @@ def test_result_does_not_depend_on_carried_feature_order():
     already mutated biomass, so the answer depended on list order.
     """
     def run(order):
-        energy = torch.zeros(GRID, dtype=torch.uint8)
+        energy = torch.zeros(GRID)
         energy[2, 2] = 200
-        biomass = torch.zeros(GRID, dtype=torch.uint8)
+        biomass = torch.zeros(GRID)
         biomass[2, 2] = 200
-        marker = torch.zeros(GRID, dtype=torch.uint8)
+        marker = torch.zeros(GRID)
         marker[2, 2] = 10
 
         masks = empty_masks()
@@ -120,16 +121,16 @@ def test_result_does_not_depend_on_carried_feature_order():
 
         carried = {"biomass": biomass, "marker": marker}
         fns = {
-            "biomass": lambda x: (x.float() * 0.5).to(x.dtype),
-            "marker": lambda x: safe_add(x, 1, inplace=False),
+            "biomass": lambda x: x * 0.5,
+            "marker": lambda x: x + 1,
         }
         perform_move(
             entity_energy=energy,
             direction_masks=masks,
             divide_threshold=100,
             divide_feature=biomass,
-            divide_fn_self=lambda x: (x.float() * 0.5).to(x.dtype),
-            divide_fn_offspring=lambda x: (x.float() * 0.5).to(x.dtype),
+            divide_fn_self=lambda x: x * 0.5,
+            divide_fn_offspring=lambda x: x * 0.5,
             carried_features_self=[carried[k] for k in order],
             carried_feature_fns_self=[fns[k] for k in order],
         )
@@ -142,9 +143,10 @@ def test_result_does_not_depend_on_carried_feature_order():
         assert torch.equal(a, b), "perform_move must not depend on carried feature order"
 
 
-def test_multiple_arrivals_at_one_cell_clamp_rather_than_wrap():
-    """Four movers converging on one cell exceed the uint8 range in total."""
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+def test_multiple_arrivals_at_one_cell_saturate_at_255():
+    """Four movers converging on one cell carry 800 between them; an animal
+    holds at most 255, so the total saturates there."""
+    energy = torch.zeros(GRID)
     masks = empty_masks()
     # All four neighbours of (2, 2) move into it.
     energy[3, 2] = 200
@@ -158,7 +160,7 @@ def test_multiple_arrivals_at_one_cell_clamp_rather_than_wrap():
 
     perform_move(entity_energy=energy, direction_masks=masks, divide_threshold=250)
 
-    assert energy[2, 2] == 255, "the total should saturate, not wrap around"
+    assert energy[2, 2] == 255, "the total should saturate at the ceiling"
 
 
 def test_carried_feature_fn_is_applied_exactly_once():
@@ -179,9 +181,9 @@ def test_carried_feature_fn_is_applied_exactly_once():
         calls["offspring"] += 1
         return x
 
-    energy = torch.zeros(GRID, dtype=torch.uint8)
+    energy = torch.zeros(GRID)
     energy[2, 2] = 200
-    carried = torch.zeros(GRID, dtype=torch.uint8)
+    carried = torch.zeros(GRID)
 
     masks = empty_masks()
     masks[UP][2, 2] = 1
@@ -201,21 +203,73 @@ def test_carried_feature_fn_is_applied_exactly_once():
 
 
 
-def test_energy_conversion_rounds_rather_than_truncates():
-    """At exactly the basal rate an animal burned 2 biomass for 7 energy; at a
-    rate of 2.05 it burned the same 2 biomass for 6, because 6.975 truncated.
-    That made every metabolic setting except one exact value a 14% tax, and
-    it was mistaken for the rule 'running too hot'."""
+def build_small_world(seed=0, size=8):
     from tensor_beasts.config import load_config
     from tensor_beasts.world import World
 
+    torch.manual_seed(seed)
     config = load_config("conf/basic_config.yaml")
-    config.world.size = [8, 8]
+    config.world.size = [size, size]
     world = World(config.world)
     world.initialize()
+    return world
+
+
+def test_energy_gained_is_exactly_rate_times_efficiency():
+    """No staircase. When energy was uint8, a rate of 2.05 burned int(2.05) = 2
+    biomass for int(6.975) = 6 energy while the basal rate of exactly 2 got 7,
+    a 14% tax on every setting except one exact value. Now 2.05 biomass buys
+    2.05 * efficiency(2.05) energy, to float precision."""
+    world = build_small_world()
     herbivore = world.entity_dict["Herbivore"]
     herbivore.biomass.data[:] = 200
     herbivore.energy.data[:] = 0
-    herbivore._execute_metabolism(torch.full((8, 8), 2.05))
-    assert int(herbivore.energy.data[0, 0]) == 7, "2 * 3.4875 = 6.975 must round to 7, not truncate to 6"
-    assert int(herbivore.biomass.data[0, 0]) == 198
+    rate = torch.full((8, 8), 2.05)
+    efficiency = float(herbivore._compute_efficiency(rate)[0, 0])
+    herbivore._execute_metabolism(rate)
+    assert herbivore.energy.data.dtype == torch.float32
+    assert float(herbivore.energy.data[0, 0]) == pytest.approx(2.05 * efficiency, abs=1e-5)
+    assert float(herbivore.biomass.data[0, 0]) == pytest.approx(200 - 2.05, abs=1e-5)
+
+
+def test_biomass_burned_at_a_fractional_rate_is_exact():
+    """A metabolic rate of 2.5 costs 2.5 biomass, not the 2 that truncation charged."""
+    world = build_small_world()
+    herbivore = world.entity_dict["Herbivore"]
+    herbivore.biomass.data[:] = 100
+    herbivore.energy.data[:] = 10
+    herbivore._execute_metabolism(torch.full((8, 8), 2.5))
+    assert float(herbivore.biomass.data[0, 0]) == pytest.approx(97.5, abs=1e-5)
+
+
+def test_energy_and_biomass_stay_within_0_255_over_many_steps():
+    """Float removed the saturating arithmetic; the clamps must hold instead.
+    Checks animals and the plants that share the Energy tensor, and the
+    carrion layer the dead flow into, every step of a small world."""
+    world = build_small_world(seed=0, size=64)
+    tensors = {
+        "herbivore energy": world.entity_dict["Herbivore"].energy,
+        "herbivore biomass": world.entity_dict["Herbivore"].biomass,
+        "predator energy": world.entity_dict["Predator"].energy,
+        "predator biomass": world.entity_dict["Predator"].biomass,
+        "plant energy": world.entity_dict["SimplePlant"].energy,
+    }
+    carrion = world.td.get(world.entity_dict["Herbivore"].config.carrion_key)
+    assert bool((tensors["herbivore biomass"].data > 0).any()), "world spawned no herbivores"
+    assert bool((tensors["predator biomass"].data > 0).any()), "world spawned no predators"
+    for step in range(300):
+        world.update()
+        for name, feature in tensors.items():
+            data = feature.data
+            assert data.dtype == torch.float32, name
+            assert float(data.min()) >= 0, f"{name} went negative at step {step}"
+            assert float(data.max()) <= 255, f"{name} exceeded 255 at step {step}"
+        assert float(carrion.min()) >= 0 and float(carrion.max()) <= 255, step
+
+
+def test_dissipation_never_drives_energy_below_zero():
+    world = build_small_world()
+    herbivore = world.entity_dict["Herbivore"]
+    herbivore.energy.data[:] = 0.3  # below the dissipation floor of 1
+    herbivore._execute_dissipation()
+    assert float(herbivore.energy.data.min()) == 0

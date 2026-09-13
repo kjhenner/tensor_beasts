@@ -19,9 +19,12 @@ class OffspringCount(Feature):
 
 @register_feature
 class Biomass(Feature):
-    """Biomass storage - what animals gain from eating."""
+    """Biomass storage - what animals gain from eating.
+
+    Float32 on a 0..255 scale, clamped to [0, 255] by its holders. See Energy.
+    """
     name = "biomass"
-    dtype = torch.uint8
+    dtype = torch.float32
     default_tags = {"observable"}
     default_config = DictConfig({})
     depends_on = {}

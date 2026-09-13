@@ -827,6 +827,28 @@ step and is superseded. Every ratio in this document was measured against the
 integer simulation; the first predator run was started against the rounded
 integer simulation and will be rerun against float before it is quoted.
 
+### Float landed, and it made life more expensive
+
+Energy, biomass and carrion are float32 on the 0..255 scale; every saturating
+helper is deleted and every site clamps explicitly. Faster, as measured: 13.5
+against 11.8 steps per second at 256, 6.8 against 5.8 at 512.
+
+It shifts the ecology, and deliberately was not tuned back. uint8 had been
+silently forgiving part of every burn: `min(rate, biomass).to(uint8)` charged
+`floor(rate)`, so with basal 2 and sensitivity 2.5 animals running at ~2.2 paid
+2. Instrumented, that was 0.18 biomass per step per herbivore, 8.1% of its
+burn, and 0.20 per predator. Float charges what the config says. Rule against
+rule at 512 over 400 steps: herbivore agent-steps 1,240,152 against 1,435,007
+for the rounded integer simulation, mean predators 95 against 140. One seed to
+800 steps shows the same predator-prey cycle with a deeper predator trough, 11
+against roughly 50, and recovery about 200 steps later. Both species persist.
+If the old balance is wanted back, fractional `basal_rate` values such as 1.8
+are now meaningful; that is a tuning decision for the owner.
+
+**Every ratio in this document was measured against an integer simulation and
+is stale.** The findings about the method, the anchor, seed variance and the
+size trap stand; the numbers need re-measuring before they are quoted.
+
 ### Memory: closed for now, on a clean negative
 
 At its own training size the recurrent checkpoint scores 1.065x against 1.247x

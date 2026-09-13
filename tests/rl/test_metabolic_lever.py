@@ -96,7 +96,7 @@ def test_override_burns_the_capped_rate_in_the_simulation():
     alive = entity.biomass.data >= config.survival_threshold
     assert int(alive.sum()) > 0
     # A spread of biomass below the reproduction threshold, so the cap varies.
-    spread = (torch.arange(int(alive.sum())) * 37 % 150 + 40).to(torch.uint8)
+    spread = (torch.arange(int(alive.sum())) * 37 % 150 + 40).float()
     entity.biomass.data[alive] = spread
     entity.energy.data[alive] = 100
 
@@ -109,9 +109,10 @@ def test_override_burns_the_capped_rate_in_the_simulation():
             "direction": torch.zeros(SIZE, SIZE, dtype=torch.long),
             "metabolic_rate": torch.full((SIZE, SIZE), desired),
         })
-        burned = (before.int() - entity.biomass.data.int())[alive]
-        expected = torch.min(expected_rate(before), before.float()).to(torch.uint8).int()[alive]
-        assert torch.equal(burned, expected), f"desired={desired}"
+        burned = (before - entity.biomass.data)[alive]
+        expected = torch.min(expected_rate(before), before)[alive]
+        # Exact: the cap is a float and the burn is no longer truncated.
+        assert torch.allclose(burned, expected, atol=1e-4), f"desired={desired}"
 
 
 def test_bare_direction_override_is_unchanged_and_mapping_without_rate_matches():

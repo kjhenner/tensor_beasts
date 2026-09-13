@@ -6,9 +6,8 @@ from omegaconf import DictConfig
 
 from tensor_beasts.entities import Entity
 from tensor_beasts.registry import register_entity
-from tensor_beasts.features.shared_features import Energy, Scent
+from tensor_beasts.features.shared_features import Energy, Scent, ENERGY_MAX
 from tensor_beasts.features.plant_features import Seed, Crowding
-from tensor_beasts.util import safe_add, safe_sub
 
 logger = logging.getLogger(__name__)
 
@@ -98,12 +97,13 @@ class HydrodynamicPlant(Entity):
         self.scent.initialize_data()
         self.crowding.initialize_data()
         self.energy.initialize_data()
-        self.energy.data = ~ torch.randint(
+        spawn_mask = ~ torch.randint(
             0,
             int(self.config.init_prob * 255),
             self.energy.data.shape,
             dtype=torch.uint8
-        ).type(torch.bool) * self.config.initial_energy
+        ).type(torch.bool)
+        self.energy.data = spawn_mask.to(self.energy.dtype) * self.config.initial_energy
 
     def update(self, action: Optional[torch.Tensor] = None):
         self.crowding.update(0)
@@ -142,7 +142,7 @@ class HydrodynamicPlant(Entity):
             type(self).__name__,
         )
 
-        self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
+        self.energy.data = (energy + ((energy > 0) & growth)).clamp(max=ENERGY_MAX)
         self.energy.data *= ~ death
 
 
@@ -203,7 +203,7 @@ class SimplePlant(Entity):
         else:
             # Probability-based initialization
             spawn_mask = torch.rand(self.energy.data.shape) < self.config.init_prob
-            self.energy.data = spawn_mask.to(torch.uint8) * self.config.initial_energy
+            self.energy.data = spawn_mask.to(self.energy.dtype) * self.config.initial_energy
 
     def update(self, action: Optional[torch.Tensor] = None):
         self.crowding.update(0)
@@ -238,7 +238,7 @@ class SimplePlant(Entity):
             type(self).__name__,
         )
 
-        self.energy.data = safe_add(energy, (energy > 0) * growth, inplace=False)
+        self.energy.data = (energy + ((energy > 0) & growth)).clamp(max=ENERGY_MAX)
         # Death from bad conditions OR energy depleted to 0
         death = death | (self.energy.data == 0)
         self.energy.data *= ~death

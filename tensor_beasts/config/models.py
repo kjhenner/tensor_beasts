@@ -1,11 +1,13 @@
 from typing import Any, Annotated, Dict, List, Optional, Tuple, Type, Union, Literal
 
 from omegaconf import DictConfig, OmegaConf
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, conint, conlist, create_model
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, confloat, conint, conlist, create_model
 
-# Type alias for uint8-compatible integers (0-255)
-# Use this for any config parameter that will be used with uint8 tensors
-UInt8 = conint(ge=0, le=255)
+# Energy, biomass and everything measured against them live on a 0..255 scale
+# (float32 tensors; the scale is inherited from when they were uint8). Any
+# config value written into or compared against those tensors is validated to
+# that range so a threshold can never sit above what an animal can hold.
+Scale255 = confloat(ge=0, le=255)
 
 
 def _parse_td_key(value: Union[str, Tuple[str, str], None]) -> Optional[Tuple[str, str]]:
@@ -167,7 +169,7 @@ class FluidDensityConfig(BaseModel):
 
 class HydrodynamicPlantEntityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    initial_energy: UInt8 = 100  # UInt8 because this sets uint8 energy tensor
+    initial_energy: Scale255 = 100
     init_prob: float = 0.001
     # These are entity-level keys read directly via td.get(), so they must be
     # parsed into (entity, feature) tuples here - unlike nested feature configs,
@@ -207,7 +209,7 @@ class SimpleWaterConfig(BaseModel):
 
 class SimplePlantEntityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    initial_energy: UInt8 = 100  # UInt8 because this sets uint8 energy tensor
+    initial_energy: Scale255 = 100
     init_prob: float = 0.001
     toy_init: bool = False  # If True, spawn single plant in center
     energy_key: TensorDictKey = None
@@ -271,15 +273,15 @@ class GeneticsConfig(BaseModel):
 
 class AnimalEntityConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # Initialization - UInt8 because these set uint8 tensor values
-    initial_energy: UInt8 = 50
-    initial_biomass: UInt8 = 150
+    # Initialization
+    initial_energy: Scale255 = 50
+    initial_biomass: Scale255 = 150
     init_prob: float = 0.001
     toy_init: bool = False
 
-    # Eating - UInt8 because this is subtracted from uint8 food tensor
+    # Eating: cap on what one animal takes per step, on the food's 0..255 scale
     # food_keys: list of food sources tried in order until satiated
-    eat_max: UInt8 = 10
+    eat_max: Scale255 = 10
     food_keys: List[TensorDictKeyRequired] = Field(default_factory=list)
 
     # Perception: list of features to perceive with kernel sizes
@@ -297,11 +299,10 @@ class AnimalEntityConfig(BaseModel):
     # Perception processing
     log_scale: float = 10.0  # Scale factor before log compression
 
-    # Metabolism - gradient-based
-    # UInt8 because these are converted to uint8 for biomass operations
-    basal_rate: UInt8 = 1
+    # Metabolism - gradient-based, in biomass units per step
+    basal_rate: Scale255 = 1
     metabolic_sensitivity: float = 1.0  # biomass burn increase per unit gradient_ema
-    max_metabolic_rate: UInt8 = 5
+    max_metabolic_rate: Scale255 = 5
     gradient_ema_alpha: float = 0.1
 
     # Metabolic efficiency curve - diminishing returns at higher metabolic rates
@@ -311,19 +312,17 @@ class AnimalEntityConfig(BaseModel):
     min_efficiency: float = 2.5  # energy per biomass at max exertion
     max_efficiency: float = 3.5  # energy per biomass at rest
 
-    # Dissipation - UInt8 because floor is used with uint8 energy
+    # Dissipation
     dissipation_rate: float = 0.05
-    dissipation_floor: UInt8 = 1
+    dissipation_floor: Scale255 = 1
 
-    # Movement cost - UInt8 because cost is subtracted from uint8 energy
-    base_movement_cost: UInt8 = 1
+    # Movement cost, in energy units per move
+    base_movement_cost: Scale255 = 1
 
-    # Death & Reproduction
-    # UInt8 because these are compared against uint8 biomass tensor
-    # CRITICAL: Values > 255 cause PyTorch comparison bug!
-    survival_threshold: UInt8 = 5
+    # Death & Reproduction, compared against biomass
+    survival_threshold: Scale255 = 5
     carrion_key: TensorDictKey = None  # where dead biomass goes (carrion layer)
-    reproduction_threshold: UInt8 = 200
+    reproduction_threshold: Scale255 = 200
     # Note: On reproduction, both parent and offspring receive 50% of biomass/energy
 
     # Features

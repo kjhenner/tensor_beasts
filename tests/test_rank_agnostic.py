@@ -38,9 +38,6 @@ from tensor_beasts.util import (
     neighbors,
     pad_matrix,
     roll_with_padding,
-    safe_add,
-    safe_sub,
-    safe_sum,
     safe_where,
     scale_tensor,
     torch_correlate_2d,
@@ -97,31 +94,6 @@ def assert_batched_matches(fn, worlds, float_tol=1e-6):
 # ---------------------------------------------------------------------------
 # util.py -- elementwise helpers (rank-agnostic by construction)
 # ---------------------------------------------------------------------------
-
-def test_safe_add_rank_agnostic():
-    a = _worlds(torch.uint8, 0, 256, seed=1)
-    b = _worlds(torch.uint8, 0, 256, seed=2)
-    singles = [safe_add(x.clone(), y) for x, y in zip(a, b)]
-    batched = safe_add(torch.stack(a).clone(), torch.stack(b))
-    assert torch.equal(batched, torch.stack(singles))
-
-
-def test_safe_sub_rank_agnostic():
-    a = _worlds(torch.uint8, 0, 256, seed=3)
-    b = _worlds(torch.uint8, 0, 256, seed=4)
-    singles = [safe_sub(x.clone(), y) for x, y in zip(a, b)]
-    batched = safe_sub(torch.stack(a).clone(), torch.stack(b))
-    assert torch.equal(batched, torch.stack(singles))
-
-
-def test_safe_sum_rank_agnostic():
-    """dim=0 in safe_sum is the stacked-matrix axis, not a spatial one."""
-    a = _worlds(torch.uint8, 0, 200, seed=5)
-    b = _worlds(torch.uint8, 0, 200, seed=6)
-    singles = [safe_sum([x, y]) for x, y in zip(a, b)]
-    batched = safe_sum([torch.stack(a), torch.stack(b)])
-    assert torch.equal(batched, torch.stack(singles))
-
 
 def test_safe_where_rank_agnostic():
     cond = [w > 0.5 for w in _worlds(seed=7)]

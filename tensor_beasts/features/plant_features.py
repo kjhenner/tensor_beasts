@@ -3,7 +3,7 @@ from omegaconf import DictConfig, ListConfig
 
 from tensor_beasts.features.feature import Feature
 from tensor_beasts.registry import register_feature
-from tensor_beasts.util import as_conv_batch, generate_diffusion_kernel, safe_add, safe_sub
+from tensor_beasts.util import as_conv_batch, generate_diffusion_kernel
 
 
 def _to_tuple(key):
@@ -37,8 +37,11 @@ class Seed(Feature):
         seed_germination = (
             seed & ~(energy > 0) & (rand < ((1 - crowding) ** 2 * self.config.germination_prob * 255))
         ).type(torch.uint8)
-        safe_add(energy, seed_germination)
-        safe_sub(seed, seed_germination)
+        # A germinating seed becomes one unit of plant energy on an empty cell,
+        # and a seed only germinates where it exists, so neither side can
+        # leave its range.
+        energy += seed_germination
+        seed -= seed_germination
 
 
 @register_feature
