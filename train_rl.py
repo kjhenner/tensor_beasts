@@ -137,6 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="minimum anchor weight as a fraction of --imitation-coef, so the rules never fully let go (default 0)")
     hyper.add_argument("--metabolic-imitation-scale", type=float, default=None,
                        help="weight of the metabolic-level anchor relative to the direction anchor; 0 anchors direction only (default 1)")
+    hyper.add_argument("--pretrain-updates", type=int, default=None,
+                       help="supervised updates on rule-based rollouts before RL, one segment each (0 = off). "
+                            "Needed for small populations such as predators, which a near-random start starves.")
     hyper.add_argument("--recurrent-window", type=int, default=None,
                        help="with --memory-size, backpropagate through this many steps of the individual's own memory writes (0 = off, stage 1)")
     hyper.add_argument("--imitation-target", type=float, default=None,
@@ -192,6 +195,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "arch": args.arch,
         "metabolic_levels": args.metabolic_levels,
         "memory_size": args.memory_size,
+        "pretrain_updates": args.pretrain_updates,
         "eval_pin_metabolic_level": args.pin_metabolic_level,
         "device": args.device,
         "seed": args.seed,

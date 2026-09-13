@@ -284,3 +284,44 @@ def test_headline_ratio_is_survival_not_shaped_reward():
     expected = summary["learned_survived_agent_steps"] / baseline
     assert summary["learned_over_rule_based"] == pytest.approx(expected)
     assert summary["learned_over_rule_based"] >= 0.0
+
+
+
+def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_path):
+    """A near-random start starved a learned predator population to zero within
+    200 steps. Pretraining on rule-based rollouts must raise agreement with the
+    rule well above chance and hand that agreement to the anchor's cross-fade.
+    Tiny world for speed; this checks plumbing, not the ecology."""
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    torch.manual_seed(0)
+    trainer = Trainer(
+        TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic_levels=4,
+                      warmup_steps=5, segment_steps=16, pretrain_updates=6, total_world_steps=0,
+                      eval_interval=0, checkpoint_interval=0, device="cpu", output_dir=str(tmp_path)),
+        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3, imitation_coef=1.0),
+    )
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+    result = trainer.pretrain(verbose=False)
+    assert result["argmax_agreement"] > 0.5, f"agreement after pretraining {result['argmax_agreement']:.3f}"
+    assert result["metabolic_agreement"] > 0.5
+    assert trainer.algorithm.conformance == pytest.approx(result["argmax_agreement"])
+    assert trainer.world_steps == 6 * 16
+
+
+def test_pretraining_off_does_nothing(tmp_path):
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
+                      output_dir=str(tmp_path)),
+        PPOConfig(),
+    )
+    before = {k: v.clone() for k, v in trainer.network.state_dict().items()}
+    assert trainer.pretrain(verbose=False) == {}
+    after = trainer.network.state_dict()
+    assert all(torch.equal(before[k], after[k]) for k in before)

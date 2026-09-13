@@ -32,6 +32,8 @@ trainer:
   metabolic_levels: 0
   # Learned memory channels per individual. 0 disables. See planning/04.
   memory_size: 0
+  # Supervised updates on rule-based rollouts before RL. 0 = off.
+  pretrain_updates: 0
   device: auto
   seed: 0
 
