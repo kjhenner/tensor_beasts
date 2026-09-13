@@ -102,6 +102,11 @@ class TrainerConfig:
     metabolic_levels: int = 0
     # Channels of learned memory each individual carries; 0 disables it.
     memory_size: int = 0
+    # Evaluation only. Hold the learned policy's metabolic level fixed at this
+    # value, so the throttle's contribution can be separated from movement's.
+    # None leaves the throttle to the network, or to the rules for a
+    # direction-only policy. Requires an environment with metabolic levels.
+    eval_pin_metabolic_level: Optional[int] = None
     device: str = "auto"
     seed: int = 0
 
@@ -315,7 +320,11 @@ class Trainer:
             reproduction_reward=config.reproduction_reward,
             foraging_reward=config.foraging_reward,
             device=str(self.device),
-            num_metabolic_levels=config.metabolic_levels,
+            # Pinning needs a level-to-rate mapping even for a direction-only
+            # policy; two levels make level 0 exactly the basal rate.
+            num_metabolic_levels=max(
+                config.metabolic_levels, 2 if config.eval_pin_metabolic_level is not None else 0
+            ),
             memory_size=config.memory_size,
         )
 
@@ -456,7 +465,17 @@ class Trainer:
                 action, _, _, metabolic_action, memory = self.act(
                     observation, deterministic=self.config.eval_deterministic
                 )
-                batch = env.step(action, metabolic_action)
+                if self.config.eval_pin_metabolic_level is not None:
+                    # Evaluation-only: hold the throttle at a fixed level so the
+                    # effect of the throttle can be separated from movement.
+                    metabolic_action = torch.full(
+                        env.size, int(self.config.eval_pin_metabolic_level), dtype=torch.long, device=self.device
+                    )
+                # Memory must be written during evaluation exactly as in
+                # training. It was not, once: this call dropped `memory`, so
+                # every memory checkpoint was scored with its memory stuck at
+                # zero, and the evaluation numbers said nothing about memory.
+                batch = env.step(action, metabolic_action, memory)
 
             tracker.update(batch)
             total_reward += float(batch.reward.sum())

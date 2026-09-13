@@ -673,6 +673,16 @@ checkpoints are being scored at 512 before any conclusion is drawn. The
 honest expectation is modest: a task the memory could help with has not been
 identified, and a memory that helps only shows up where remembering pays.
 
+### Correction: the memory numbers above were measured without memory
+
+The evaluator dropped the memory write. Training wrote and carried memory
+correctly, but the scoring loop called the environment without it, so every
+memory checkpoint's evaluation, 0.942x and 0.945x above, was of a policy whose
+memory channels read zero throughout. Those numbers say nothing about memory
+either way. The fix is in, with a test that scores a memory policy and checks
+living cells hold non-zero memory afterwards, and both checkpoints are being
+re-scored at 512.
+
 ### The throttle finding, tested directly
 
 The direction-only winner was scored at 512 twice on each of three seeds: as

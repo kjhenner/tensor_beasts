@@ -139,3 +139,50 @@ def test_trainer_and_controller_round_trip_with_memory(tmp_path):
         td = controller.action()
         assert td["Herbivore"]["memory"].shape == (32, 32, 2)
         world.update(td)
+
+
+
+def test_evaluation_writes_memory_like_training_does():
+    """The evaluator once dropped the memory write, so every memory checkpoint
+    was scored with its memory stuck at zero. After scoring, living cells must
+    hold non-zero memory."""
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, memory_size=2,
+                      warmup_steps=2, total_world_steps=0, eval_interval=0, eval_steps=6, eval_seeds=1,
+                      checkpoint_interval=0, device="cpu"),
+        PPOConfig(),
+    )
+    env = trainer._eval_env(0)
+    env.reset(seed=123)
+    trainer._score(env, 6, "learned")
+    alive = env.entity.biomass.data > 0
+    assert bool(alive.any())
+    assert float(env.entity.memory.data[alive].abs().sum()) > 0.0, "evaluation never wrote memory"
+
+
+def test_pinned_metabolic_level_holds_the_throttle_at_basal():
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+                      total_world_steps=0, eval_interval=0, eval_steps=4, eval_seeds=1, checkpoint_interval=0,
+                      device="cpu", eval_pin_metabolic_level=0),
+        PPOConfig(),
+    )
+    env = trainer._eval_env(0)
+    assert env.num_metabolic_levels >= 2, "pinning needs a level-to-rate mapping"
+    seen = []
+    original = env.step
+
+    def spy(action, metabolic_action=None, memory=None):
+        seen.append(metabolic_action)
+        return original(action, metabolic_action, memory)
+
+    env.step = spy
+    env.reset(seed=1)
+    trainer._score(env, 4, "learned")
+    assert all(m is not None and bool((m == 0).all()) for m in seen), "throttle was not pinned to level 0"

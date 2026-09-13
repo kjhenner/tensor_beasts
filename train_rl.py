@@ -143,6 +143,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="conformance at which the imitation weight reaches zero (default 0.8)")
 
     evaluation = parser.add_argument_group("evaluation")
+    evaluation.add_argument(
+        "--pin-metabolic-level",
+        type=int,
+        default=None,
+        help=(
+            "Evaluation only: hold the learned policy's metabolic level fixed, e.g. 0 "
+            "for basal, to separate the throttle's effect from movement's. Works with "
+            "a direction-only checkpoint too."
+        ),
+    )
     evaluation.add_argument("--eval-interval", type=int, default=None)
     evaluation.add_argument("--eval-steps", type=int, default=None)
     evaluation.add_argument("--eval-seeds", type=int, default=None)
@@ -182,6 +192,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "arch": args.arch,
         "metabolic_levels": args.metabolic_levels,
         "memory_size": args.memory_size,
+        "eval_pin_metabolic_level": args.pin_metabolic_level,
         "device": args.device,
         "seed": args.seed,
         "total_world_steps": args.steps,
