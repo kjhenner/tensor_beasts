@@ -174,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--resume", default=None, metavar="CHECKPOINT")
     output.add_argument("--wandb", action="store_true", default=None)
     output.add_argument("--wandb-project", default=None)
+    output.add_argument("--wandb-host", default=None, help="W&B server URL (default http://localhost:8080)")
     output.add_argument("--quiet", action="store_true")
     return parser
 
@@ -210,6 +211,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "output_dir": args.out,
         "wandb": args.wandb,
         "wandb_project": args.wandb_project,
+        "wandb_host": args.wandb_host,
     }
     ppo_flags = {
         "learning_rate": args.lr,

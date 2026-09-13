@@ -53,6 +53,8 @@ trainer:
 
   wandb: false
   wandb_project: tensor-beasts-rl
+  # Local W&B server. Null defers to WANDB_BASE_URL, then wandb.ai.
+  wandb_host: http://localhost:8080
 
 ppo:
   learning_rate: 3.0e-4

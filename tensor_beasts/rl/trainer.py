@@ -88,6 +88,8 @@ class TrainerConfig:
             entirely optional; the repo has wandb installed and old sweep
             directories, but nothing here requires it.
         wandb_project: Project name if wandb is on.
+        wandb_host: W&B server to log to. Defaults to the local server; None
+            defers to wandb's own resolution (WANDB_BASE_URL, then wandb.ai).
     """
 
     config_path: str = "conf/basic_config.yaml"
@@ -133,6 +135,7 @@ class TrainerConfig:
 
     wandb: bool = False
     wandb_project: str = "tensor-beasts-rl"
+    wandb_host: Optional[str] = "http://localhost:8080"
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
@@ -340,6 +343,7 @@ class Trainer:
         wandb.init(
             project=self.config.wandb_project,
             config={**self.config.to_dict(), **self.ppo_config.to_dict()},
+            settings=wandb.Settings(base_url=self.config.wandb_host) if self.config.wandb_host else None,
         )
         self._wandb = wandb
 
