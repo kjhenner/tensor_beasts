@@ -334,6 +334,45 @@ def upscale(frame: torch.Tensor, factor: int) -> torch.Tensor:
     return frame.repeat_interleave(factor, dim=0).repeat_interleave(factor, dim=1)
 
 
+def display_keys(display_config) -> List[tuple]:
+    """The world keys one display entry reads.
+
+    A film needs only the handful of grids its renderer touches, and the
+    entity's own energy and biomass for the meters. ``World.snapshot`` clones
+    every tensor in the world instead, which at 512 is 21.8 MB a step: a
+    300-step film would hold 6.4 GB, and on an 11 GB card shared with other
+    processes it does exactly what it sounds like.
+    """
+    keys: List[tuple] = []
+    for attribute in ("key", "layers"):
+        value = getattr(display_config, attribute, None)
+        if value is None:
+            continue
+        if attribute == "key":
+            keys.append(tuple(value))
+        else:
+            keys.extend(tuple(layer.key) for layer in value)
+    return keys
+
+
+def thin_snapshot(world, keys: Sequence[tuple], step: int = 0) -> WorldSnapshot:
+    """A snapshot holding only ``keys``, moved to CPU.
+
+    CPU because a film's frames are encoded there anyway, and because holding
+    hundreds of steps of world state on the accelerator competes with the
+    training it is supposed to be illustrating.
+    """
+    data = {}
+    for key in keys:
+        try:
+            value = world.td.get(key)
+        except KeyError:
+            continue
+        if isinstance(value, torch.Tensor):
+            data[tuple(key)] = value.detach().to("cpu").clone()
+    return WorldSnapshot(step=step, data=data)
+
+
 def render_snapshot(snapshot: WorldSnapshot, display_config) -> torch.Tensor:
     """One world snapshot as an ``(H, W, 3)`` uint8 tensor.
 
@@ -342,7 +381,13 @@ def render_snapshot(snapshot: WorldSnapshot, display_config) -> torch.Tensor:
     """
     from tensor_beasts.display.rendering import dispatch_render
 
-    frame = dispatch_render(snapshot, display_config)
+    # The renderers build colour tensors with no explicit device, so they land
+    # on the global default, which during training is the accelerator while a
+    # thinned snapshot is on CPU. Pin the default for the call rather than
+    # moving the snapshot back.
+    device = next(iter(snapshot.data.values())).device if snapshot.data else torch.device("cpu")
+    with torch.device(device):
+        frame = dispatch_render(snapshot, display_config)
     # default_renderer returns an expanded view, which has no real strides and
     # cannot be handed to a video encoder.
     return frame.contiguous()

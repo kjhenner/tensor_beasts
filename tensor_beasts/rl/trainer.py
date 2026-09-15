@@ -587,8 +587,10 @@ class Trainer:
         from tensor_beasts.config import load_config
         from tensor_beasts.rl.film import (
             IndividualTracker,
+            display_keys,
             film_life,
             select_bands,
+            thin_snapshot,
             write_video,
         )
 
@@ -604,9 +606,18 @@ class Trainer:
             tracker = IndividualTracker(env.size, self.device)
             tracker.begin(env._alive())
 
+            # Only the grids the renderer and the meters read, held on CPU. A
+            # full World.snapshot is 21.8 MB a step at 512, so a 300-step film
+            # would pin 6.4 GB of the accelerator the training is using.
+            entity_key = self.config.entity.lower()
+            keys = display_keys(display_config) + [
+                (entity_key, "energy"),
+                (entity_key, "biomass"),
+            ]
+
             snapshots = []
-            for _ in range(self.config.film_steps):
-                snapshots.append(env.world.snapshot())
+            for index in range(self.config.film_steps):
+                snapshots.append(thin_snapshot(env.world, keys, step=index))
                 observation = policy_input(_observe(env))
                 action, _, _, metabolic_action, memory = self.act(
                     observation, deterministic=self.config.eval_deterministic
