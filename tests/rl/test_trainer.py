@@ -414,3 +414,73 @@ def test_wandb_host_survives_a_missing_settings_file(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "empty"))
     assert resolve_wandb_host(DEFAULT_WANDB_HOST) == DEFAULT_WANDB_HOST
     assert resolve_wandb_host(None) is None
+
+
+def test_a_metric_keeps_one_name_across_phases():
+    """Pretraining and training must report shared metrics under one name.
+
+    Prefixing one phase and not the other produces two half-empty charts for a
+    single quantity: one that stops when pretraining ends and one that starts
+    there, which reads as a broken run rather than as two phases.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    pretrain = wandb_record(
+        {"phase": "pretrain", "world_steps": 960, "population": 1186.0, "argmax_agreement": 0.93}
+    )
+    training = wandb_record({"world_steps": 992, "population": 1025.0, "argmax_agreement": 0.77})
+
+    assert "population" in pretrain and "population" in training
+    assert "argmax_agreement" in pretrain and "argmax_agreement" in training
+    assert not any(k.startswith("pretrain/") for k in pretrain)
+    # The phase survives as a metric, so a chart can still be split on it.
+    assert pretrain["phase"] == 0 and "phase" not in training
+
+
+def test_sparse_evaluation_metrics_are_kept_out_of_the_dense_series():
+    """Evaluation runs every few thousand steps; per-segment metrics every 32.
+
+    Mixed together, a metric with two values across 150 rows is drawn as a line
+    with enormous gaps, and the space between two distant points is filled in
+    as though the value held there.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    out = wandb_record(
+        {
+            "world_steps": 992,
+            "population": 1025.0,
+            "learned_over_rule_based": 0.859,
+            "learned_survived_agent_steps": 32273.0,
+            "rule_based_survived_agent_steps": 37572.0,
+            "film_typical_steps": 65,
+        }
+    )
+
+    assert out["eval/learned_over_rule_based"] == 0.859
+    assert "eval/learned_survived_agent_steps" in out
+    assert "eval/rule_based_survived_agent_steps" in out
+    assert out["film/typical_steps"] == 65
+    # The dense metric stays where it was.
+    assert out["population"] == 1025.0
+
+
+def test_unmeasured_and_non_numeric_values_are_not_logged_as_metrics():
+    """A direction-only run reports the metabolic metrics as NaN on every row.
+
+    Logged, they are three charts that are empty for the whole run. The
+    checkpoint path is a string and belongs nowhere on a chart.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    out = wandb_record(
+        {
+            "world_steps": 1024,
+            "entropy": 0.58,
+            "metabolic_agreement": float("nan"),
+            "metabolic_level_mean": float("nan"),
+            "checkpoint": "outputs/rl/checkpoint.pt",
+        }
+    )
+
+    assert out == {"world_steps": 1024, "entropy": 0.58}

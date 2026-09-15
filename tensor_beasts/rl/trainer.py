@@ -170,6 +170,54 @@ class TrainerConfig:
         return asdict(self)
 
 
+# Metrics that are only produced on an evaluation step, grouped so they form
+# their own sparse series instead of gaps in a dense one.
+_EVAL_PREFIXES = ("learned_", "rule_based_")
+_EVAL_KEYS = frozenset({"learned_over_rule_based"})
+# Metrics produced on a film step.
+_FILM_PREFIX = "film_"
+
+
+def wandb_record(record: Dict[str, object]) -> Dict[str, object]:
+    """Group one log record into stable W&B namespaces.
+
+    Two things went wrong without this, and both show up as charts that look
+    broken rather than as errors.
+
+    **A metric must keep one name for the whole run.** Pretraining and training
+    both report ``population`` and ``argmax_agreement``. If one phase logs them
+    under a prefix and the other does not, W&B draws two half-empty charts for
+    one quantity: one that stops when pretraining ends and one that starts
+    there. Phase goes in a ``phase`` metric, never in the metric names.
+
+    **Sparse metrics must be separated from dense ones.** Evaluation runs every
+    few thousand world steps, so ``learned_over_rule_based`` has a value on two
+    rows out of a hundred and fifty. Mixed in with per-segment metrics that is
+    read as a line with enormous gaps, and W&B's step interpolation fills the
+    space between two distant points as though the value held there. Putting
+    them under ``eval/`` keeps them a series of their own, plotted as the
+    handful of points they actually are.
+    """
+    out: Dict[str, object] = {}
+    for key, value in record.items():
+        if not isinstance(value, (int, float, bool)) or isinstance(value, bool):
+            # Strings such as the checkpoint path and the film paths are not
+            # metrics; W&B renders them as a table column, which is noise on a
+            # chart. Keep the phase, as a metric, so a chart can be split on it.
+            if key == "phase":
+                out["phase"] = 0 if value == "pretrain" else 1
+            continue
+        if value != value:  # NaN: a metric that was not measured this step
+            continue
+        if key.startswith(_EVAL_PREFIXES) or key in _EVAL_KEYS:
+            out[f"eval/{key}"] = value
+        elif key.startswith(_FILM_PREFIX):
+            out[f"film/{key[len(_FILM_PREFIX):]}"] = value
+        else:
+            out[key] = value
+    return out
+
+
 def resolve_wandb_host(configured: Optional[str]) -> Optional[str]:
     """The W&B server to log to, preferring what the user has already set up.
 
@@ -407,6 +455,13 @@ class Trainer:
             config={**self.config.to_dict(), **self.ppo_config.to_dict()},
             settings=wandb.Settings(base_url=host) if host else None,
         )
+        # Plot everything against world steps rather than against W&B's own
+        # increment-per-log-call counter. Without this the x-axis counts log
+        # calls, so pretraining's thirty updates and training's hundreds share
+        # an axis that means nothing, and the step a metric appears at does not
+        # match the step in the JSONL log.
+        run.define_metric("world_steps")
+        run.define_metric("*", step_metric="world_steps")
         print(f"wandb: {run.url}", flush=True)
         self._wandb = wandb
 
@@ -807,7 +862,7 @@ class Trainer:
         with self.log_path.open("a") as handle:
             handle.write(json.dumps(record) + "\n")
         if self._wandb is not None:
-            self._wandb.log(record)
+            self._wandb.log(wandb_record(record), step=int(record.get("world_steps", self.world_steps)))
 
     @staticmethod
     def format_record(record: Dict[str, object]) -> str:
