@@ -34,6 +34,11 @@ project's hardware a 512 world trains about ten times faster on a GPU than on
 twenty CPU cores, which is the difference between iterating at 256 and
 iterating at the size where the ecology is valid.
 
+A 512 run needs roughly 6 GB of device memory at the default minibatch, and
+`train_rl.py` prints its own estimate before it starts. Lower `--minibatch-steps`
+if that does not fit: the backward pass over full-resolution activations is what
+uses the memory, not the stored rollout.
+
 ## Usage
 
 Run the simulation with:
