@@ -1040,6 +1040,45 @@ cycle rather than one trough, average over many more paired seeds to beat the
 survived agent-steps, since reproduction is what actually separated the learned
 policy from the rules here.
 
+### How many seeds a predator claim needs, measured
+
+The obvious remedy for a noisy window is a longer one. Measured, it is worse.
+Rule against rule at 512, same seed, differing only in the random stream:
+
+| Window | Runs | Spread | min/max |
+|---|---|---|---|
+| 400 steps | 26,079 / 23,945 / 28,906 / 24,891 | 8.3% | 0.828 |
+| 1,200 steps | 542,956 / 252,343 / 727,868 / 490,331 | **38.9%** | 0.347 |
+
+A longer window does not average the noise out, it integrates it. The reason is
+in the cycle: cumulative predator agent-steps over one run, from a settled
+world, are 33,087 by step 400 with the population still in its trough at 112,
+and 324,029 by step 800 once it has recovered to 1,181. Ten times the score
+arrives in the second four hundred steps. *When* the recovery happens therefore
+dominates the total, and recovery timing is exactly what luck decides. The
+400-step window is noisy because it samples a trough; the 1,200-step window is
+noisier because it samples whether the boom fell inside it.
+
+So the lever is seeds, not window. Sixteen paired seeds at 400 steps,
+rule-based:
+
+| Seeds | Standard error of the mean | Difference detectable at two standard errors |
+|---|---|---|
+| 3 | 9.2% | 18.3% |
+| 5 | 7.1% | 14.2% |
+| 8 | 5.6% | 11.2% |
+| 16 | 4.0% | 7.9% |
+
+Mean 28,153, standard deviation 4,472, coefficient of variation 15.9%.
+
+**The trainer's default of three evaluation seeds cannot see anything smaller
+than an 18% difference in a predator run.** The herbivore result that this
+project rests on, 11 to 33 percent across five training seeds, would have been
+partly inside that band had it been measured on predators. Eight seeds is the
+minimum worth reporting for a predator claim and sixteen is what a headline
+number deserves; at roughly 40 seconds per seed on a 3090 that is ten minutes,
+which is not the constraint it would have been on CPU.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
