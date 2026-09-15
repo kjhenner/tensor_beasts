@@ -1079,6 +1079,68 @@ minimum worth reporting for a predator claim and sixteen is what a headline
 number deserves; at roughly 40 seconds per seed on a 3090 that is ten minutes,
 which is not the constraint it would have been on CPU.
 
+### The real cause: the learner sees the prey field one move out of date
+
+Everything above about noise and windows is true and none of it was the
+problem. The predator experiment had a fairness bug, and it is worth stating
+precisely because it invalidates the comparison rather than merely widening it.
+
+`World.update` runs entities in dependency order, which is `Herbivore`,
+`Predator`, `SimplePlant`, `SimpleTerrain`. Each entity builds its own
+observation inside its own `update`, so the rule-based predator observes the
+world *after* the herbivores have already moved, died and re-emitted scent this
+step. `MultiAgentWorldEnv.step` builds the learner's observation before calling
+`World.update`, which is *before* the herbivores have moved.
+
+So the learned predator chooses where to go from a prey field one herbivore move
+stale, and the rule-based predator it is being compared against does not.
+Measured at 512 on a settled world, in a single step: 1,173 herbivore cells
+change biomass, 17 herbivores die, and the herbivore scent field the predator
+navigates by shifts by 0.37 per cell on average. The predator is aiming at where
+the prey was.
+
+The size of the effect is not subtle. Driving the world through `step()` with
+the rule-based policy's **own action**, which should be indistinguishable from
+the baseline:
+
+| | Agent-steps | Ate on | Biomass eaten |
+|---|---|---|---|
+| `rule_based_step` | 14,622 | 2.95% | 12,411 |
+| `step` with the identical rule action | 13,142 | **1.46%** | **5,077** |
+
+Half the food, from the same policy, because of when the observation is taken.
+Over 800 steps at 512 on two seeds the rule-based path recovers to populations
+of 649 and 935 while the `step` path is extinct by step 400, both seeds. And it
+is not chaos: perturbing the rules with 5%, 11% or 20% random actions changes
+nothing about that outcome, and reseeding the global RNG every step costs
+nothing at all.
+
+The direction distributions are nearly identical and 97.1% of living cells get
+the same action, so this is a small, systematic disadvantage applied every step
+to a population small enough that it compounds into extinction. The herbivore
+experiments never showed it: a herbivore's food is plants, which update *after*
+the herbivore and are nearly static anyway, so its observation is not stale in
+any way that matters. Driving the herbivore world through `step()` with the
+rules' own action scores 244,247 against 235,106, no gap. **The bug is specific
+to an entity whose food moves and updates before it.**
+
+Consequences for what is recorded above. The first predator run's 0.591x and
+the second's 0.593x are not measurements of a learned policy; the harness
+itself loses about 0.59x with the rules' own actions in it. The two runs'
+extinctions are the same artefact, which is why holding argmax agreement at
+0.88 to 0.90 with a KL cap and an anchor floor did not prevent the second one.
+**No predator comparison in this document means anything until the observation
+is taken at the same point in the step for both policies.**
+
+The fix is not obvious and is deliberately not made here. The options are to
+have the environment observe inside the entity's own update, which means the
+policy call has to move into the simulation's step rather than wrapping it; to
+reorder entities so the predator updates first, which changes the ecology and
+every golden hash; or to accept the staleness and give the rule-based baseline
+the same handicap, which makes the comparison fair but measures a worse
+predator than the simulation actually has. The first is the right one and is a
+real piece of work. The herbivore results are unaffected either way.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the

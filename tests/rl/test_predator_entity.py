@@ -44,3 +44,64 @@ def test_predator_trains_evaluates_and_checkpoints(tmp_path):
     payload = torch.load(path, weights_only=False)
     assert payload["trainer_config"]["entity"] == "Predator"
     assert payload["num_metabolic_levels"] == 4
+
+
+def test_the_learner_observes_the_prey_field_before_the_prey_moves():
+    """Documents a known fairness bug in the predator comparison.
+
+    ``World.update`` runs Herbivore before Predator, and each entity builds its
+    observation inside its own update. So the rule-based predator sees the prey
+    field *after* the herbivores have moved this step, while
+    ``MultiAgentWorldEnv.step`` builds the learner's observation *before*
+    ``World.update`` is called at all. The learned predator therefore aims at
+    where the prey was.
+
+    Measured at 512 this halves hunting success, 1.46% of steps against 2.95%,
+    and drives the population extinct where the rules recover. See
+    planning/04-reinforcement-learning.md.
+
+    This test asserts the bug still exists rather than that it is fixed. When
+    the observation timing is corrected, this test should fail and be replaced
+    by its opposite: that the two agree. It exists so the correction is a
+    deliberate, measured change and not a silent one.
+    """
+    import torch
+
+    from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
+
+    env = MultiAgentWorldEnv(size=(128, 128), device="cpu", entity_name="Predator")
+    env.reset(seed=0)
+    for _ in range(30):
+        env.rule_based_step()
+
+    entity = env.world.entity_dict["Predator"]
+    assert env.world._entity_order.index("Herbivore") < env.world._entity_order.index("Predator"), (
+        "the bug depends on prey updating before the predator"
+    )
+
+    _, raw = env._observe()
+    external = env._rule_decision(raw).move_direction.to(torch.long)
+
+    # Record what the entity's own policy chooses when it runs inside update(),
+    # after the herbivores have already moved.
+    original = entity.policy
+    seen = {}
+
+    class Spy:
+        def __call__(self, observation):
+            action = original(observation)
+            seen["direction"] = action.move_direction.clone()
+            return action
+
+    entity.policy = Spy()
+    try:
+        env.step(external)
+    finally:
+        entity.policy = original
+
+    internal = seen["direction"].to(torch.long)
+    agreement = float((external == internal).float().mean())
+    assert agreement < 1.0, (
+        "The external action now matches what the entity computes for itself. "
+        "If the observation timing was fixed, replace this test with its opposite."
+    )
