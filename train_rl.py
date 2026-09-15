@@ -110,6 +110,18 @@ def build_parser() -> argparse.ArgumentParser:
     loop.add_argument("--segment-steps", type=int, default=None)
     loop.add_argument("--warmup-steps", type=int, default=None)
     loop.add_argument("--seed", type=int, default=None)
+    loop.add_argument(
+        "--extinction-patience",
+        type=int,
+        default=None,
+        metavar="SEGMENTS",
+        help=(
+            "Stop when the controlled population has been extinct for this many "
+            "consecutive segments (default 3, 0 disables). The simulation has no "
+            "immigration, so an extinct entity never returns and every gradient "
+            "after that point is empty."
+        ),
+    )
 
     hyper = parser.add_argument_group("ppo")
     hyper.add_argument("--lr", type=float, default=None)
@@ -226,6 +238,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "eval_pin_metabolic_level": args.pin_metabolic_level,
         "device": args.device,
         "seed": args.seed,
+        "extinction_patience": args.extinction_patience,
         "total_world_steps": args.steps,
         "segment_steps": args.segment_steps,
         "warmup_steps": args.warmup_steps,

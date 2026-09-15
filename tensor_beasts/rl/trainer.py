@@ -104,6 +104,13 @@ class TrainerConfig:
     metabolic_levels: int = 0
     # Channels of learned memory each individual carries; 0 disables it.
     memory_size: int = 0
+    # Stop the run when the controlled population has been extinct for this many
+    # consecutive segments. An extinct population produces no transitions, so
+    # every gradient, every diagnostic and every evaluation after that point is
+    # empty: a predator run once spent 89% of its world steps training on a
+    # world with no predators in it and reported NaN agreement the whole way.
+    # 0 disables the guard.
+    extinction_patience: int = 3
     # Supervised updates on rule-based rollouts before RL starts, each over one
     # segment of world steps. Zero skips it. See Trainer.pretrain for why a
     # small population needs it.
@@ -869,6 +876,7 @@ class Trainer:
         agent_steps_at_start = self.agent_steps
 
         record: Dict[str, object] = {}
+        extinct_segments = 0
         while self.world_steps < self.config.total_world_steps:
             steps = min(self.config.segment_steps, self.config.total_world_steps - self.world_steps)
 
@@ -908,6 +916,30 @@ class Trainer:
             if self.config.film_interval and self.world_steps >= self._next_film:
                 record.update(self.record_film())
                 self._next_film = self.world_steps + self.config.film_interval
+
+            # An extinct population is the end of the experiment, not a bad
+            # patch to train through: with nothing alive there are no
+            # transitions, so the loss has nothing to act on and the world can
+            # never repopulate, the simulation having no immigration.
+            if self.config.extinction_patience:
+                if collect_stats.get("population", 1.0) <= 0.0:
+                    extinct_segments += 1
+                else:
+                    extinct_segments = 0
+                if extinct_segments >= self.config.extinction_patience:
+                    record["extinct"] = True
+                    record["extinct_at_world_step"] = self.world_steps
+                    self.log(record)
+                    if verbose:
+                        print(self.format_record(record), flush=True)
+                        print(
+                            f"\n{self.config.entity} went extinct: no living individual for "
+                            f"{extinct_segments} consecutive segments, stopping at world step "
+                            f"{self.world_steps} of {self.config.total_world_steps}. Every "
+                            "gradient from here would be empty.",
+                            flush=True,
+                        )
+                    break
 
             self.log(record)
             if verbose:

@@ -325,3 +325,59 @@ def test_pretraining_off_does_nothing(tmp_path):
     assert trainer.pretrain(verbose=False) == {}
     after = trainer.network.state_dict()
     assert all(torch.equal(before[k], after[k]) for k in before)
+
+
+def test_training_stops_when_the_population_goes_extinct(tmp_path):
+    """An extinct population produces no gradient, so the run must end.
+
+    A predator run once trained for 6,000 world steps after its last predator
+    died, reporting NaN for every diagnostic, because nothing checked. The
+    simulation has no immigration: once a controlled entity is gone it cannot
+    come back, so continuing is pure waste.
+    """
+    import torch
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(
+            size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
+            warmup_steps=0, total_world_steps=400, segment_steps=8, eval_interval=0,
+            checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
+            extinction_patience=2,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    trainer.env.reset(seed=0)
+    # Kill every predator, which is what a collapsing policy eventually does.
+    trainer.env.entity.biomass.data.zero_()
+
+    record = trainer.train(verbose=False)
+
+    assert record.get("extinct") is True
+    assert trainer.world_steps < trainer.config.total_world_steps, (
+        "the loop should stop early rather than run to completion on an empty world"
+    )
+
+
+def test_extinction_guard_can_be_disabled(tmp_path):
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(
+            size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
+            warmup_steps=0, total_world_steps=24, segment_steps=8, eval_interval=0,
+            checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
+            extinction_patience=0,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    trainer.env.reset(seed=0)
+    trainer.env.entity.biomass.data.zero_()
+
+    record = trainer.train(verbose=False)
+
+    assert "extinct" not in record
+    assert trainer.world_steps == 24
