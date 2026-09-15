@@ -870,6 +870,84 @@ extra channels rather than to anything learned. And something should be visible:
 a memory channel that tracks time since eating, or distance travelled from a
 predator, would be a result a person can look at and believe.
 
+## The predator experiment
+
+The goal, stated by the repo owner: **herbivores on the rule-based policy,
+predators learned, and the learned predator beats the rule-based predator.**
+This is the experiment the herbivore work was scaffolding for, and it is a
+different problem in ways worth stating before any run.
+
+### Re-measuring the baseline, because everything above it is stale
+
+Every ratio recorded before this section was measured against the integer
+simulation and marked stale when energy and biomass went float32. The predator
+baseline had never been measured against float at all. Rule against rule at
+512, herbivores and predators both on their own rules, three paired evaluation
+seeds over 400 steps, counting predator agent-steps survived:
+
+| Seed | Predator agent-steps | Reproductions | Mean predators | Minimum | Final |
+|---|---|---|---|---|---|
+| 10000 | 34,456 | 267 | 87.9 | 9 | 39 |
+| 10001 | 37,401 | 302 | 95.3 | 20 | 67 |
+| 10002 | 31,448 | 201 | 80.1 | 4 | 5 |
+| Total | **103,305** | 770 | 87.8 | | |
+
+**This is the number a learned predator has to beat: 103,305 predator
+agent-steps over three seeds.**
+
+The trajectory matters more than the total. Predators fall from roughly 200 at
+reset to between 6 and 30 by step 300 while herbivores crash to about 530 and
+then boom past 2,000; predators recover only in the last hundred steps, and on
+seed 10002 they recover to 5. That is a textbook predator-prey cycle rather
+than a bug, but it has two consequences for the experiment. A 400-step window
+samples one trough, so the variance between seeds is the cycle's phase as much
+as the policy. And a learned predator that hunts harder early can drive its own
+prey down and starve, which means a policy can lose by being better at hunting.
+A longer window is the honest measurement, and the cheap early one should be
+read as a screen rather than a result.
+
+### The predator's reward is sparse where the herbivore's is dense
+
+The winning herbivore recipe used a foraging reward of 0.1 on biomass eaten.
+Copying that number to the predator would be a mistake, and the reason is
+measurable. At 256, rule-based, over 60 steps after settling:
+
+| | Agent-steps | Ate on | Mean bite | Survived per step |
+|---|---|---|---|---|
+| Herbivore | 8,939 | 78.3% | 3.0 | 98.76% |
+| Predator | 4,784 | **2.5%** | **29.6** | 97.97% |
+
+A herbivore grazes almost every step in small mouthfuls; a predator makes a
+kill on one step in forty and eats ten times as much when it does. The same
+coefficient multiplies a signal with an entirely different shape, and the
+foraging term stops being a dense gradient and becomes a rare spike.
+
+Matching the *variance* rather than the coefficient transfers the recipe
+honestly. Reward per acting individual, same measurement:
+
+| Policy | Foraging coefficient | Mean | Std | Coefficient of variation |
+|---|---|---|---|---|
+| Herbivore | 0.1 | 1.227 | 0.522 | 0.426 |
+| Predator | 0.1 | 1.072 | 0.659 | 0.615 |
+| Predator | **0.02** | 1.013 | 0.432 | **0.427** |
+
+So the predator runs use a foraging reward of 0.02, chosen because it puts the
+reward's dispersion where the herbivore recipe's was, not because it looked
+reasonable. Whether variance is the right thing to match is itself a guess, and
+it is written down here so a later run that sweeps the coefficient has
+something to disagree with.
+
+### Why predators need supervised pretraining
+
+Recorded in the commit that added `--pretrain-updates`: twice, a learned
+predator took its population at 512 from 486 to zero inside 200 steps, before
+the imitation anchor could pull a near-random policy toward anything that
+hunts. Herbivores survive the same near-random start only because there are
+thousands of them and the plants do not run away. A few hundred predators that
+wander at random all starve together, and a dead population produces no
+gradient at all. Pretraining on rule-based rollouts is therefore not an
+optimization for the predator, it is what makes the run possible.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
