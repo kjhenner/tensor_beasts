@@ -53,7 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Reward per unit of biomass gained per step. Dense and strongly "
-            "action-dependent, unlike survival, which sits near 99.4% per step "
+            # Escaped: argparse runs help text through %-formatting, and a bare
+            # percent sign makes --help raise ValueError instead of printing.
+            "action-dependent, unlike survival, which sits near 99.4%% per step "
             "and so carries almost no signal. Reward shaping: it changes what is "
             "optimized, never what is evaluated."
         ),
@@ -168,6 +170,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="score a checkpoint against the rule-based baseline and exit",
     )
 
+    film = parser.add_argument_group("films")
+    film.add_argument(
+        "--film-interval",
+        type=int,
+        default=None,
+        metavar="STEPS",
+        help=(
+            "World steps between individual-following films, 0 to disable "
+            "(default). Each film follows two individuals through their whole "
+            "lives, one sampled from the typical band of the return "
+            "distribution and one from the top decile, and writes an mp4 per "
+            "individual. Rare on purpose: it holds one world snapshot per "
+            "recorded step. With --eval-only it records one film and exits."
+        ),
+    )
+    film.add_argument("--film-steps", type=int, default=None, metavar="N",
+                      help="world steps recorded per film (default 300)")
+    film.add_argument("--film-window", type=int, default=None, metavar="CELLS",
+                      help="side length of the crop that follows the individual (default 48)")
+    film.add_argument("--film-scale", type=int, default=None, metavar="N",
+                      help="nearest-neighbour upscale of each frame (default 5)")
+    film.add_argument("--film-display", default=None, metavar="TITLE",
+                      help="which display config to render through (default 'layers')")
+
     output = parser.add_argument_group("output")
     output.add_argument("--out", default=None, help="output directory")
     output.add_argument("--checkpoint-interval", type=int, default=None)
@@ -207,6 +233,11 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "eval_steps": args.eval_steps,
         "eval_seeds": args.eval_seeds,
         "eval_deterministic": args.eval_deterministic,
+        "film_interval": args.film_interval,
+        "film_steps": args.film_steps,
+        "film_window": args.film_window,
+        "film_scale": args.film_scale,
+        "film_display": args.film_display,
         "checkpoint_interval": args.checkpoint_interval,
         "output_dir": args.out,
         "wandb": args.wandb,
@@ -316,6 +347,21 @@ def main(argv: Optional[list] = None) -> int:
             f"{' (argmax)' if trainer_config.eval_deterministic else ' (sampled)'}\n"
         )
         print_evaluation(summary)
+        if trainer_config.film_interval:
+            film = trainer.record_film()
+            summary.update({k: v for k, v in film.items() if isinstance(v, (int, float, str))})
+            print()
+            for band in ("typical", "high"):
+                path = film.get(f"film_{band}_path")
+                if path:
+                    print(
+                        f"{band:8} life: {film[f'film_{band}_steps']:.0f} steps, "
+                        f"reward {film[f'film_{band}_reward']:.0f}, "
+                        f"{film[f'film_{band}_reproductions']:.0f} offspring -> {path}"
+                    )
+            for key in ("film_skipped", "film_error"):
+                if key in film:
+                    print(f"{key}: {film[key]}")
         (Path(trainer_config.output_dir) / "eval.json").write_text(json.dumps(summary, indent=2))
         return 0
 

@@ -129,6 +129,22 @@ class TrainerConfig:
     output_dir: str = "outputs/rl"
     log_name: str = "train_log.jsonl"
 
+    # World steps between individual-following films. Deliberately much rarer
+    # than evaluation: a film costs a full world snapshot per recorded step,
+    # which is the most memory-hungry thing the trainer does, and its value is
+    # in watching the policy change over a run rather than every few minutes.
+    # 0 disables.
+    film_interval: int = 0
+    # World steps recorded per film. The followed individuals must live and die
+    # inside this window for their returns to be complete.
+    film_steps: int = 300
+    # Crop side length in world cells, and the nearest-neighbour upscale.
+    film_window: int = 48
+    film_scale: int = 5
+    # Which display config to render through, by title, from the simulation's
+    # own color_displays. "layers" shows plants, herbivores and predators at once.
+    film_display: str = "layers"
+
     # Predict normalized values. Off makes the ablation runnable; see
     # tensor_beasts/rl/normalization.py for why it should normally stay on.
     normalize_values: bool = True
@@ -306,6 +322,7 @@ class Trainer:
         self.start_time = time.time()
         self._next_eval = 0
         self._next_checkpoint = self.config.checkpoint_interval
+        self._next_film = self.config.film_interval
 
         self.output_dir = Path(self.config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -540,6 +557,109 @@ class Trainer:
             summary.get("learned_survived_agent_steps", 0.0) / baseline if baseline else float("nan")
         )
         return summary
+
+    # ------------------------------------------------------------------
+    # Films
+    # ------------------------------------------------------------------
+    @torch.no_grad()
+    def record_film(self, seed: Optional[int] = None) -> Dict[str, object]:
+        """Follow two individuals through a run and write a video of each.
+
+        Every other number this trainer reports is a sum over thousands of
+        animals, which is the right way to decide whether a policy is better and
+        a poor way to see *how*. This records one film from the typical band of
+        the return distribution and one from the top decile, so what is watched
+        is a representative life next to a good one rather than the single
+        luckiest animal, which in a chaotic ecology looks impressive under any
+        policy.
+
+        Returns paths and the followed individuals' statistics, for the log.
+        Never raises: a missing video encoder or a run where nothing died
+        inside the window is a reason to skip the film, not to end training.
+        """
+        from tensor_beasts.config import load_config
+        from tensor_beasts.rl.film import (
+            IndividualTracker,
+            film_life,
+            select_bands,
+            write_video,
+        )
+
+        rng_state = torch.get_rng_state()
+        self.network.eval()
+        try:
+            display_config = self._film_display_config(load_config)
+            if display_config is None:
+                return {}
+
+            env = self._make_env()
+            env.reset(seed=self.config.seed + 20_000 if seed is None else seed)
+            tracker = IndividualTracker(env.size, self.device)
+            tracker.begin(env._alive())
+
+            snapshots = []
+            for _ in range(self.config.film_steps):
+                snapshots.append(env.world.snapshot())
+                observation = policy_input(_observe(env))
+                action, _, _, metabolic_action, memory = self.act(
+                    observation, deterministic=self.config.eval_deterministic
+                )
+                batch = env.step(action, metabolic_action, memory)
+                tracker.update(batch)
+                tracker.observe_newcomers(env._alive())
+
+            lives = tracker.completed_lives(min_steps=8)
+            bands = select_bands(lives)
+            if not bands:
+                return {"film_skipped": "no individual both lived and died inside the window"}
+
+            out: Dict[str, object] = {}
+            films_dir = self.output_dir / "films"
+            for band, life in bands.items():
+                frames = film_life(
+                    snapshots,
+                    life,
+                    display_config,
+                    window=self.config.film_window,
+                    scale=self.config.film_scale,
+                    entity_name=self.config.entity.lower(),
+                )
+                path = write_video(
+                    frames, films_dir / f"step{self.world_steps:07d}_{band}.mp4", fps=10
+                )
+                out[f"film_{band}_steps"] = life.steps_survived
+                out[f"film_{band}_reward"] = life.reward
+                out[f"film_{band}_reproductions"] = life.reproductions
+                if path is not None:
+                    out[f"film_{band}_path"] = str(path)
+                    self._log_film(band, path)
+            out["film_candidates"] = len(lives)
+            return out
+        except Exception as exc:  # noqa: BLE001 - a film is never worth a dead run
+            return {"film_error": f"{type(exc).__name__}: {exc}"}
+        finally:
+            self.network.train()
+            torch.set_rng_state(rng_state)
+
+    def _film_display_config(self, load_config):
+        """The display entry the films render through, or None if it is absent."""
+        config = load_config(self.config.config_path)
+        displays = config.display.color_displays
+        for entry in displays:
+            if entry.get("title") == self.config.film_display:
+                return entry
+        return displays[0] if displays else None
+
+    def _log_film(self, band: str, path: Path) -> None:
+        if self._wandb is None:
+            return
+        try:
+            self._wandb.log(
+                {f"film/{band}": self._wandb.Video(str(path), fps=10, format="mp4")},
+                step=self.world_steps,
+            )
+        except Exception:  # noqa: BLE001 - logging a video must not end a run
+            pass
 
     # ------------------------------------------------------------------
     # Checkpointing
@@ -784,6 +904,10 @@ class Trainer:
             if self.config.checkpoint_interval and self.world_steps >= self._next_checkpoint:
                 record["checkpoint"] = str(self.save_checkpoint())
                 self._next_checkpoint = self.world_steps + self.config.checkpoint_interval
+
+            if self.config.film_interval and self.world_steps >= self._next_film:
+                record.update(self.record_film())
+                self._next_film = self.world_steps + self.config.film_interval
 
             self.log(record)
             if verbose:
