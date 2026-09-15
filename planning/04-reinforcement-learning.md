@@ -1189,6 +1189,22 @@ found, in the opposite direction: the herbivore won by reproducing far more with
 slightly shorter lives, and the predator wins by matching the rules'
 reproduction while living longer.
 
+### What the films show
+
+Each film follows one individual, sampled from the middle fifth of the return
+distribution and from the top decile, out of 331 completed lives in a 300-step
+window. What a viewer sees, at the step-8,000 checkpoint: the typical predator
+lives 85 steps and never divides; the high-band one lives 135, divides once, and
+spends its life crossing open ground between herbivore clusters rather than
+sitting in one.
+
+That is worth having next to the numbers because it is the same story the
+metrics tell, in a form that can be checked by eye. The evaluation says the
+learned predator wins by reproducing as often as the rules while living longer;
+the films say what living longer looks like, which is an animal that keeps
+moving toward prey it can smell rather than one that camps. A viewer who
+disbelieves the ratio can watch the thing the ratio is about.
+
 ### The critic works for the predator, and that is the interesting part
 
 `explained_variance` over the predator run climbs from about 0 to **0.84** and
