@@ -381,3 +381,36 @@ def test_extinction_guard_can_be_disabled(tmp_path):
 
     assert "extinct" not in record
     assert trainer.world_steps == 24
+
+
+def test_wandb_host_defers_to_the_user_s_own_server(tmp_path, monkeypatch):
+    """The default must not override the host the user's API key is stored for.
+
+    wandb looks its credential up by exact host string, so a key stored for
+    "0.0.0.0:8080" is not found when the base URL says "localhost:8080" even
+    though both reach the same server; it then fails with "No API key
+    configured", which does not mention the host at all. This project defaulted
+    to localhost while the local server was set up as 0.0.0.0, so --wandb could
+    not log to it.
+    """
+    from tensor_beasts.rl.trainer import DEFAULT_WANDB_HOST, resolve_wandb_host
+
+    home = tmp_path / "home"
+    (home / ".config" / "wandb").mkdir(parents=True)
+    (home / ".config" / "wandb" / "settings").write_text(
+        "[default]\nbase_url = http://0.0.0.0:8080\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    # The project default gives way to what the user configured.
+    assert resolve_wandb_host(DEFAULT_WANDB_HOST) == "http://0.0.0.0:8080"
+    # An explicit choice still wins.
+    assert resolve_wandb_host("http://elsewhere:9999") == "http://elsewhere:9999"
+
+
+def test_wandb_host_survives_a_missing_settings_file(tmp_path, monkeypatch):
+    from tensor_beasts.rl.trainer import DEFAULT_WANDB_HOST, resolve_wandb_host
+
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    assert resolve_wandb_host(DEFAULT_WANDB_HOST) == DEFAULT_WANDB_HOST
+    assert resolve_wandb_host(None) is None

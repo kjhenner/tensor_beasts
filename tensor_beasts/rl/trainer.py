@@ -28,6 +28,7 @@ discontinuity in the data distribution at every resume, and it is a reason to
 prefer one long run over several resumed ones.
 """
 
+import configparser
 import json
 import time
 from dataclasses import dataclass, asdict, field
@@ -41,6 +42,11 @@ from tensor_beasts.rl.networks import ActorCritic, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.ppo import PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
+
+# The project's default W&B server. A different value on TrainerConfig is taken
+# as an explicit choice; this one defers to the user's own wandb settings, since
+# that is the host their API key is stored against. See resolve_wandb_host.
+DEFAULT_WANDB_HOST = "http://localhost:8080"
 
 
 @dataclass
@@ -158,10 +164,41 @@ class TrainerConfig:
 
     wandb: bool = False
     wandb_project: str = "tensor-beasts-rl"
-    wandb_host: Optional[str] = "http://localhost:8080"
+    wandb_host: Optional[str] = DEFAULT_WANDB_HOST
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
+
+
+def resolve_wandb_host(configured: Optional[str]) -> Optional[str]:
+    """The W&B server to log to, preferring what the user has already set up.
+
+    The credential lookup is by exact host string. A key stored for
+    ``0.0.0.0:8080`` is not found when the base URL says ``localhost:8080``,
+    even though both reach the same server, and wandb then fails with "No API
+    key configured" rather than saying the host did not match. This project
+    defaulted to ``localhost`` while the local server here was configured as
+    ``0.0.0.0``, so ``--wandb`` could not log to it at all.
+
+    So the user's own ``~/.config/wandb/settings`` wins over this project's
+    default, which is right in general: whatever host they logged in against is
+    the host their key is stored under. An explicit ``--wandb-host`` still wins
+    over both, and None defers to wandb's own resolution.
+    """
+    if configured is not None and configured != DEFAULT_WANDB_HOST:
+        return configured
+
+    settings_path = Path.home() / ".config" / "wandb" / "settings"
+    try:
+        parser = configparser.ConfigParser()
+        parser.read(settings_path)
+        for section in parser.sections():
+            base_url = parser[section].get("base_url")
+            if base_url:
+                return base_url.strip()
+    except (OSError, configparser.Error):
+        pass
+    return configured
 
 
 def resolve_device(name: str) -> torch.device:
@@ -364,11 +401,13 @@ class Trainer:
             return
         import wandb  # imported lazily: wandb is optional and off by default
 
-        wandb.init(
+        host = resolve_wandb_host(self.config.wandb_host)
+        run = wandb.init(
             project=self.config.wandb_project,
             config={**self.config.to_dict(), **self.ppo_config.to_dict()},
-            settings=wandb.Settings(base_url=self.config.wandb_host) if self.config.wandb_host else None,
+            settings=wandb.Settings(base_url=host) if host else None,
         )
+        print(f"wandb: {run.url}", flush=True)
         self._wandb = wandb
 
     # ------------------------------------------------------------------
