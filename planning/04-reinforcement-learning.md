@@ -1141,6 +1141,38 @@ the same handicap, which makes the comparison fair but measures a worse
 predator than the simulation actually has. The first is the right one and is a
 real piece of work. The herbivore results are unaffected either way.
 
+### The fix: decide when the entity would decide
+
+`World.update` now accepts `action_fns`, callbacks evaluated immediately before
+each entity updates, and `MultiAgentWorldEnv.step_with_policy` uses them to ask
+the learner for its action at the instant the controlled entity runs. The
+learner then sees exactly the world the entity's own policy sees, after the
+entities ahead of it in dependency order have moved. Collection, evaluation and
+film recording all go through it.
+
+Driving the world with the rule-based policy's own action, which should be
+indistinguishable from the baseline, at 512:
+
+| Path | Ate on | Biomass eaten | Survived, two seeds |
+|---|---|---|---|
+| `rule_based_step` | 2.95% | 12,411 | 27,761 / 33,376 |
+| `step`, before | 1.46% | 5,077 | ~14,000, extinct by step 400 |
+| `step_with_policy` | 2.81% | 11,736 | 27,629 / 26,601 |
+
+The gap closes to inside the seed noise and the extinction stops. `env.step`
+keeps the old timing, because the viewer and the existing herbivore checkpoints
+run against it, and the test that asserts it disagrees with the entity stays as
+documentation of the hazard. Golden hashes do not move: no simulation behaviour
+changed, only when the learner is asked.
+
+Worth noting what this says about the herbivore results. They were collected
+through the stale path too, so every herbivore number in this document was
+measured with the learner seeing a plant field one update out of date. Plants
+update *after* the herbivore and barely move, which is why the herbivore
+control shows no gap, but the herbivore claims should be re-measured through
+the fixed path before they are quoted again. That is a cheap run now and it has
+not been done.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the

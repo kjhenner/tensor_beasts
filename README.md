@@ -11,15 +11,28 @@ This is cool because:
 
 ## Setup
 
-The repository ships a virtualenv. Everything below assumes it:
+Everything below assumes a virtualenv at `venv/`:
 
 ```bash
 source venv/bin/activate
 ```
 
-To build one from scratch instead, set up
-[Poetry](https://python-poetry.org/docs/) and run `poetry install` from the
-repository root.
+The environment is not in the repository, so build one first. With
+[Poetry](https://python-poetry.org/docs/), `poetry install` from the repository
+root. Or with pip:
+
+```bash
+python3 -m venv venv
+venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu126  # or /cpu
+venv/bin/pip install numpy pydantic omegaconf tensordict pytest tqdm rich \
+    matplotlib imageio imageio-ffmpeg pygame PyOpenGL gymnasium wandb
+venv/bin/pip install -e . --no-deps
+```
+
+Training picks up a CUDA device automatically with `--device auto`. On this
+project's hardware a 512 world trains about ten times faster on a GPU than on
+twenty CPU cores, which is the difference between iterating at 256 and
+iterating at the size where the ecology is valid.
 
 ## Usage
 
@@ -135,6 +148,32 @@ rule-based metabolism burns more than it needs: the rules themselves score
 population goes extinct and the three-species dynamic degenerates, so a small
 world is a different problem rather than a cheap version of this one. Use 256
 for iteration and 512 for results.
+
+**The numbers above are stale in two ways.** They were measured against the
+integer simulation, before energy and biomass became float32, and they were
+collected through an observation taken one update too early. Neither is thought
+to change the herbivore conclusion, since a herbivore's food is plants and
+plants barely move, but both are reasons to re-measure before quoting. The
+timing bug was fatal for the predator, which hunts food that moves: see
+`planning/04-reinforcement-learning.md`.
+
+### Watching one individual
+
+Summed metrics say whether a policy is better, never how. `--film-interval`
+records two individual-following videos: one sampled from the middle of the
+return distribution and one from the top decile, both from lives that began and
+ended inside the window so their returns are complete.
+
+```bash
+python train_rl.py --film-interval 4000                      # during training
+python train_rl.py --eval-only <checkpoint> --film-interval 1  # from a checkpoint
+```
+
+Each frame is a crop centred on the followed individual, rendered through the
+simulation's own display config, with its recent path behind it and its energy
+and biomass as meters across the top. Videos land in `<out>/films/` and are
+logged to W&B when `--wandb` is on. Rare on purpose: a film holds one thinned
+world snapshot per recorded step.
 
 To watch a learned policy in the interactive viewer instead of reading numbers
 about it:
