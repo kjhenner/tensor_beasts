@@ -1,4 +1,5 @@
 import pytest
+import torch
 from omegaconf import DictConfig, OmegaConf
 from tensordict import TensorDict
 
@@ -8,6 +9,31 @@ from tensor_beasts.world import World
 
 # Register OmegaConf resolvers (e.g., ${key:...}) at module load time
 register_resolvers()
+
+
+@pytest.fixture
+def default_device():
+    """Run a test on the best available device and put the default back.
+
+    ``torch.set_default_device`` is global process state. Two tests here used to
+    set it to "mps" and leave it set, which passed on a Mac and, on any other
+    machine, failed those two tests and then three unrelated ones in
+    ``test_world_reset.py`` that ran afterwards and allocated on a device that
+    was not there. Restoring in a fixture keeps a device-specific test from
+    deciding what the rest of the suite runs on.
+    """
+    previous = torch.get_default_device()
+    if torch.cuda.is_available():
+        device = "cuda"
+    elif torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu"
+    torch.set_default_device(device)
+    try:
+        yield torch.device(device)
+    finally:
+        torch.set_default_device(previous)
 
 
 @pytest.fixture
