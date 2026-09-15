@@ -1,7 +1,18 @@
 {
-  "conf/basic_config.yaml": "af337eac1b17d34c",
-  "conf/terrain_config.yaml": "b552b462bca392ec",
-  "conf/toy_config.yaml": "c6b6c28f01a7bb3e",
-  "conf/beast_config.yaml": "94f75bbe526c8b19",
-  "conf/base/simulation.yaml": "af337eac1b17d34c"
+  "devices": {
+    "mps": {
+      "conf/basic_config.yaml": "af337eac1b17d34c",
+      "conf/terrain_config.yaml": "b552b462bca392ec",
+      "conf/toy_config.yaml": "c6b6c28f01a7bb3e",
+      "conf/beast_config.yaml": "94f75bbe526c8b19",
+      "conf/base/simulation.yaml": "af337eac1b17d34c"
+    },
+    "cpu": {
+      "conf/basic_config.yaml": "614682017782bd52",
+      "conf/terrain_config.yaml": "b2df02e814761ba0",
+      "conf/toy_config.yaml": "50750f4dd41b6c72",
+      "conf/beast_config.yaml": "65c2dab1765560af",
+      "conf/base/simulation.yaml": "614682017782bd52"
+    }
+  }
 }

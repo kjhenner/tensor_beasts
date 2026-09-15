@@ -62,6 +62,39 @@ def build(config_path: str, size: int, seed: int) -> World:
     return world
 
 
+def current_device() -> str:
+    """The device type the simulation will build its tensors on."""
+    return torch.get_default_device().type
+
+
+def baseline_for_device(stored: Dict, device: str) -> Optional[Dict[str, str]]:
+    """The hashes recorded for ``device``, or None if there are none.
+
+    Two file layouts are accepted. The current one is
+    ``{"devices": {"cpu": {config: hash}, "mps": {...}}}``. The original was a
+    flat ``{config: hash}`` with no device recorded, which is read as belonging
+    to whatever device is asking, because that is how it was always used; it is
+    also why a baseline captured on Metal reported drift on every other machine
+    rather than saying it could not tell.
+    """
+    if "devices" in stored:
+        return stored["devices"].get(device)
+    return stored
+
+
+def merge_baseline(path: str, device: str, results: Dict[str, str]) -> Dict:
+    """This run's hashes folded into whatever the file already holds."""
+    stored: Dict = {"devices": {}}
+    try:
+        with open(path) as handle:
+            existing = json.load(handle)
+        stored = existing if "devices" in existing else {"devices": {}}
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    stored.setdefault("devices", {})[device] = results
+    return stored
+
+
 def golden(configs: List[str], steps: int, size: int, seed: int) -> Dict[str, str]:
     results = {}
     for config_path in configs:
@@ -104,22 +137,38 @@ def main() -> int:
 
     if args.mode == "golden":
         configs = args.config or DEFAULT_CONFIGS
+        # Hashes are only comparable within one device: float reduction order
+        # differs between backends, so a Metal baseline reports drift on CPU for
+        # every config, including one with no animals in it. The file therefore
+        # records which device produced each set.
+        if args.device:
+            torch.set_default_device(args.device[0])
+        device = current_device()
         results = golden(configs, steps=args.steps or 60, size=(args.size or [64])[0], seed=args.seed)
         print(json.dumps(results, indent=2))
         if args.save:
             with open(args.save, "w") as handle:
-                json.dump(results, handle, indent=2)
-            print(f"\nsaved -> {args.save}", file=sys.stderr)
+                json.dump(merge_baseline(args.save, device, results), handle, indent=2)
+            print(f"\nsaved -> {args.save} (device {device})", file=sys.stderr)
         if args.check:
             with open(args.check) as handle:
-                expected = json.load(handle)
+                stored = json.load(handle)
+            expected = baseline_for_device(stored, device)
+            if expected is None:
+                print(
+                    f"\nNo baseline recorded for device {device!r}. This file has: "
+                    f"{', '.join(sorted(stored['devices'])) if 'devices' in stored else 'one unlabelled device'}."
+                    f"\nCapture one with: python sim_bench.py golden --save {args.check}",
+                    file=sys.stderr,
+                )
+                return 2
             drift = {k: (expected.get(k), v) for k, v in results.items() if expected.get(k) != v}
             if drift:
-                print("\nSTATE DRIFT:", file=sys.stderr)
+                print(f"\nSTATE DRIFT (device {device}):", file=sys.stderr)
                 for key, (was, now) in drift.items():
                     print(f"  {key}\n    was {was}\n    now {now}", file=sys.stderr)
                 return 1
-            print("\nno drift", file=sys.stderr)
+            print(f"\nno drift (device {device})", file=sys.stderr)
         return 0
 
     devices = args.device or ["cpu"]
