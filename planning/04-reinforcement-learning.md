@@ -1165,6 +1165,12 @@ run against it, and the test that asserts it disagrees with the entity stays as
 documentation of the hazard. Golden hashes do not move: no simulation behaviour
 changed, only when the learner is asked.
 
+The learned predator, re-measured on the fixed harness: **0.859x at the first
+evaluation**, against 0.591x and 0.593x for the two runs on the broken one,
+from the same pretrained starting policy. The population grows from 1,069 to
+1,476 over the first eight updates instead of falling monotonically to zero.
+Most of what looked like a bad policy was the harness.
+
 Worth noting what this says about the herbivore results. They were collected
 through the stale path too, so every herbivore number in this document was
 measured with the learner seeing a plant field one update out of date. Plants
