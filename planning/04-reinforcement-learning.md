@@ -1171,6 +1171,29 @@ from the same pretrained starting policy. The population grows from 1,069 to
 1,476 over the first eight updates instead of falling monotonically to zero.
 Most of what looked like a bad policy was the harness.
 
+Training then carried it past the baseline. On the fixed harness, eight paired
+evaluation seeds at 512 over 400 steps:
+
+| World step | Ratio | Learned reproductions | Rule reproductions | Learned lifespan | Rule lifespan |
+|---|---|---|---|---|---|
+| 992, straight off pretraining | 0.859x | 180 | 287 | 82.2 | 78.4 |
+| 3,008 | **1.019x** | 280 | 287 | 81.2 | 78.4 |
+
+The mechanism is the one the first run's failure pointed at. Pretraining alone
+produces a predator whose individuals already live *longer* than the rules', 82
+steps against 78, and which reproduces 37% less, because it does not hunt well
+enough to reach the reproduction threshold. Reinforcement learning closes the
+reproduction gap, 180 to 280 against the rules' 287, while keeping the longer
+life, and the population overtakes. This is the same trade the herbivore recipe
+found, in the opposite direction: the herbivore won by reproducing far more with
+slightly shorter lives, and the predator wins by matching the rules'
+reproduction while living longer.
+
+One evaluation above parity on one training seed is not a claim, and by this
+document's own standard from the herbivore work it needs the recipe on several
+seeds before it is one. The measurement is now capable of supporting one, which
+it was not before.
+
 Worth noting what this says about the herbivore results. They were collected
 through the stale path too, so every herbivore number in this document was
 measured with the learner seeing a plant field one update out of date. Plants
