@@ -1210,10 +1210,14 @@ That is a testable claim and it has not been tested. The cheap version: train a
 herbivore with the same recipe and compare explained variance against the
 fraction of return that survival contributes.
 
-One evaluation above parity on one training seed is not a claim, and by this
-document's own standard from the herbivore work it needs the recipe on several
-seeds before it is one. The measurement is now capable of supporting one, which
-it was not before.
+A second training seed does the same thing: 0.840x off pretraining, 1.007x by
+world step 4,864. Two of two seeds cross parity, from 0.84-0.86 to 1.01-1.06,
+on eight paired evaluation seeds against a metric whose own noise floor is 16%.
+Two seeds is not the five the herbivore claim rests on, and the margin is inside
+the band that noise floor allows, so the honest statement is **parity, with both
+seeds landing slightly above it**, not a 6% win. What is no longer in doubt is
+the direction: on the broken harness both runs went extinct, and on the fixed
+one neither does.
 
 Worth noting what this says about the herbivore results. They were collected
 through the stale path too, so every herbivore number in this document was
