@@ -182,14 +182,35 @@ class World:
         self.initialize()
         self.step = 0
 
-    def update(self, action_td: Optional[TensorDict] = None):
-        """Update all entities in dependency order."""
+    def update(self, action_td: Optional[TensorDict] = None, action_fns: Optional[dict] = None):
+        """Update all entities in dependency order.
+
+        Args:
+            action_td: External action overrides, keyed by entity name, decided
+                before this step began.
+            action_fns: External actions supplied lazily, keyed by entity name.
+                Each is called with no arguments immediately before that entity
+                updates, and must return what ``action_td`` would have held.
+
+        ``action_fns`` exists because *when* an action is decided changes what
+        it can be decided from. Entities update in dependency order, and each
+        builds its observation inside its own update, so a predator's own
+        policy sees the prey field after the herbivores have moved this step.
+        An action passed in ``action_td`` was necessarily chosen before any
+        entity moved, which handed a learned predator a prey field one move out
+        of date and halved its hunting success. A callback is evaluated at the
+        same point in the step the entity's own policy would run, so a learned
+        policy and the rule-based one it is compared against see the same world.
+        """
         self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
 
         # Update entities (includes emission for SharedFeatures)
         for entity_name in self._entity_order:
             entity = self.entity_dict[entity_name]
-            entity.update(action=action_td.get(entity_name, None) if action_td is not None else None)
+            action = action_td.get(entity_name, None) if action_td is not None else None
+            if action_fns is not None and entity_name in action_fns:
+                action = action_fns[entity_name]()
+            entity.update(action=action)
 
         # Run shared diffusion on parent SharedFeatures (batched across all slices)
         for shared_feature in self.shared_features_dict.values():

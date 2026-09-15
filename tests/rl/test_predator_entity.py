@@ -60,10 +60,9 @@ def test_the_learner_observes_the_prey_field_before_the_prey_moves():
     and drives the population extinct where the rules recover. See
     planning/04-reinforcement-learning.md.
 
-    This test asserts the bug still exists rather than that it is fixed. When
-    the observation timing is corrected, this test should fail and be replaced
-    by its opposite: that the two agree. It exists so the correction is a
-    deliberate, measured change and not a silent one.
+    ``step`` keeps this behaviour, because existing checkpoints and the viewer
+    were trained and run against it. ``step_with_policy`` is the fixed path and
+    is what the trainer uses; the test below pins that it agrees.
     """
     import torch
 
@@ -104,4 +103,54 @@ def test_the_learner_observes_the_prey_field_before_the_prey_moves():
     assert agreement < 1.0, (
         "The external action now matches what the entity computes for itself. "
         "If the observation timing was fixed, replace this test with its opposite."
+    )
+
+
+def test_step_with_policy_decides_from_the_same_world_the_entity_sees():
+    """The fix for the stale prey field: decide when the entity would decide.
+
+    ``step_with_policy`` asks for the action at the instant the controlled
+    entity updates, after the entities before it in dependency order have
+    already moved. Handed the rule-based policy, it must therefore choose
+    exactly what the entity chooses for itself, which ``step`` does not.
+
+    At 512 this is the difference between eating on 1.46% of steps and 2.81%,
+    against the baseline's 2.95%, and between going extinct by step 400 and
+    tracking the baseline. See planning/04-reinforcement-learning.md.
+    """
+    import torch
+
+    from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
+
+    env = MultiAgentWorldEnv(size=(128, 128), device="cpu", entity_name="Predator")
+    env.reset(seed=0)
+    for _ in range(30):
+        env.rule_based_step()
+
+    entity = env.world.entity_dict["Predator"]
+    original = entity.policy
+    seen = {}
+
+    class Spy:
+        def __call__(self, observation):
+            action = original(observation)
+            seen["direction"] = action.move_direction.clone()
+            return action
+
+    def decide(observation):
+        _, raw = env._observe()
+        return env._rule_decision(raw).move_direction.to(torch.long), None, None
+
+    entity.policy = Spy()
+    try:
+        batch = env.step_with_policy(decide)
+    finally:
+        entity.policy = original
+
+    chosen = batch.action
+    internal = seen["direction"].to(torch.long)
+    assert torch.equal(chosen, internal), (
+        "step_with_policy must decide from the same world state the entity's own "
+        "policy sees, or a learned policy is compared against a baseline that saw "
+        "a fresher world."
     )

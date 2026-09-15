@@ -602,6 +602,80 @@ class MultiAgentWorldEnv:
             rule_metabolic_level=rule_metabolic_level,
         )
 
+    def step_with_policy(self, decide) -> AgentBatch:
+        """Advance one step, asking ``decide`` for the action at the right moment.
+
+        :meth:`step` takes an action chosen before the world updated at all.
+        Entities update in dependency order and each builds its observation
+        inside its own update, so the rule-based predator sees the prey field
+        *after* the herbivores have moved this step while a learner using
+        :meth:`step` saw it before. Measured at 512 that halved the learned
+        predator's hunting success, 1.46% of steps against 2.95%, and drove the
+        population extinct where the rules recover, purely from the timing.
+
+        ``decide`` is called with this environment's observation at the instant
+        the controlled entity updates, and returns
+        ``(direction, metabolic_action, memory)``, any of which may be None. The
+        comparison against the rules is then like for like.
+
+        Args:
+            decide: Callable taking the ``(C, H, W)`` observation and returning
+                ``(direction, metabolic_action, memory)``.
+        """
+        captured: Dict[str, object] = {}
+
+        def build_action():
+            observation, raw = self._observe()
+            captured["observation"] = observation
+            decision = self._rule_decision(raw)
+            captured["rule_action"] = decision.move_direction.to(torch.long)
+            captured["rule_scores"] = self._rule_scores(raw)
+            captured["rule_metabolic_level"] = self._rule_metabolic_level(decision)
+
+            direction, metabolic_action, memory = decide(observation)
+            captured["action"] = direction
+            captured["metabolic_action"] = metabolic_action
+            return self._entity_action(direction, metabolic_action, memory)
+
+        biomass_before = self.entity.biomass.data.clone()
+        self.world.update(action_fns={self.entity_name: build_action})
+
+        transition = self.entity.last_transition
+        if transition is None:
+            raise RuntimeError(
+                f"{self.entity_name} recorded no transition. track_transitions "
+                "should have been enabled by this environment's constructor."
+            )
+        reward, alive_after, successor, acted = self._reward(transition, biomass_before)
+        return AgentBatch(
+            observation=captured["observation"],
+            acted=acted,
+            action=captured["action"].reshape(*self.size).to(self.device, torch.long),
+            reward=reward,
+            done=acted & ~alive_after,
+            successor=successor,
+            reproduced=transition.reproduced,
+            rule_action=captured["rule_action"],
+            rule_scores=captured["rule_scores"],
+            metabolic_action=captured["metabolic_action"],
+            rule_metabolic_level=captured["rule_metabolic_level"],
+        )
+
+    def _entity_action(self, action, metabolic_action, memory):
+        """The TensorDict or bare tensor ``Animal.update`` expects."""
+        action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        if metabolic_action is None and memory is None:
+            return action
+        fields = {"direction": action}
+        if metabolic_action is not None:
+            metabolic_action = metabolic_action.reshape(*self.size).to(
+                device=self.device, dtype=torch.long
+            )
+            fields["metabolic_rate"] = self.metabolic_level_to_rate(metabolic_action)
+        if memory is not None:
+            fields["memory"] = memory.reshape(self.memory_size, *self.size).permute(1, 2, 0).to(self.device)
+        return TensorDict(fields, batch_size=[])
+
     def rule_based_step(self) -> AgentBatch:
         """Advance one step using the simulation's own policy.
 

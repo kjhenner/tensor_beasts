@@ -435,13 +435,28 @@ class Trainer:
         survived = 0.0
 
         for _ in range(steps):
-            observation = policy_input(_observe(self.env))
-            action, log_prob, value, metabolic_action, memory = self.act(observation)
-            batch = self.env.step(action, metabolic_action, memory)
+            # The policy is asked for its action at the point in the step where
+            # the entity's own policy would run, so a learner sees the same
+            # world the rule-based baseline sees. Deciding beforehand, which is
+            # what env.step does, hands an entity whose food updates before it
+            # a stale observation: for the predator that halved hunting success
+            # and drove the population extinct. See multiagent.step_with_policy.
+            decided: Dict[str, object] = {}
+
+            def decide(observation, decided=decided):
+                observation = policy_input(observation)
+                action, log_prob, value, metabolic_action, memory = self.act(observation)
+                decided.update(
+                    observation=observation, log_prob=log_prob, value=value,
+                )
+                return action, metabolic_action, memory
+
+            batch = self.env.step_with_policy(decide)
             # The env rebuilt the observation itself; overwrite it with the
             # exact tensor the network saw, so stored and recomputed
             # log-probabilities agree bit for bit.
-            batch.observation = observation
+            batch.observation = decided["observation"]
+            log_prob, value = decided["log_prob"], decided["value"]
             buffer.add(batch, log_prob, value)
             tracker.update(batch)
 
@@ -493,21 +508,28 @@ class Trainer:
             if policy == "rule_based":
                 batch = env.rule_based_step()
             else:
-                observation = policy_input(_observe(env))
-                action, _, _, metabolic_action, memory = self.act(
-                    observation, deterministic=self.config.eval_deterministic
-                )
-                if self.config.eval_pin_metabolic_level is not None:
-                    # Evaluation-only: hold the throttle at a fixed level so the
-                    # effect of the throttle can be separated from movement.
-                    metabolic_action = torch.full(
-                        env.size, int(self.config.eval_pin_metabolic_level), dtype=torch.long, device=self.device
+                # Decided at the same point in the step the rule-based baseline
+                # decides, or the comparison measures the observation's timing
+                # rather than the policy. See multiagent.step_with_policy.
+                def decide(observation, env=env):
+                    observation = policy_input(observation)
+                    action, _, _, metabolic_action, memory = self.act(
+                        observation, deterministic=self.config.eval_deterministic
                     )
-                # Memory must be written during evaluation exactly as in
-                # training. It was not, once: this call dropped `memory`, so
-                # every memory checkpoint was scored with its memory stuck at
-                # zero, and the evaluation numbers said nothing about memory.
-                batch = env.step(action, metabolic_action, memory)
+                    if self.config.eval_pin_metabolic_level is not None:
+                        # Evaluation-only: hold the throttle at a fixed level so
+                        # the throttle's effect separates from movement's.
+                        metabolic_action = torch.full(
+                            env.size, int(self.config.eval_pin_metabolic_level),
+                            dtype=torch.long, device=self.device,
+                        )
+                    # Memory must be written during evaluation exactly as in
+                    # training. It was not, once: this call dropped `memory`, so
+                    # every memory checkpoint was scored with its memory stuck
+                    # at zero, and said nothing about memory either way.
+                    return action, metabolic_action, memory
+
+                batch = env.step_with_policy(decide)
 
             tracker.update(batch)
             total_reward += float(batch.reward.sum())
@@ -618,11 +640,15 @@ class Trainer:
             snapshots = []
             for index in range(self.config.film_steps):
                 snapshots.append(thin_snapshot(env.world, keys, step=index))
-                observation = policy_input(_observe(env))
-                action, _, _, metabolic_action, memory = self.act(
-                    observation, deterministic=self.config.eval_deterministic
-                )
-                batch = env.step(action, metabolic_action, memory)
+
+                def decide(observation):
+                    observation = policy_input(observation)
+                    action, _, _, metabolic_action, memory = self.act(
+                        observation, deterministic=self.config.eval_deterministic
+                    )
+                    return action, metabolic_action, memory
+
+                batch = env.step_with_policy(decide)
                 tracker.update(batch)
                 tracker.observe_newcomers(env._alive())
 
