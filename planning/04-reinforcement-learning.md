@@ -948,6 +948,98 @@ wander at random all starve together, and a dead population produces no
 gradient at all. Pretraining on rule-based rollouts is therefore not an
 optimization for the predator, it is what makes the run possible.
 
+### First predator run: extinction, and what it exposed about the measurement
+
+The recipe: `conv` at 512, herbivores on their own rules, predators learned, 30
+pretraining updates, imitation anchor 1.0, foraging reward 0.02, two epochs,
+minibatch 4, on a 3090.
+
+Pretraining worked. Argmax agreement with the rule-based predator rose from
+0.32, against a chance level of 0.20, to **0.929**, above the roughly 0.9
+practical ceiling the knife-edge analysis established for the herbivore. The
+policy that reinforcement learning started from was, by that measure, the rules.
+
+Then it died. The predator population fell from 1,025 to zero by world step
+1,856 and the run continued to step 9,024 against an empty grid, every gradient
+empty and every diagnostic NaN, because nothing checked. That is fixed: the
+loop now stops after `--extinction-patience` segments with nothing alive.
+
+How it died is the interesting part, and it is not what the entropy bonus or
+the anchor's release would predict:
+
+| World step | Population | Entropy | Argmax agreement | Approx KL |
+|---|---|---|---|---|
+| 992 | 1,025 | 0.576 | 0.773 | 0.194 |
+| 1,120 | 342 | 0.851 | 0.776 | 0.009 |
+| 1,376 | 107 | 0.829 | 0.815 | 0.016 |
+| 1,600 | 12 | 0.728 | 0.859 | 0.012 |
+
+Agreement with the rules *rises* from 0.77 to 0.86 while the population falls
+by two orders of magnitude. The policy is not drifting away from the rules and
+starving; it is converging on them and starving anyway. The first update is
+violent, a KL of 0.194 with 42% of samples clipped, and entropy jumps from
+0.576 to 0.85 and stays there, so the anchor's work is partly undone at once.
+But after that the policy sits close to the rules the whole way down.
+
+Measured against the checkpoint directly, over 120 steps from a settled world:
+
+| | Agent-steps | Ate on | Biomass eaten | Reproductions | Final population |
+|---|---|---|---|---|---|
+| Learned | 9,646 | 1.59% | 4,123 | 1 | 6 |
+| Rules | 13,238 | 3.85% | 15,588 | 45 | 38 |
+
+The learned predator hunts 2.4 times worse and therefore almost never divides.
+Individuals live slightly *longer* under it, 82.9 steps against 78.1, so this
+is not a policy that gets its animals killed. It is a policy whose animals fail
+to eat enough to reproduce, and a predator population that does not reproduce
+bleeds out.
+
+### The predator metric is too noisy to have judged that run
+
+Chasing the collapse turned up something that matters more than the run. Sending
+the rule-based policy's *own* action through `step()`, the path a learned policy
+uses, instead of through `rule_based_step()`, the path the baseline uses, scores
+0.594 of the baseline across six paired seeds, every seed between 0.48 and 0.67.
+The same policy, two code paths, a 40% gap.
+
+It is not a bug in either path. The two were compared step by step from an
+identical 512 world: they differ in 2 cells after one step, 18 after three, 212
+after twelve, with populations still within 1%. That is chaotic amplification
+from the movement gate's random draw landing differently, not a behavioural
+difference. Three controls confirm it:
+
+| Control | Result |
+|---|---|
+| Same comparison for the herbivore | 244,247 against 235,106, no gap |
+| Rule against rule, RNG reseeded every step | 24,106 against 23,857, no gap |
+| Rule against rule, one extra tie-break draw burned per step | 21,065, a 12% loss |
+| Rule against itself across five RNG streams, one seed | 20,994 to 26,188 |
+
+The herbivore control is the decisive one. Thousands of herbivores average over
+their own chaos; a few hundred predators do not. And the last row is the number
+to keep: **the rule-based predator scores between 0.80 and 1.00 of itself over
+a 400-step window depending on nothing but the random stream.** A 9% spread on
+a metric is a wide band to have to clear.
+
+The predator baseline's 400-step window is dominated by the trough of a
+predator-prey cycle, where the population falls to single digits and whether it
+recovers is decided by luck. Any predator result inside that window is
+measuring the trough's coin-flip as much as the policy. This is the size trap
+again in a different coordinate: the herbivore work found that a 256 world is
+too small to measure in, and the predator work finds that a 400-step window is
+too short.
+
+**What this means for the goal.** The learned predator's 0.591x is not yet
+evidence of a bad policy, because the harness it was measured in loses 0.594x
+with the rules' own actions in it. The honest position is that the predator
+experiment does not currently have a measurement good enough to answer its own
+question, and fixing the measurement comes before any more training. The
+candidates, in order: evaluate over a window long enough to contain a full
+cycle rather than one trough, average over many more paired seeds to beat the
+9% noise floor, and report mean population and total reproductions beside
+survived agent-steps, since reproduction is what actually separated the learned
+policy from the rules here.
+
 ## What to try next, in order
 
 1. **A denser, more action-dependent reward.** Energy gained by eating is the
