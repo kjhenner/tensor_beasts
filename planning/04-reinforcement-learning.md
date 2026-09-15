@@ -1189,6 +1189,27 @@ found, in the opposite direction: the herbivore won by reproducing far more with
 slightly shorter lives, and the predator wins by matching the rules'
 reproduction while living longer.
 
+### The critic works for the predator, and that is the interesting part
+
+`explained_variance` over the predator run climbs from about 0 to **0.84** and
+holds there. The herbivore work never got it above roughly 0.2, and this
+document's own list of what to try next puts "fix the critic before blaming the
+policy" third, on the grounds that until the critic can predict return every
+advantage is mostly noise.
+
+The predator did not need a fix. The plausible reason is the same asymmetry
+that made its reward sparse: a herbivore survives 98.8% of steps and grazes on
+78% of them, so its return is nearly constant and what variance exists is
+mostly luck; a predator's return turns on a handful of kills, which are
+predictable from the prey field it can see. There is more signal to explain and
+it is more strongly a function of the observation. If that reading is right,
+the herbivore's critic is not broken, its return is simply close to
+unpredictable, and effort spent on the critic there is effort wasted.
+
+That is a testable claim and it has not been tested. The cheap version: train a
+herbivore with the same recipe and compare explained variance against the
+fraction of return that survival contributes.
+
 One evaluation above parity on one training seed is not a claim, and by this
 document's own standard from the herbivore work it needs the recipe on several
 seeds before it is one. The measurement is now capable of supporting one, which
