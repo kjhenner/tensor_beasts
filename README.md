@@ -162,6 +162,19 @@ plants barely move, but both are reasons to re-measure before quoting. The
 timing bug was fatal for the predator, which hunts food that moves: see
 `planning/04-reinforcement-learning.md`.
 
+### Logging
+
+Runs go to Weights & Biases by default, to whichever server
+`~/.config/wandb/settings` points at, which for this project is a local one on
+port 8080. `--no-wandb` keeps a run local; the JSONL log under the run's output
+directory is written either way, and the run URL is printed at startup.
+
+One trap worth knowing: wandb looks its API key up by exact host string, so a
+key stored for `0.0.0.0:8080` is not found if the base URL says
+`localhost:8080`, and the error it prints is "No API key configured", which
+says nothing about the host. That is why the host defaults to your own wandb
+settings rather than to a literal in this repo.
+
 ### Watching one individual
 
 Summed metrics say whether a policy is better, never how. `--film-interval`
