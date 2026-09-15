@@ -1226,14 +1226,23 @@ That is a testable claim and it has not been tested. The cheap version: train a
 herbivore with the same recipe and compare explained variance against the
 fraction of return that survival contributes.
 
-A second training seed does the same thing: 0.840x off pretraining, 1.007x by
-world step 4,864. Two of two seeds cross parity, from 0.84-0.86 to 1.01-1.06,
-on eight paired evaluation seeds against a metric whose own noise floor is 16%.
-Two seeds is not the five the herbivore claim rests on, and the margin is inside
-the band that noise floor allows, so the honest statement is **parity, with both
-seeds landing slightly above it**, not a 6% win. What is no longer in doubt is
-the direction: on the broken harness both runs went extinct, and on the fixed
-one neither does.
+Three training seeds, all of them:
+
+| Training seed | Off pretraining | Best evaluation | Final |
+|---|---|---|---|
+| 0 | 0.859x | 1.064x | 1.055x at step 12,000 |
+| 1 | 0.840x | 1.007x | 1.007x at step 6,000 |
+| 2 | 0.780x | 1.034x | 1.034x at step 6,000 |
+
+Three of three cross parity, from 0.78-0.86 to 1.01-1.06, on eight paired
+evaluation seeds. Seed 0's last four evaluations are 1.064, 1.057, 1.055,
+1.055, so the level is stable rather than a spike.
+
+The margin is nevertheless inside the 16% noise floor measured above, so the
+honest statement is **parity, with all three seeds landing slightly above it**,
+not a 5% win. Three seeds is also fewer than the five the herbivore claim rests
+on. What is not in doubt is the direction: on the broken harness both runs went
+extinct, and on the fixed one none of the three does.
 
 Worth noting what this says about the herbivore results. They were collected
 through the stale path too, so every herbivore number in this document was
