@@ -210,7 +210,10 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--out", default=None, help="output directory")
     output.add_argument("--checkpoint-interval", type=int, default=None)
     output.add_argument("--resume", default=None, metavar="CHECKPOINT")
-    output.add_argument("--wandb", action="store_true", default=None)
+    output.add_argument("--wandb", action="store_true", default=None,
+                        help="mirror the log to W&B (on by default in conf/rl/ppo.yaml)")
+    output.add_argument("--no-wandb", dest="wandb", action="store_false",
+                        help="keep this run out of W&B; the JSONL log is written either way")
     output.add_argument("--wandb-project", default=None)
     output.add_argument("--wandb-host", default=None, help="W&B server URL (default http://localhost:8080)")
     output.add_argument("--quiet", action="store_true")

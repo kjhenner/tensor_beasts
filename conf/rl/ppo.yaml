@@ -51,9 +51,15 @@ trainer:
   output_dir: outputs/rl
   log_name: train_log.jsonl
 
-  wandb: false
+  # On by default: a run that is not in W&B is a run nobody looks at again.
+  # --quiet does not turn this off; set wandb: false here, or pass --wandb-host
+  # null, if a run should stay local. The JSONL log is written either way.
+  wandb: true
   wandb_project: tensor-beasts-rl
-  # Local W&B server. Null defers to WANDB_BASE_URL, then wandb.ai.
+  # Defaults to whatever base_url the user's own ~/.config/wandb/settings gives,
+  # because that is the host their API key is stored against; this value is the
+  # fallback when they have no setting. Null defers to WANDB_BASE_URL, then
+  # wandb.ai. See resolve_wandb_host in tensor_beasts/rl/trainer.py.
   wandb_host: http://localhost:8080
 
 ppo:
