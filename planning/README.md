@@ -10,6 +10,7 @@ This directory contains planning and status documents for major feature developm
 | Genetic Algorithm System | Planning | [02-genetic-algorithm.md](./02-genetic-algorithm.md) |
 | Performance and RL foundation | In progress | [03-performance-and-rl-foundation.md](./03-performance-and-rl-foundation.md) |
 | Reinforcement learning | In progress | [04-reinforcement-learning.md](./04-reinforcement-learning.md) |
+| Project review | Reference | [05-review.md](./05-review.md) |
 
 ## Overview
 
