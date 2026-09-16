@@ -63,6 +63,12 @@ parameters:
     value: 0.0
   imitation-target:
     value: 0.95
+  # Set together with `worlds`, because at this memory budget they trade
+  # against each other: worlds=4 with segment=96 needs 52 GB and is refused.
+  # Stage A chooses the pair. These are the worlds=1 values; if stage A says
+  # four worlds wins, change to worlds 4 / segment 32 / minibatch 2.
+  worlds:
+    value: 1
   segment-steps:
     value: 96
   gamma:
@@ -95,7 +101,7 @@ parameters:
   eval-steps:
     value: 400
   eval-seeds:
-    value: 8
+    value: 16
   checkpoint-interval:
     value: 3000
   film-interval:
