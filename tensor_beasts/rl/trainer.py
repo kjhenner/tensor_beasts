@@ -1143,9 +1143,25 @@ class Trainer:
         last: Dict[str, float] = {}
 
         for update in range(updates):
-            batches = [self.env.rule_based_step() for _ in range(steps)]
+            # Each step's fields are moved off the device as it is taken.
+            # Holding the whole segment's AgentBatch objects on the GPU, which
+            # is what this used to do, keeps every observation resident: at 512
+            # with four worlds that is 3.88 GB of observations before anything
+            # is stacked, and pretraining peaked at 16 GB against the 3.8 GB
+            # that collection and the update need together. That made it the
+            # most memory-hungry phase of a run, and the one the memory estimate
+            # did not model at all.
+            batches = []
+            for _ in range(steps):
+                batch = self.env.rule_based_step()
+                for name in ("observation", "acted", "rule_action", "rule_scores",
+                             "rule_metabolic_level"):
+                    field = getattr(batch, name, None)
+                    if field is not None:
+                        setattr(batch, name, field.detach().to("cpu", non_blocking=True))
+                batches.append(batch)
 
-            def stacked(select):
+            def stacked(select, half: bool = False):
                 """Stack a field over the segment, folding worlds into the batch.
 
                 Each field is (H, W) or (B, H, W), so stacking gives (T, H, W)
@@ -1153,16 +1169,33 @@ class Trainer:
                 timestep and a world are both just independent samples for a
                 supervised fit, so the two fold together. Same rule as the RL
                 minibatch iterator in ppo.py.
+
+                The stack is held on the CPU and each minibatch is moved to the
+                device as it is used. Measured at 512 with four worlds, holding
+                it on the device made pretraining peak at 16 GB while collection
+                and the update together needed 3.8 GB, so pretraining was by far
+                the most memory-hungry phase of a run and the one the memory
+                estimate did not model at all. It is a supervised pass over
+                stored data, so the transfer is not on any critical path.
+
+                ``half`` stores it as float16, as RolloutBuffer already does for
+                the same tensors, which halves it again at no cost in fidelity:
+                policy_input has already round-tripped the observation through
+                float16 by this point.
                 """
                 stack = torch.stack([select(b) for b in batches])
-                if self.env.num_worlds == 1:
-                    return stack
-                return stack.reshape(stack.shape[0] * self.env.num_worlds, *stack.shape[2:])
+                if half:
+                    stack = stack.to(torch.float16)
+                if self.env.num_worlds > 1:
+                    stack = stack.reshape(
+                        stack.shape[0] * self.env.num_worlds, *stack.shape[2:]
+                    )
+                return stack.to("cpu", non_blocking=True)
 
-            observations = stacked(lambda b: policy_input(b.observation))
+            observations = stacked(lambda b: policy_input(b.observation), half=True)
             acted = stacked(lambda b: b.acted)
             rule_action = stacked(lambda b: b.rule_action)
-            rule_scores = stacked(lambda b: b.rule_scores) if batches[0].rule_scores is not None else None
+            rule_scores = stacked(lambda b: b.rule_scores, half=True) if batches[0].rule_scores is not None else None
             rule_level = (
                 stacked(lambda b: b.rule_metabolic_level)
                 if batches[0].rule_metabolic_level is not None else None
@@ -1172,34 +1205,38 @@ class Trainer:
             totals = {"loss": 0.0, "argmax_agreement": 0.0, "metabolic_agreement": 0.0}
             weight = 0.0
             for _ in range(max(ppo.epochs, 1)):
-                order = torch.randperm(steps)
+                # On CPU because the stacked segment is: an index tensor has to
+                # live on the same device as the tensor it indexes.
+                order = torch.randperm(steps, device="cpu")
                 for start in range(0, steps, ppo.minibatch_steps):
                     index = order[start : start + ppo.minibatch_steps]
-                    mask = acted[index]
+                    mask = acted[index].to(self.device)
                     count = float(mask.sum())
                     if count == 0:
                         continue
-                    out = self.network.forward_all(observations[index])
+                    out = self.network.forward_all(
+                        observations[index].to(self.device).float()
+                    )
                     log_probs = F.log_softmax(out["logits"], dim=1)
                     if rule_scores is not None and temperature > 0:
-                        target = F.softmax(rule_scores[index].float() / temperature, dim=1)
+                        target = F.softmax(rule_scores[index].to(self.device).float() / temperature, dim=1)
                         per_cell = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
                     else:
-                        per_cell = -log_probs.gather(1, rule_action[index].unsqueeze(1)).squeeze(1)
+                        per_cell = -log_probs.gather(1, rule_action[index].to(self.device).unsqueeze(1)).squeeze(1)
                     loss = (per_cell * mask).sum() / count
                     metabolic_agreement = float("nan")
                     if "metabolic_logits" in out and rule_level is not None:
                         met_log_probs = F.log_softmax(out["metabolic_logits"], dim=1)
-                        met = -met_log_probs.gather(1, rule_level[index].unsqueeze(1)).squeeze(1)
+                        met = -met_log_probs.gather(1, rule_level[index].to(self.device).unsqueeze(1)).squeeze(1)
                         loss = loss + ppo.metabolic_imitation_scale * (met * mask).sum() / count
                         metabolic_agreement = float(
-                            ((out["metabolic_logits"].argmax(1) == rule_level[index]) & mask).sum() / count
+                            ((out["metabolic_logits"].argmax(1) == rule_level[index].to(self.device)) & mask).sum() / count
                         )
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.network.parameters(), ppo.max_grad_norm)
                     self.optimizer.step()
-                    agreement = float(((out["logits"].argmax(1) == rule_action[index]) & mask).sum() / count)
+                    agreement = float(((out["logits"].argmax(1) == rule_action[index].to(self.device)) & mask).sum() / count)
                     totals["loss"] += float(loss) * count
                     totals["argmax_agreement"] += agreement * count
                     if metabolic_agreement == metabolic_agreement:

@@ -420,6 +420,7 @@ def main(argv: Optional[list] = None) -> int:
         height=trainer_config.size,
         width=trainer_config.size,
         worlds=trainer_config.worlds,
+        eval_seeds=trainer_config.eval_seeds if trainer_config.eval_interval else 0,
     )
     print(f"estimated peak memory {format_bytes(estimate)}")
     check_device_headroom(trainer, estimate)

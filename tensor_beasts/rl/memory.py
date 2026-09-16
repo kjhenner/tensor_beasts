@@ -88,19 +88,42 @@ def estimate_training_bytes(
     height: int,
     width: int,
     worlds: int = 1,
+    eval_seeds: int = 0,
 ) -> int:
     """Rough peak resident bytes for one training process.
 
-    ``worlds`` multiplies both terms, and it multiplies them hard: the stored
-    rollout is one observation per step per world, so four worlds over a
+    ``worlds`` multiplies the training terms, and it multiplies them hard: the
+    stored rollout is one observation per step per world, so four worlds over a
     96-step segment at 512 is 5.8 GB of float16 before the backward pass adds
-    anything. A run that forgets this dies partway through with a CUDA
-    out-of-memory pointing at whatever allocation happened to be last.
+    anything.
+
+    The result is the larger of the training and evaluation peaks rather than
+    their sum, because the phases do not overlap. Pretraining used to dominate
+    both and was not modelled here at all: it held a whole segment of
+    AgentBatch objects on the device, 3.88 GB of observations at four worlds
+    before anything was stacked, and peaked at 16 GB. It now moves each step's
+    fields to the CPU as they are taken and peaks at 1.76 GB, which is well
+    inside the training term.
+
+    A run whose estimate is wrong does not fail cleanly: it dies partway
+    through with a CUDA out-of-memory pointing at whatever allocation happened
+    to be last, which says nothing about the cause.
     """
     worlds = max(1, int(worlds))
-    return estimate_activation_bytes(
+    training = estimate_activation_bytes(
         network, minibatch_steps * worlds, height, width
     ) + estimate_rollout_bytes(segment_steps * worlds, observation_channels, height, width)
+
+    # Evaluation is its own phase with its own peak, and it is often the larger
+    # one: it holds a world batched over every evaluation seed plus one forward
+    # pass across all of them, while holding no rollout and no backward pass.
+    # Measured at 512 with 16 seeds it peaks at 9.3 GB against training's 8.1.
+    # The peak of a run is the larger of the two rather than their sum, since
+    # the phases do not overlap.
+    evaluation = estimate_activation_bytes(
+        network, max(1, int(eval_seeds)), height, width
+    ) if eval_seeds else 0
+    return max(training, evaluation)
 
 
 def total_system_bytes() -> Optional[int]:
