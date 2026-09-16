@@ -48,16 +48,24 @@ several training seeds afterwards.
 
 ## Memory
 
-Estimated peak at 512, checked by `train_rl.py` before a run starts:
+`train_rl.py` estimates the peak and refuses to start a run that will not fit,
+naming the shortfall. It models the larger of the training and evaluation
+phases, which do not overlap.
 
-| Configuration | Peak |
+Measured at 512, `worlds=4 segment=32 minibatch=2` with 16 evaluation seeds:
+
+| Phase | Peak |
 |---|---|
-| `worlds=1 segment=96 minibatch=4` | 5.00 GB |
-| `worlds=4 segment=32 minibatch=2` | 8.46 GB |
-| `worlds=4 segment=96 minibatch=4` | 52.21 GB, refused |
+| Pretraining | 1.76 GB |
+| Collection and update | 8.10 GB |
+| Evaluation, 16 seeds | 9.31 GB |
+| Estimate for the run | 10.74 GB |
 
-Evaluation allocates separately: 16 seeds is 5.6 GB at 512, 32 seeds is 11.1 GB.
+Evaluation is the peak, so evaluation seeds are the setting to lower first if a
+run does not fit, not `worlds`.
 
-One limitation the estimate does not model: pretraining materialises its whole
-segment as a single float32 tensor, about 3.9 GB at four worlds, because it is
-transient rather than resident. Keep `pretrain-updates` small at four worlds.
+The first stage A attempt died here: pretraining used to hold a whole segment
+of observations on the device, 3.88 GB at four worlds, and peaked at 16 GB
+while nothing else in the run needed more than 8. It now moves each step off
+the device as it is taken and peaks at 1.76 GB, so `pretrain-updates` no longer
+needs to be kept artificially small.
