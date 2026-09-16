@@ -86,20 +86,36 @@ def iter_minibatches_with_value(
         order = torch.randperm(rollout.steps, generator=generator)
     else:
         order = torch.arange(rollout.steps)
+
+    # With several worlds a stored field is (T, B, ..., H, W), and a convolution
+    # wants one batch axis. Time and worlds are folded together here, at the
+    # minibatch boundary, so every loss downstream keeps seeing exactly the
+    # (batch, ..., H, W) it always did. Folding is correct because the losses
+    # are per cell and masked by `acted`: a timestep and a world are both just
+    # independent samples once the advantages have been computed, and those were
+    # computed per world, before this.
+    worlds = rollout.observation.shape[1] if rollout.observation.dim() == 5 else 0
+
+    def fold(tensor):
+        """(T, B, ..., H, W) -> (T * B, ..., H, W); unchanged without worlds."""
+        if tensor is None or not worlds:
+            return tensor
+        return tensor.reshape(tensor.shape[0] * worlds, *tensor.shape[2:])
+
     for start in range(0, rollout.steps, minibatch_steps):
         index = order[start : start + minibatch_steps]
         yield (
-            rollout.observation[index].float(),
-            rollout.acted[index],
-            rollout.action[index],
-            rollout.log_prob[index],
-            rollout.value[index],
-            rollout.advantage[index],
-            rollout.ret[index],
-            rollout.rule_action[index] if rollout.rule_action is not None else None,
-            rollout.rule_scores[index].float() if rollout.rule_scores is not None else None,
-            rollout.metabolic_action[index] if rollout.metabolic_action is not None else None,
-            rollout.rule_metabolic_level[index] if rollout.rule_metabolic_level is not None else None,
+            fold(rollout.observation[index].float()),
+            fold(rollout.acted[index]),
+            fold(rollout.action[index]),
+            fold(rollout.log_prob[index]),
+            fold(rollout.value[index]),
+            fold(rollout.advantage[index]),
+            fold(rollout.ret[index]),
+            fold(rollout.rule_action[index]) if rollout.rule_action is not None else None,
+            fold(rollout.rule_scores[index].float()) if rollout.rule_scores is not None else None,
+            fold(rollout.metabolic_action[index]) if rollout.metabolic_action is not None else None,
+            fold(rollout.rule_metabolic_level[index]) if rollout.rule_metabolic_level is not None else None,
         )
 
 

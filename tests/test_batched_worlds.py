@@ -188,3 +188,67 @@ def test_one_world_keeps_the_unbatched_shapes():
     for _ in range(5):
         env.rule_based_step()
     assert env.rule_based_step().rule_scores.shape == (5, size, size)
+
+
+def test_the_trainer_collects_and_updates_across_worlds():
+    """The point of the whole refactor: one update, several ecologies.
+
+    The unit ratio on the first epoch is the correctness check this codebase
+    relies on everywhere. It only holds if the log-probabilities recomputed in
+    the update come from exactly the observation collection saw, so a folded
+    (T * B) minibatch that mixed up time and worlds would break it.
+    """
+    import tempfile
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    worlds, steps = 3, 4
+    trainer = Trainer(
+        TrainerConfig(
+            size=64, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
+            worlds=worlds, warmup_steps=5, total_world_steps=0, segment_steps=steps,
+            eval_interval=0, checkpoint_interval=0, device="cpu",
+            output_dir=tempfile.mkdtemp(), wandb=False,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+
+    rollout, _ = trainer.collect(steps)
+    assert rollout.observation.shape == (
+        steps, worlds, trainer.observation_channels, 64, 64
+    )
+    assert rollout.reward.shape == (steps, worlds, 64, 64)
+
+    diagnostics = trainer.algorithm.update(trainer.network, rollout, trainer.optimizer)
+    assert diagnostics["approx_kl"] == pytest.approx(0.0, abs=1e-6), (
+        "the first epoch must have unit ratio; the update is not seeing what "
+        "collection saw"
+    )
+
+
+def test_one_world_trains_exactly_as_before():
+    """worlds=1 must not acquire a batch axis anywhere in the rollout."""
+    import tempfile
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    steps = 4
+    trainer = Trainer(
+        TrainerConfig(
+            size=64, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
+            warmup_steps=5, total_world_steps=0, segment_steps=steps, eval_interval=0,
+            checkpoint_interval=0, device="cpu", output_dir=tempfile.mkdtemp(), wandb=False,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+
+    rollout, _ = trainer.collect(steps)
+    assert rollout.observation.shape == (steps, trainer.observation_channels, 64, 64)
+    assert rollout.reward.shape == (steps, 64, 64)
+    trainer.algorithm.update(trainer.network, rollout, trainer.optimizer)

@@ -74,6 +74,20 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     world.add_argument(
+        "--worlds",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Independent worlds stepped together, so each update's batch is "
+            "drawn across decorrelated ecologies rather than through one "
+            "world's timeline. Otherwise what is learned in a population boom "
+            "is unlearned in the bust. Measured at 512: four worlds cost 5%% "
+            "more wall-clock than one, and the GPU saturates between four and "
+            "eight. 1 (the default) reproduces earlier runs exactly."
+        ),
+    )
+    world.add_argument(
         "--no-normalize-values",
         dest="normalize_values",
         action="store_const",
@@ -247,6 +261,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "reproduction_reward": args.reproduction_reward,
         "foraging_reward": args.foraging_reward,
         "offspring_credit": args.offspring_credit,
+        "worlds": args.worlds,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
         "metabolic_levels": args.metabolic_levels,

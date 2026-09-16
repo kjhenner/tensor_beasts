@@ -109,6 +109,13 @@ class TrainerConfig:
     # maximized by never dividing; this makes it an investment. First
     # generation only, for bounded variance. 0 disables. See planning/06.
     offspring_credit: float = 0.0
+    # Independent worlds stepped together, so each update's batch is drawn
+    # across decorrelated ecologies rather than through one world's timeline.
+    # Measured at 512 on a 3090: four worlds cost 5% more wall-clock than one,
+    # 13.1 ms a step against 12.5, because the simulation is launch-bound. The
+    # card saturates between four and eight. 1 reproduces every earlier run.
+    # See planning/07-batched-worlds.md.
+    worlds: int = 1
 
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
@@ -319,23 +326,34 @@ class EpisodeTracker:
     on-policy logger does.
     """
 
-    def __init__(self, size: Tuple[int, int], device: torch.device):
-        self.cells = size[0] * size[1]
+    def __init__(self, size: Tuple[int, ...], device: torch.device):
+        # ``size`` may carry a leading batch of worlds. The accumulator is
+        # (worlds, H * W) rather than a flat (H * W,): successor indices are per
+        # world, so a single flat buffer would scatter one world's survivors
+        # into another world's cells. At one world this is (1, H * W) and the
+        # arithmetic is unchanged. See planning/07-batched-worlds.md.
+        self.cells = size[-2] * size[-1]
+        self.worlds = 1
+        for extent in size[:-2]:
+            self.worlds *= extent
         self.device = device
         self.reset()
 
     def reset(self) -> None:
-        self.ret = torch.zeros(self.cells, device=self.device)
-        self.length = torch.zeros(self.cells, device=self.device)
+        self.ret = torch.zeros(self.worlds, self.cells, device=self.device)
+        self.length = torch.zeros(self.worlds, self.cells, device=self.device)
         self.finished_return: List[float] = []
         self.finished_length: List[float] = []
 
-    def update(self, batch) -> None:
-        acted = batch.acted.reshape(-1)
-        done = batch.done.reshape(-1)
-        successor = batch.successor.reshape(-1)
+    def _per_world(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(self.worlds, self.cells)
 
-        current_return = self.ret + batch.reward.reshape(-1) * acted
+    def update(self, batch) -> None:
+        acted = self._per_world(batch.acted)
+        done = self._per_world(batch.done)
+        successor = self._per_world(batch.successor)
+
+        current_return = self.ret + self._per_world(batch.reward) * acted
         current_length = self.length + acted.float()
 
         finished = done
@@ -346,9 +364,12 @@ class EpisodeTracker:
         survivors = acted & ~done
         next_return = torch.zeros_like(self.ret)
         next_length = torch.zeros_like(self.length)
+        # scatter within each world's own row
+        world_index = torch.arange(self.worlds, device=self.device).unsqueeze(1).expand_as(successor)
+        rows = world_index[survivors]
         index = successor[survivors]
-        next_return[index] = current_return[survivors]
-        next_length[index] = current_length[survivors]
+        next_return[rows, index] = current_return[survivors]
+        next_length[rows, index] = current_length[survivors]
         self.ret = next_return
         self.length = next_length
 
@@ -482,6 +503,7 @@ class Trainer:
             reproduction_reward=config.reproduction_reward,
             foraging_reward=config.foraging_reward,
             offspring_credit=config.offspring_credit,
+            worlds=config.worlds,
             device=str(self.device),
             # Pinning needs a level-to-rate mapping even for a direction-only
             # policy; two levels make level 0 exactly the basal rate.
@@ -546,13 +568,23 @@ class Trainer:
         masks those entries out, so the wasted work is a few hundred thousand
         multiply-adds that the convolution was doing anyway.
         """
-        out = self.network.forward_all(observation.unsqueeze(0))
+        # A batched world already presents (B, C, H, W); an unbatched one is
+        # (C, H, W) and needs a singleton for the convolution. Whichever was
+        # added here is what gets taken off again, so a real batch of worlds is
+        # never mistaken for the singleton and silently collapsed.
+        batched = observation.dim() == 4
+        network_input = observation if batched else observation.unsqueeze(0)
+
+        def unwrap(tensor):
+            return tensor if batched else tensor.squeeze(0)
+
+        out = self.network.forward_all(network_input)
         action, log_prob = self._sample(out["logits"], deterministic)
         metabolic_action = None
         if "metabolic_logits" in out:
             metabolic_action, metabolic_log_prob = self._sample(out["metabolic_logits"], deterministic)
             log_prob = log_prob + metabolic_log_prob
-            metabolic_action = metabolic_action.squeeze(0)
+            metabolic_action = unwrap(metabolic_action)
         # The advantage recursion mixes rewards and bootstrapped values, so it
         # has to run in real return units, not normalized ones.
         value = self.value_normalizer.denormalize(out["value"])
@@ -560,8 +592,8 @@ class Trainer:
         # sense, so it carries no log-probability. Stage 1 of the memory
         # design: the read is learnable, the write is a fixed function of the
         # observation until recurrent training exists.
-        memory = out["memory"].squeeze(0) if "memory" in out else None
-        return action.squeeze(0), log_prob.squeeze(0), value.squeeze(0), metabolic_action, memory
+        memory = unwrap(out["memory"]) if "memory" in out else None
+        return unwrap(action), unwrap(log_prob), unwrap(value), metabolic_action, memory
 
     # ------------------------------------------------------------------
     # Collection
@@ -569,7 +601,7 @@ class Trainer:
     def collect(self, steps: int) -> Tuple[object, Dict[str, float]]:
         """Run ``steps`` world steps under the current policy."""
         buffer = RolloutBuffer(steps)
-        tracker = EpisodeTracker(self.size, self.device)
+        tracker = EpisodeTracker(self.env.field_shape, self.device)
 
         populations: List[float] = []
         reproductions = 0.0
@@ -608,11 +640,17 @@ class Trainer:
 
         rollout = buffer.build()
         with torch.no_grad():
-            _, last_value = self.network(policy_input(_observe(self.env)).unsqueeze(0))
+            # Same rule as `act`: a batched world already has its leading axis,
+            # and whichever axis is added here is the one taken off again.
+            final = policy_input(_observe(self.env))
+            batched = final.dim() == 4
+            _, last_value = self.network(final if batched else final.unsqueeze(0))
             last_value = self.value_normalizer.denormalize(last_value)
+            if not batched:
+                last_value = last_value.squeeze(0)
         rollout = compute_gae(
             rollout,
-            last_value.squeeze(0),
+            last_value,
             gamma=self.ppo_config.gamma,
             gae_lambda=self.ppo_config.gae_lambda,
             normalize=self.ppo_config.normalize_advantage,
@@ -639,7 +677,7 @@ class Trainer:
 
     @torch.no_grad()
     def _score(self, env: MultiAgentWorldEnv, steps: int, policy: str) -> EvalResult:
-        tracker = EpisodeTracker(env.size, self.device)
+        tracker = EpisodeTracker(env.field_shape, self.device)
         total_reward = 0.0
         survived = 0.0
         reproductions = 0.0
