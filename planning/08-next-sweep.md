@@ -204,3 +204,64 @@ a noise floor of 16%. That is buying a ranking that is mostly noise. The same
 twelve trials after batched evaluation can afford 32 seeds and resolve about
 6%, which is the difference between a screen that ranks and a screen that
 misleads.
+
+## The overnight sweep: 32 trials, four axes
+
+Best configuration: `conv`, `lr` 1e-3, biomass reward, `imitation-target` 0.95,
+at **12,601** smoothed predator biomass against the rule-based policy's 4,777.
+**2.64x the rules**, on an absolute metric, with the imitation anchor fully
+released. The population it sustains is 137 against the rules' 97.
+
+### One cell failed, and it was masquerading as two bad axes
+
+Read naively the marginals said `dilated` was half as good as `conv` and
+`lr` 3e-4 half as good as 1e-3, both with enormous error bars. Both were the
+same seven runs:
+
+| Cell | Mean score |
+|---|---|
+| conv, lr 1e-3 | 12,087 |
+| dilated, lr 1e-3 | 10,526 |
+| conv, lr 3e-4 | 10,130 |
+| **dilated, lr 3e-4** | **854** |
+
+Seven of the eight runs in that one cell scored about 50, a hundredfold below
+everything else, and dragged two axis averages down with them. The mechanism is
+in the diagnostics: dilated pretrains to 0.77 agreement with the rules where
+conv reaches 0.88, and at the small learning rate it never recovers. Explained
+variance ends at **0.305** against 0.87 in every other cell, so the critic never
+learns, the advantages are noise, and the population sits at 48 instead of 140.
+At 1e-3 dilated pretrains to 0.82 and works normally.
+
+This is the repo owner's point about pretraining, confirmed: the anchor is
+fitted to a rule that compares one cell against its four neighbours, and a
+network built to sample sparsely out to 31 cells fits that worse. Dilated is
+not incapable; it needs a step size large enough to escape a poor start.
+
+**A marginal is only honest when the cells behind it are unimodal.** Excluding
+that one cell, the remaining 24 runs are tight and the axes separate properly:
+
+| Axis | Effect |
+|---|---|
+| `lr` 1e-3 vs 3e-4 | 11,306 vs 10,130, the only large effect |
+| `arch` conv vs dilated | 11,108 vs 10,526 |
+| `reward-mode` | biomass 11,270, then 10,659 to 10,883 for the rest |
+| `imitation-target` | 10,984 vs 10,844, a non-effect |
+
+### What the reward modes say
+
+Nothing decisive, and that is itself informative. The four modes span 10,659 to
+11,270, a 6% range against standard errors of about 450. Plain `biomass` is
+nominally first, but it is inside the band.
+
+So **the reward's exact composition is not the binding constraint**, which is
+worth knowing before more effort goes into designing rewards. The lineage credit
+neither helped nor hurt: 10,883 at 0.5 and 10,659 at 1.0 against 11,270 for no
+credit at all. The hypothesis it was built on, that a biomass reward without it
+is a hoarding reward, is not supported: reproductions are 487 to 511 across the
+top five runs regardless of credit. The predators divide anyway, because
+dividing is how the population that carries biomass grows.
+
+Biomass is kept as the default nonetheless: it scores as well as `classic` with
+one hand-chosen constant instead of three, and `classic`'s survival term is 90%
+of a signal that fires on 98.9% of steps.

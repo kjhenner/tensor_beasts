@@ -39,6 +39,21 @@ DEFAULT_CONFIG = "conf/rl/ppo.yaml"
 # reward, whose scale is about one per step, a credit of fifty per division
 # would swamp everything else. Sweeping the terms separately would spend most
 # of a grid on combinations like that. A mode names each coherent reward once.
+# Metabolic presets, for --throttle. Levels and anchor strength are not
+# independent axes: with no metabolic head the anchor scale is inert, so a grid
+# crossing them spends a third of its cells on identical controls. Naming the
+# combinations once avoids that. "copied" is the setting that failed for the
+# herbivore, whose throttle rests near basal, so copying it teaches the learner
+# to run cold; it is kept as the comparison rather than as a recommendation.
+THROTTLE_MODES = {
+    "rules": dict(levels=0, scale=0.0),
+    "free-4": dict(levels=4, scale=0.0),
+    "guided-4": dict(levels=4, scale=0.3),
+    "copied-4": dict(levels=4, scale=1.0),
+    "free-8": dict(levels=8, scale=0.0),
+    "guided-8": dict(levels=8, scale=0.3),
+}
+
 REWARD_MODES = {
     "classic": dict(survival_reward=1.0, reproduction_reward=10.0, foraging_reward=0.02, offspring_credit=0.0),
     "biomass": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.0),
@@ -142,6 +157,20 @@ def build_parser() -> argparse.ArgumentParser:
             "carried biomass. 0 (the default) leaves the rate to the rules and "
             "learns movement only, so existing runs reproduce. --eval-only and "
             "--resume take the value from the checkpoint when this is not given."
+        ),
+    )
+    model.add_argument(
+        "--throttle",
+        default=None,
+        choices=sorted(THROTTLE_MODES),
+        help=(
+            "The metabolic lever, as one setting, so a sweep can cross it with "
+            "other axes without wasting cells. rules: the throttle stays with the "
+            "rule-based policy and only movement is learned, which is the control. "
+            "The others give the policy N levels from basal to max_metabolic_rate "
+            "and say how hard the anchor teaches the rule's own throttle: free "
+            "lets the reward decide it, guided anchors it lightly, copied anchors "
+            "it fully. Explicit --metabolic-levels wins over this."
         ),
     )
     model.add_argument(
@@ -336,6 +365,10 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
     if args.reward_mode is not None:
         trainer.update(REWARD_MODES[args.reward_mode])
+    if args.throttle is not None:
+        preset = THROTTLE_MODES[args.throttle]
+        trainer["metabolic_levels"] = preset["levels"]
+        ppo["metabolic_imitation_scale"] = preset["scale"]
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})
     ppo.update({k: v for k, v in ppo_flags.items() if v is not None})
 

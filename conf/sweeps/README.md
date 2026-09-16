@@ -19,11 +19,33 @@ denominator. Every trial also reports `score_spread`, `score_min` and
 
 | Config | Trials | Question | Status |
 |---|---|---|---|
-| `overnight` | 32 | Reward mode x architecture x learning rate x anchor target | **Ready** |
+| `metabolic` | 24 | Can a predator learn its own throttle? | **Ready** |
+| `done-overnight` | 32 | Reward mode x architecture x learning rate x anchor target | Done |
 | `done-stageA-worlds` | 2 | Does training across four worlds help? | Done: yes |
 | `done-stage0-release` | 2 | Can the imitation anchor be released? | Done: yes |
 
-## How to read the overnight sweep
+## What the overnight sweep settled
+
+Best configuration `conv / lr 1e-3 / biomass / target 0.95` at **12,601**
+smoothed predator biomass against the rule-based policy's 4,777: **2.64x the
+rules**, absolute, with the anchor fully released.
+
+Read naively its marginals said `dilated` and `lr 3e-4` were each half as good
+as their alternatives. Both were the same seven runs: `dilated` at `lr 3e-4`
+collapsed in seven of eight trials, scoring about 50 against 9,000 to 12,600
+everywhere else, and dragged two axis averages down. Dilated pretrains to 0.77
+agreement where conv reaches 0.88, and at the small step it never recovers:
+explained variance ends at 0.305 against 0.87 in every other cell. **A marginal
+is only honest when the cells behind it are unimodal.**
+
+Excluding that cell, `lr` 1e-3 over 3e-4 is the only large effect (11,306 vs
+10,130); `arch` conv over dilated is modest (11,108 vs 10,526); and the reward
+modes span 6% against standard errors near 450, so the reward's composition is
+not the binding constraint. The lineage credit neither helped nor hurt, and
+reproductions were 487 to 511 across the top runs regardless of it, so the
+hoarding the credit was built to prevent does not happen.
+
+## How to read a sweep
 
 **By axis marginals, not by the winning cell.** A single trial's score has a
 standard error of roughly 6% at 16 evaluation seeds, and the spread across
