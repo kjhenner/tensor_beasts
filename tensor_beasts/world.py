@@ -14,6 +14,18 @@ from tensor_beasts.snapshot import WorldSnapshot
 class World:
     def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
+        # Leading dimensions every feature carries in front of ``size``: ``()``
+        # for one world, ``(B,)`` for B independent ones simulated together.
+        #
+        # Deliberately separate from ``size`` rather than folded into it.
+        # ``size[0]`` and ``size[1]`` are read as height and width in a dozen
+        # places, from animal and plant seeding to the viewer, and prepending a
+        # batch to ``size`` would silently make those sample the batch axis.
+        # An empty ``batch_shape`` must stay bit-identical to an unbatched
+        # world; that is what the golden hashes check and what makes this
+        # reviewable. See planning/07-batched-worlds.md.
+        batch = getattr(config, "batch", None)
+        self.batch_shape: Tuple[int, ...] = () if not batch else (int(batch),)
         self.config = config
         self.td = TensorDict({}, batch_size=[])
         self.entity_dict: Dict[str, Entity] = {}
@@ -45,11 +57,25 @@ class World:
                         self.shared_features_dict[shared_name] = feature_class(
                             self.td,
                             is_parent=True,
-                            shape_prefix=self.size,
+                            shape_prefix=self.feature_shape,
                             key_prefix=("shared_features",)
                         )
 
         self.step = 0
+
+    @property
+    def feature_shape(self) -> Tuple[int, ...]:
+        """The leading shape every grid feature is allocated at.
+
+        ``(H, W)`` for one world, ``(B, H, W)`` for a batched one. Features
+        append their own trailing dimensions to this.
+        """
+        return self.batch_shape + self.size
+
+    @property
+    def num_worlds(self) -> int:
+        """How many independent worlds this one holds. 1 when unbatched."""
+        return self.batch_shape[0] if self.batch_shape else 1
 
     def _init_shared_feature_registry(self, config: DictConfig):
         """

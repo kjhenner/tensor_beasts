@@ -73,7 +73,7 @@ class Entity(abc.ABC, metaclass=EntityMeta):
             feature = feature_class(
                 td=self.world.td,
                 key_prefix=(self.__class__.__name__.lower(),),
-                shape_prefix=self.world.config.size,
+                shape_prefix=self.world.feature_shape,
                 config=feature_config
             )
             setattr(self, feature_name, feature)
