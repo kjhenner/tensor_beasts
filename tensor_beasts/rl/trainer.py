@@ -104,6 +104,11 @@ class TrainerConfig:
     survival_reward: float = 1.0
     reproduction_reward: float = 10.0
     foraging_reward: float = 0.0
+    # Fraction of an offspring's biomass at birth credited back to its parent.
+    # Division halves the parent's biomass, so a reward in biomass alone is
+    # maximized by never dividing; this makes it an investment. First
+    # generation only, for bounded variance. 0 disables. See planning/06.
+    offspring_credit: float = 0.0
 
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
@@ -435,6 +440,7 @@ class Trainer:
             survival_reward=config.survival_reward,
             reproduction_reward=config.reproduction_reward,
             foraging_reward=config.foraging_reward,
+            offspring_credit=config.offspring_credit,
             device=str(self.device),
             # Pinning needs a level-to-rate mapping even for a direction-only
             # policy; two levels make level 0 exactly the basal rate.

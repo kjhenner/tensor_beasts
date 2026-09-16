@@ -61,6 +61,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     world.add_argument(
+        "--offspring-credit",
+        type=float,
+        default=None,
+        metavar="FRACTION",
+        help=(
+            "Credit an individual with this fraction of its offspring's biomass "
+            "at birth. Division halves the parent's biomass, so a reward in "
+            "biomass alone is maximised by never dividing; this makes it an "
+            "investment instead. First generation only, so the credit stays "
+            "bounded in a growing population. 0 (default) disables it."
+        ),
+    )
+    world.add_argument(
         "--no-normalize-values",
         dest="normalize_values",
         action="store_const",
@@ -233,6 +246,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "survival_reward": args.survival_reward,
         "reproduction_reward": args.reproduction_reward,
         "foraging_reward": args.foraging_reward,
+        "offspring_credit": args.offspring_credit,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
         "metabolic_levels": args.metabolic_levels,

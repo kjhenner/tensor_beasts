@@ -42,6 +42,14 @@ class TransitionInfo:
     acted: torch.Tensor
     successor: torch.Tensor
     reproduced: torch.Tensor
+    # (H, W) int64, flat index of the cell the offspring occupies after this
+    # step, or -1 where nothing divided. Indexed, like every other field here,
+    # by the cell the parent acted from. Reproduction leaves the offspring in
+    # exactly that cell while the parent moves on to its successor, so the edge
+    # is free: it is the parent's own origin. A learner that credits an
+    # individual for its descendants needs this edge, and without it division
+    # is only ever a cost, since it halves the parent's biomass.
+    offspring: Optional[torch.Tensor] = None
     # (H, W) float32, biomass gained by eating this step, indexed by the cell
     # the individual occupies AFTER moving, i.e. its successor cell. What
     # foraging actually is, as distinct from net biomass change, which also
@@ -678,11 +686,15 @@ class Animal(Entity):
         successor = successor.clamp_(0, height * width - 1)
 
         reproduced = moved & (biomass_at_move > self.config.reproduction_threshold)
+        divided = reproduced & acting_mask
 
         self.last_transition = TransitionInfo(
             acted=acting_mask.clone(),
             successor=torch.where(acting_mask, successor, torch.full_like(successor, -1)),
-            reproduced=reproduced & acting_mask,
+            reproduced=divided,
+            # An individual that divides leaves its offspring behind in the cell
+            # it is vacating, which is `flat`, the cell it acted from.
+            offspring=torch.where(divided, flat, torch.full_like(flat, -1)),
         )
 
     def _make_offspring_slot_fn(self) -> Callable:

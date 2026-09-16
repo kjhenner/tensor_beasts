@@ -210,6 +210,7 @@ class MultiAgentWorldEnv:
         survival_reward: float = 1.0,
         reproduction_reward: float = 10.0,
         foraging_reward: float = 0.0,
+        offspring_credit: float = 0.0,
         device: Optional[str] = None,
         num_metabolic_levels: int = 0,
         memory_size: int = 0,
@@ -219,6 +220,7 @@ class MultiAgentWorldEnv:
         self.survival_reward = survival_reward
         self.reproduction_reward = reproduction_reward
         self.foraging_reward = foraging_reward
+        self.offspring_credit = offspring_credit
         self.device = torch.device(device) if device is not None else torch.get_default_device()
         self.num_metabolic_levels = int(num_metabolic_levels)
 
@@ -271,6 +273,7 @@ class MultiAgentWorldEnv:
         env.survival_reward = 0.0
         env.reproduction_reward = 0.0
         env.foraging_reward = 0.0
+        env.offspring_credit = 0.0
         env.world_config = world.config
         env.size = tuple(world.size)
         env.world = world
@@ -519,7 +522,39 @@ class MultiAgentWorldEnv:
             eaten = transition.eaten.reshape(-1)[successor].reshape(*self.size)
             reward = reward + alive_after.float() * eaten * self.foraging_reward
 
+        if self.offspring_credit and transition.offspring is not None:
+            reward = reward + self._offspring_credit(transition, successor, acted)
+
         return reward, alive_after, successor, acted
+
+    def _offspring_credit(self, transition, successor: torch.Tensor, acted: torch.Tensor) -> torch.Tensor:
+        """Credit an individual with a share of the biomass it endowed its child.
+
+        Division is a cost under every reward this project has used: it halves
+        the parent's biomass, and a reward in biomass alone is therefore
+        maximized by eating and never dividing. That is the same failure the
+        metabolic lever hit when its reward counted net biomass change. The
+        metric being approximated is not an individual's own mass but its
+        lineage's, so an individual is credited with what it handed on.
+
+        The credit is the offspring's biomass at birth, which is half the
+        parent's, times ``offspring_credit``. First generation only, and the
+        argument for stopping there is variance: crediting a lineage without a
+        generational bound makes an early ancestor's return depend on
+        descendants it never saw, growing without limit in a growing
+        population. One generation captures the investment and stays bounded.
+        The coefficient is the discount: 0 disables the term, and 1.0 values a
+        unit of offspring biomass exactly as a unit of the individual's own.
+        """
+        offspring = transition.offspring
+        divided = transition.reproduced & acted
+        if not bool(divided.any()):
+            return torch.zeros(self.size, dtype=torch.float32, device=self.device)
+        biomass_flat = self.entity.biomass.data.reshape(-1)
+        endowment = torch.zeros(self.size, dtype=torch.float32, device=self.device)
+        cells = offspring.clamp(min=0)
+        endowment = torch.where(divided, biomass_flat[cells].reshape(*self.size), endowment)
+        return endowment * float(self.offspring_credit)
 
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Restart the ecology. Returns (observation, acted mask).
