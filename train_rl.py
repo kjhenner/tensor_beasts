@@ -338,6 +338,46 @@ def print_evaluation(summary: Dict[str, float]) -> None:
         print("The learned policy has not beaten the baseline.")
 
 
+def check_device_headroom(trainer, estimate: int) -> None:
+    """Refuse to start a run the device cannot hold, and say so plainly.
+
+    A run that will not fit fails somewhere inside pretraining with a CUDA
+    out-of-memory traceback pointing at whatever allocation happened to be last,
+    which says nothing about the cause. Under a sweep agent that reads as a
+    failed trial rather than as a machine that was already full, and the agent
+    cheerfully starts the next one.
+
+    This is a warning rather than an error when it is close, because the
+    estimate is an estimate; it only refuses when the shortfall is large enough
+    that the run is certain to die.
+    """
+    import torch
+
+    device = trainer.device
+    if device.type != "cuda":
+        return
+    free, total = torch.cuda.mem_get_info(device.index or 0)
+    name = torch.cuda.get_device_properties(device.index or 0).name
+    print(
+        f"device {device} ({name}) has {format_bytes(free)} free of {format_bytes(total)}"
+    )
+    if estimate > free:
+        raise SystemExit(
+            f"\nThis run needs about {format_bytes(estimate)} and {device} has "
+            f"{format_bytes(free)} free, so it would die partway through.\n"
+            f"Another process may be holding the card: check nvidia-smi.\n"
+            f"Otherwise lower --minibatch-steps, --segment-steps or --size, or "
+            f"name a different card with --device cuda:N.\n"
+            f"Note that a bare --device cuda picks the card with the most free "
+            f"memory, not cuda:0, because index ordering is not stable."
+        )
+    if estimate > 0.8 * free:
+        print(
+            f"warning: this run needs about {format_bytes(estimate)} of the "
+            f"{format_bytes(free)} free. It may not fit alongside anything else."
+        )
+
+
 def main(argv: Optional[list] = None) -> int:
     args = build_parser().parse_args(argv)
     merged = apply_overrides(args)
@@ -359,7 +399,7 @@ def main(argv: Optional[list] = None) -> int:
         width=trainer_config.size,
     )
     print(f"estimated peak memory {format_bytes(estimate)}")
-    trainer = Trainer(trainer_config, ppo_config)
+    check_device_headroom(trainer, estimate)
     print(
         f"arch={trainer_config.arch} params={trainer.network.num_parameters()} "
         f"receptive_field={trainer.network.receptive_field} "

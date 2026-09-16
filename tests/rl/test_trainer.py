@@ -484,3 +484,48 @@ def test_unmeasured_and_non_numeric_values_are_not_logged_as_metrics():
     )
 
     assert out == {"world_steps": 1024, "entropy": 0.58}
+
+
+def test_auto_and_bare_cuda_pick_the_device_with_the_most_free_memory(monkeypatch):
+    """A CUDA index is not a stable name for a physical card.
+
+    "cuda" without an index means cuda:0, and which card that is depends on
+    CUDA_DEVICE_ORDER: PCI_BUS_ID, which is what nvidia-smi prints, orders by
+    bus address, while CUDA's own default of FASTEST_FIRST puts the fastest
+    card first. On a mixed machine the two disagree, so a run that asks for
+    "cuda" can land on whichever card happens to be index zero. A sweep agent
+    inheriting no CUDA_VISIBLE_DEVICES did exactly that, landed on an 11 GB card
+    that other processes had already filled, and died in pretraining.
+    """
+    import torch
+
+    from tensor_beasts.rl import trainer as trainer_module
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    # Device 1 is the roomy one, as on the machine this was found on.
+    free = {0: 100 * 2**20, 1: 20 * 2**30}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda i: (free[i], 24 * 2**30))
+
+    assert trainer_module.resolve_device("auto") == torch.device("cuda:1")
+    assert trainer_module.resolve_device("cuda") == torch.device("cuda:1")
+    # An explicit index is the caller naming a card, and is obeyed.
+    assert trainer_module.resolve_device("cuda:0") == torch.device("cuda:0")
+    assert trainer_module.resolve_device("cpu") == torch.device("cpu")
+
+
+def test_device_selection_survives_a_card_that_cannot_be_queried(monkeypatch):
+    import torch
+
+    from tensor_beasts.rl import trainer as trainer_module
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    def flaky(index):
+        if index == 0:
+            raise RuntimeError("device 0 is not responding")
+        return (8 * 2**30, 24 * 2**30)
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", flaky)
+    assert trainer_module.resolve_device("auto") == torch.device("cuda:1")

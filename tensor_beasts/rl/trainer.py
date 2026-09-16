@@ -261,14 +261,48 @@ def resolve_wandb_host(configured: Optional[str]) -> Optional[str]:
 
 
 def resolve_device(name: str) -> torch.device:
-    """Pick a device, preferring the accelerator when asked for "auto"."""
-    if name != "auto":
+    """Pick a device, preferring the accelerator with room to work in.
+
+    ``"cuda"`` without an index means ``cuda:0``, and which physical card that
+    is depends on ``CUDA_DEVICE_ORDER``. On a mixed machine the two orderings
+    disagree: with ``PCI_BUS_ID``, which is what ``nvidia-smi`` prints,
+    ``cuda:0`` is whichever card sits at the lower bus address, while CUDA's own
+    default of ``FASTEST_FIRST`` puts the fastest card there instead. So an
+    index is not a stable name for a card, and a sweep agent that inherits no
+    ``CUDA_VISIBLE_DEVICES`` lands on whatever ``cuda:0`` happens to mean. Here
+    that was an 11 GB card already holding 4.5 GB of someone else's work, and a
+    512 world needs about 6 GB, so the trial died in pretraining.
+
+    ``"auto"`` and a bare ``"cuda"`` therefore select by free memory rather than
+    by index. An explicit ``"cuda:1"`` is left alone: that is the caller naming
+    a card, and second-guessing it would be worse than obeying it.
+    """
+    if name not in ("auto", "cuda"):
         return torch.device(name)
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        return torch.device(f"cuda:{_most_free_cuda_device()}")
+    if name == "cuda":
+        raise RuntimeError("CUDA was requested but torch reports no CUDA device.")
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def _most_free_cuda_device() -> int:
+    """Index of the CUDA device with the most free memory right now.
+
+    Free rather than total: a big card that another process has filled is worse
+    than a small idle one, and this machine runs other things on its GPUs.
+    """
+    best, best_free = 0, -1
+    for index in range(torch.cuda.device_count()):
+        try:
+            free, _total = torch.cuda.mem_get_info(index)
+        except Exception:  # noqa: BLE001 - a device that cannot be queried is not a candidate
+            continue
+        if free > best_free:
+            best, best_free = index, free
+    return best
 
 
 class EpisodeTracker:

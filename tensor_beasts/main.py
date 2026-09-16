@@ -89,13 +89,13 @@ class WorldThread(threading.Thread):
 
 
 def main(config: DictConfig, policy_path: str = None, deterministic: bool = False):
-    if config.world.device == 'auto' or not config.world.device:
-        if torch.cuda.is_available():
-            config.world.device = "cuda"
-        elif torch.backends.mps.is_available():
-            config.world.device = "mps"
-        else:
-            config.world.device = "cpu"
+    if config.world.device in ('auto', 'cuda') or not config.world.device:
+        # Not just "cuda": a bare index is not a stable name for a card, since
+        # PCI_BUS_ID and FASTEST_FIRST ordering disagree about which one is
+        # cuda:0. resolve_device picks the card with the most free memory.
+        from tensor_beasts.rl.trainer import resolve_device
+
+        config.world.device = str(resolve_device(config.world.device or 'auto'))
 
     torch.set_default_device(torch.device(config.world.device))
 
