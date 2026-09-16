@@ -14,6 +14,7 @@ This directory contains planning and status documents for major feature developm
 | Project review | Reference | [05-review.md](./05-review.md) |
 | Predator sweep | In progress | [06-predator-sweep.md](./06-predator-sweep.md) |
 | Batched worlds | In progress | [07-batched-worlds.md](./07-batched-worlds.md) |
+| Next sweep | Planned | [08-next-sweep.md](./08-next-sweep.md) |
 
 ## Overview
 
