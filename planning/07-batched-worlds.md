@@ -113,3 +113,45 @@ In this order, and each is a gate rather than a nice-to-have.
    has not earned itself and should be reverted to the tag.
 
 `git tag pre-batch-dimension` marks the commit to return to.
+
+## Result: the simulation batches, and it is faster than processes
+
+Gates 1 and 2 pass. A batch of one is bit-identical to an unbatched world over
+25 steps across predators, herbivores, plants and water; perturbing world 0 of
+a batch of three leaves worlds 1 and 2 untouched; and the golden hashes have not
+moved. Five tests in `tests/test_batched_worlds.py` hold those properties.
+
+Two silent bugs were in the way, both found by diffing a batch of one against a
+single world feature by feature rather than by reading code.
+
+The per-step `random` field was sized from `size` rather than `feature_shape`,
+so every world in a batch shared one draw. Plant germination and the ids
+offspring inherit are sampled from it, so the worlds' events would have been
+correlated while looking independent. And `perlin_noise` reads `size[0]` and
+`size[1]` as its grid, so a batched shape made it return the wrong thing; its
+one caller swallowed that in `except (IndexError, RuntimeError)` and fell back
+to uniform random, so a batched world silently lost its terrain and every world
+got the same flat field.
+
+Gate 4, the speedup, measured at 512 on the 3090:
+
+| B | ms/step | World-steps/s | Speedup | Four processes, for comparison |
+|---|---|---|---|---|
+| 1 | 12.5 | 80.3 | 1.00x | 66.1 |
+| 2 | 13.6 | 147.2 | 1.83x | 116.0 |
+| 4 | 13.1 | **305.0** | **3.80x** | 168.3 |
+| 8 | 23.4 | 342.5 | 4.26x | 192.0 |
+
+**Four worlds cost 5% more wall-clock than one**, 13.1 ms against 12.5 ms, which
+is what launch-bound work looks like when it is finally given something to do.
+Against the process experiment's 2.55x at four workers, the batched world reaches
+3.80x, so the refactor earned itself: 1.81x more throughput than the cheap
+approach at the same world count. Memory is 0.36 GB at B=4, so it is not the
+constraint.
+
+B=8 is where the card saturates, at 23.4 ms a step for 4.26x, which agrees with
+the process experiment finding the knee between four and eight. **Four is the
+number to train at.**
+
+Gate 3, a learned policy training on a batched world, is the remaining work: the
+trainer and `MultiAgentWorldEnv` still assume one world.
