@@ -212,29 +212,42 @@ def compute_gae(
         The same rollout with ``advantage`` and ``ret`` populated.
     """
     steps = rollout.steps
-    height, width = rollout.reward.shape[-2:]
+    grid = rollout.reward.shape[1:]
+    height, width = grid[-2:]
+    # Everything is flattened to (worlds, H * W) rather than to (-1), and the
+    # gather runs along the last axis. That is what keeps a batched world's
+    # individuals inside their own world: successor indices are per world, so a
+    # bare `.reshape(-1)` over (B, H, W) would index a B * H * W buffer with
+    # per-world indices and quietly bootstrap world 2's animals from world 0.
+    # With one world this is (1, H * W) and arithmetically identical to before.
+    cells = height * width
+    worlds = int(torch.tensor(grid).prod().item() // cells)
+
+    def per_world(tensor: torch.Tensor) -> torch.Tensor:
+        return tensor.reshape(worlds, cells)
 
     advantage = torch.zeros_like(rollout.reward)
-    next_advantage = torch.zeros(height * width, device=rollout.reward.device)
-    next_value = last_value.reshape(-1)
+    next_advantage = torch.zeros(worlds, cells, device=rollout.reward.device)
+    next_value = per_world(last_value)
 
     for t in reversed(range(steps)):
-        successor = rollout.successor[t].reshape(-1)
-        alive = (~rollout.done[t]).reshape(-1).float()
+        successor = per_world(rollout.successor[t])
+        alive = per_world(~rollout.done[t]).float()
 
-        # Follow each individual to wherever it actually ended up.
-        bootstrap_value = next_value[successor] * alive
-        bootstrap_advantage = next_advantage[successor] * alive
+        # Follow each individual to wherever it actually ended up, within its
+        # own world.
+        bootstrap_value = next_value.gather(1, successor) * alive
+        bootstrap_advantage = next_advantage.gather(1, successor) * alive
 
-        value_t = rollout.value[t].reshape(-1)
-        delta = rollout.reward[t].reshape(-1) + gamma * bootstrap_value - value_t
+        value_t = per_world(rollout.value[t])
+        delta = per_world(rollout.reward[t]) + gamma * bootstrap_value - value_t
         advantage_t = delta + gamma * gae_lambda * bootstrap_advantage
 
         # Cells with no individual carry no signal onward.
-        acted = rollout.acted[t].reshape(-1)
+        acted = per_world(rollout.acted[t])
         advantage_t = advantage_t * acted
 
-        advantage[t] = advantage_t.reshape(height, width)
+        advantage[t] = advantage_t.reshape(grid)
         next_advantage = advantage_t
         next_value = value_t
 

@@ -673,10 +673,17 @@ class Animal(Entity):
         the row below, 3 one column left, 4 one column right.
         """
         height, width = did_move.shape[-2:]
+        # Indices are per world, not per batch: cell (h, w) of every world is
+        # h * width + w, and a consumer gathers within one world at a time by
+        # reshaping to (..., H * W). The alternative, offsetting world b by
+        # b * H * W, would make a bare `.reshape(-1)` in a consumer appear to
+        # work while silently gathering across worlds, which is the failure
+        # this whole refactor has to avoid. See planning/07-batched-worlds.md.
         flat = torch.arange(height * width, device=did_move.device).reshape(height, width)
+        flat = flat.expand_as(did_move)
 
         moved = did_move.bool()
-        chosen = direction.reshape(height, width).long()
+        chosen = direction.reshape(did_move.shape).long()
         successor = flat.clone()
         for code, offset in ((1, -width), (2, width), (3, -1), (4, 1)):
             successor = torch.where(moved & (chosen == code), flat + offset, successor)
