@@ -672,10 +672,13 @@ def test_imitation_floor_keeps_a_permanent_pull():
 
 
 
-def test_metabolic_imitation_scale_zero_removes_the_throttle_anchor():
-    """The rule rests 90% of the time, so anchoring the throttle to it teaches
-    cold. Scale zero must leave the direction anchor intact and drop the
-    metabolic one, which the loss shows as independence from the rule level."""
+def test_the_throttle_anchor_shares_the_direction_anchors_weight():
+    """One anchor, two levers. The throttle's anchor is the Gaussian
+    log-likelihood of the rule's own throttle, carried on the same cross-fade
+    weight as the direction's: changing the rule's throttle must move the loss
+    while the anchor is engaged, and must not once it has released. A separate
+    scale for the throttle was the earlier design and is gone, because there is
+    no reason to trust the rule's throttle differently from its direction."""
     import torch
     from tensor_beasts.rl.networks import build_network
     from tensor_beasts.rl.ppo import PPO, PPOConfig, iter_minibatches_with_value
@@ -683,21 +686,25 @@ def test_metabolic_imitation_scale_zero_removes_the_throttle_anchor():
     torch.manual_seed(0)
     rollout = _rollout_with_rule_actions()
     steps, size = rollout.steps, rollout.observation.shape[-1]
-    rollout.metabolic_action = torch.randint(0, 4, (steps, size, size))
-    rollout.rule_metabolic_level = torch.zeros(steps, size, size, dtype=torch.long)
-    network = build_network("linear", 6, num_metabolic_levels=4)
+    rollout.metabolic_unit = torch.rand(steps, size, size)
+    rollout.rule_metabolic_unit = torch.zeros(steps, size, size)
+    network = build_network("linear", 6, metabolic=True)
     batch = list(next(iter_minibatches_with_value(rollout, steps, shuffle=False)))
 
-    anchored = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, metabolic_imitation_scale=1.0))
-    unanchored = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, metabolic_imitation_scale=0.0))
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0))
     with_rule = tuple(batch)
     flipped = list(batch)
-    flipped[-1] = (flipped[-1] + 3) % 4  # a different rule level everywhere
+    flipped[-1] = flipped[-1] + 1.0  # a different rule throttle everywhere
     flipped = tuple(flipped)
 
-    assert float(anchored.minibatch_loss(network, with_rule)) != pytest.approx(
-        float(anchored.minibatch_loss(network, flipped)), abs=1e-6
-    ), "with the anchor on, the rule level must matter"
-    assert float(unanchored.minibatch_loss(network, with_rule)) == pytest.approx(
-        float(unanchored.minibatch_loss(network, flipped)), abs=1e-6
-    ), "with scale zero the rule level must not matter"
+    ppo.conformance = 0.0
+    assert ppo.imitation_weight() > 0.0
+    assert float(ppo.minibatch_loss(network, with_rule)) != pytest.approx(
+        float(ppo.minibatch_loss(network, flipped)), abs=1e-6
+    ), "with the anchor on, the rule throttle must matter"
+
+    ppo.conformance = 1.0
+    assert ppo.imitation_weight() == 0.0
+    assert float(ppo.minibatch_loss(network, with_rule)) == pytest.approx(
+        float(ppo.minibatch_loss(network, flipped)), abs=1e-6
+    ), "once the anchor releases the rule throttle must not matter"

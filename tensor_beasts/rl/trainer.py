@@ -30,6 +30,7 @@ prefer one long run over several resumed ones.
 
 import configparser
 import json
+import math
 import time
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
@@ -40,7 +41,7 @@ import torch
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
 from tensor_beasts.rl.networks import ActorCritic, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
-from tensor_beasts.rl.ppo import PPO, PPOConfig
+from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 
 # The project's default W&B server. A different value on TrainerConfig is taken
@@ -70,10 +71,12 @@ class TrainerConfig:
             shaping; evaluation stays herbivore-steps survived either way.
         arch: Network name from ``tensor_beasts.rl.networks.ARCHITECTURES``.
         arch_kwargs: Extra constructor arguments for that network.
-        metabolic_levels: Number of discrete metabolic levels the policy
-            controls through a second network head, or 0 to leave the
-            metabolic rate to the simulation's rules and learn movement only.
-            Zero is the default so existing runs reproduce.
+        metabolic: Let the policy set its own metabolic rate through a second
+            network head. The throttle is a continuous rate the policy emits,
+            learned alongside movement and anchored on the same schedule, not a
+            choice among discrete settings. False leaves the metabolic rate to
+            the simulation's rules and learns movement only, which is the
+            default so existing runs reproduce.
         device: "auto", "cpu", "mps", "cuda".
         seed: Seed for the training world and the torch RNG.
         total_world_steps: Length of the run, in world steps.
@@ -119,7 +122,7 @@ class TrainerConfig:
 
     arch: str = "conv"
     arch_kwargs: Dict[str, object] = field(default_factory=dict)
-    metabolic_levels: int = 0
+    metabolic: bool = False
     # Channels of learned memory each individual carries; 0 disables it.
     memory_size: int = 0
     # Stop the run when the controlled population has been extinct for this many
@@ -133,11 +136,12 @@ class TrainerConfig:
     # segment of world steps. Zero skips it. See Trainer.pretrain for why a
     # small population needs it.
     pretrain_updates: int = 0
-    # Evaluation only. Hold the learned policy's metabolic level fixed at this
-    # value, so the throttle's contribution can be separated from movement's.
-    # None leaves the throttle to the network, or to the rules for a
-    # direction-only policy. Requires an environment with metabolic levels.
-    eval_pin_metabolic_level: Optional[int] = None
+    # Evaluation only. Hold the learned policy's throttle fixed at this unit in
+    # [0, 1], where 0 is the basal rate and 1 the configured maximum, so the
+    # throttle's contribution can be separated from movement's. None leaves the
+    # throttle to the network, or to the rules for a direction-only policy.
+    # Requires an environment with a metabolic head.
+    eval_pin_metabolic: Optional[float] = None
     device: str = "auto"
     seed: int = 0
 
@@ -478,6 +482,23 @@ def policy_input(observation: torch.Tensor) -> torch.Tensor:
     return observation.to(torch.float16).float()
 
 
+def checkpoint_metabolic(payload: Dict[str, object]) -> bool:
+    """Whether a checkpoint carries a metabolic head.
+
+    Newer checkpoints record ``metabolic`` directly. Ones from the discrete
+    design recorded ``num_metabolic_levels``, where any positive count meant the
+    head was present, so those still load without a translation step.
+    """
+    if "metabolic" in payload:
+        return bool(payload["metabolic"])
+    if "num_metabolic_levels" in payload:
+        return int(payload["num_metabolic_levels"]) > 0
+    config = payload.get("trainer_config") or {}
+    if "metabolic" in config:
+        return bool(config["metabolic"])
+    return int(config.get("metabolic_levels", 0)) > 0
+
+
 class Trainer:
     """Collect, learn, evaluate, checkpoint."""
 
@@ -506,7 +527,7 @@ class Trainer:
             network = build_network(
                 self.config.arch,
                 self.observation_channels,
-                num_metabolic_levels=self.config.metabolic_levels,
+                metabolic=self.config.metabolic,
                 memory_size=self.config.memory_size,
                 **dict(self.config.arch_kwargs),
             )
@@ -552,11 +573,9 @@ class Trainer:
             offspring_credit=config.offspring_credit,
             worlds=config.worlds if worlds is None else worlds,
             device=str(self.device),
-            # Pinning needs a level-to-rate mapping even for a direction-only
-            # policy; two levels make level 0 exactly the basal rate.
-            num_metabolic_levels=max(
-                config.metabolic_levels, 2 if config.eval_pin_metabolic_level is not None else 0
-            ),
+            # Pinning needs the unit-to-rate mapping even for a direction-only
+            # policy, so the environment carries the bounds either way.
+            metabolic=bool(config.metabolic) or config.eval_pin_metabolic is not None,
             memory_size=config.memory_size,
         )
 
@@ -599,15 +618,40 @@ class Trainer:
         log_prob = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
         return action, log_prob
 
+    @staticmethod
+    def _sample_metabolic(
+        mean: torch.Tensor, log_std: torch.Tensor, deterministic: bool
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """One continuous throttle per cell from a Gaussian around ``mean``.
+
+        The throttle is a rate, not a choice among settings, so the policy is a
+        Gaussian on the unit interval rather than a categorical. Returns
+        (unit, log_prob), both the shape of ``mean``. The sample is clamped to
+        [0, 1] because that is the interval the environment maps onto
+        [basal, max]; the log-probability is the unclamped Gaussian's, which is
+        the quantity PPO's ratio is defined over on both sides.
+        """
+        log_std = log_std.clamp(MIN_LOG_STD, MAX_LOG_STD)
+        std = log_std.exp()
+        if deterministic:
+            unit = mean
+        else:
+            unit = (mean + std * torch.randn_like(mean)).clamp(0.0, 1.0)
+        log_prob = (
+            -0.5 * ((unit - mean) / std) ** 2 - log_std - 0.5 * math.log(2 * math.pi)
+        )
+        return unit, log_prob
+
     @torch.no_grad()
     def act(
         self, observation: torch.Tensor, deterministic: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Sample an action for every cell.
 
-        Returns (action, log_prob, value, metabolic_action, memory). ``metabolic_action``
-        is None unless the network has a metabolic head, in which case both
-        heads are sampled independently and ``log_prob`` is the joint
+        Returns (action, log_prob, value, metabolic_unit, memory).
+        ``metabolic_unit`` is None unless the network has a metabolic head, in
+        which case it is a continuous throttle in [0, 1] sampled from a
+        Gaussian around the head's mean and ``log_prob`` is the joint
         log-probability, the quantity the PPO ratio is defined over.
 
         Actions are produced for the whole grid, empty cells included. The
@@ -627,11 +671,13 @@ class Trainer:
 
         out = self.network.forward_all(network_input)
         action, log_prob = self._sample(out["logits"], deterministic)
-        metabolic_action = None
-        if "metabolic_logits" in out:
-            metabolic_action, metabolic_log_prob = self._sample(out["metabolic_logits"], deterministic)
+        metabolic_unit = None
+        if "metabolic_mean" in out:
+            metabolic_unit, metabolic_log_prob = self._sample_metabolic(
+                out["metabolic_mean"], out["metabolic_log_std"], deterministic
+            )
             log_prob = log_prob + metabolic_log_prob
-            metabolic_action = unwrap(metabolic_action)
+            metabolic_unit = unwrap(metabolic_unit)
         # The advantage recursion mixes rewards and bootstrapped values, so it
         # has to run in real return units, not normalized ones.
         value = self.value_normalizer.denormalize(out["value"])
@@ -640,7 +686,7 @@ class Trainer:
         # design: the read is learnable, the write is a fixed function of the
         # observation until recurrent training exists.
         memory = unwrap(out["memory"]) if "memory" in out else None
-        return unwrap(action), unwrap(log_prob), unwrap(value), metabolic_action, memory
+        return unwrap(action), unwrap(log_prob), unwrap(value), metabolic_unit, memory
 
     # ------------------------------------------------------------------
     # Collection
@@ -665,11 +711,11 @@ class Trainer:
 
             def decide(observation, decided=decided):
                 observation = policy_input(observation)
-                action, log_prob, value, metabolic_action, memory = self.act(observation)
+                action, log_prob, value, metabolic_unit, memory = self.act(observation)
                 decided.update(
                     observation=observation, log_prob=log_prob, value=value,
                 )
-                return action, metabolic_action, memory
+                return action, metabolic_unit, memory
 
             batch = self.env.step_with_policy(decide)
             # The env rebuilt the observation itself; overwrite it with the
@@ -754,21 +800,24 @@ class Trainer:
                 # rather than the policy. See multiagent.step_with_policy.
                 def decide(observation, env=env):
                     observation = policy_input(observation)
-                    action, _, _, metabolic_action, memory = self.act(
+                    action, _, _, metabolic_unit, memory = self.act(
                         observation, deterministic=self.config.eval_deterministic
                     )
-                    if self.config.eval_pin_metabolic_level is not None:
-                        # Evaluation-only: hold the throttle at a fixed level so
+                    if self.config.eval_pin_metabolic is not None:
+                        # Evaluation-only: hold the throttle at a fixed unit so
                         # the throttle's effect separates from movement's.
-                        metabolic_action = torch.full(
-                            env.size, int(self.config.eval_pin_metabolic_level),
-                            dtype=torch.long, device=self.device,
+                        # field_shape, not size: evaluation runs one world per
+                        # seed, so an (H, W) tensor is the wrong shape for every
+                        # eval_seeds > 1 and reshaping it raises.
+                        metabolic_unit = torch.full(
+                            env.field_shape, float(self.config.eval_pin_metabolic),
+                            dtype=torch.float32, device=self.device,
                         )
                     # Memory must be written during evaluation exactly as in
                     # training. It was not, once: this call dropped `memory`, so
                     # every memory checkpoint was scored with its memory stuck
                     # at zero, and said nothing about memory either way.
-                    return action, metabolic_action, memory
+                    return action, metabolic_unit, memory
 
                 batch = env.step_with_policy(decide)
 
@@ -932,10 +981,10 @@ class Trainer:
 
                 def decide(observation):
                     observation = policy_input(observation)
-                    action, _, _, metabolic_action, memory = self.act(
+                    action, _, _, metabolic_unit, memory = self.act(
                         observation, deterministic=self.config.eval_deterministic
                     )
-                    return action, metabolic_action, memory
+                    return action, metabolic_unit, memory
 
                 batch = env.step_with_policy(decide)
                 tracker.update(batch)
@@ -1035,7 +1084,7 @@ class Trainer:
             # Recorded on its own as well as inside trainer_config, so the
             # viewer's controller rebuilds the right head without knowing the
             # trainer's field names.
-            "num_metabolic_levels": self.config.metabolic_levels,
+            "metabolic": self.config.metabolic,
             "memory_size": self.config.memory_size,
             "world_steps": self.world_steps,
             "agent_steps": self.agent_steps,
@@ -1057,11 +1106,12 @@ class Trainer:
                 f"channels, this environment has {self.observation_channels}. The config or "
                 "the entity's perception changed."
             )
-        levels = int(payload.get("num_metabolic_levels", 0))
-        if levels != self.config.metabolic_levels:
+        metabolic = checkpoint_metabolic(payload)
+        if metabolic != bool(self.config.metabolic):
             raise ValueError(
-                f"Checkpoint was trained with {levels} metabolic levels, this trainer "
-                f"has {self.config.metabolic_levels}. Pass --metabolic-levels {levels}."
+                f"Checkpoint was trained with metabolic={metabolic}, this trainer "
+                f"has metabolic={bool(self.config.metabolic)}. Pass "
+                f"{'--metabolic' if metabolic else '--no-metabolic'}."
             )
         memory = int(payload.get("memory_size", 0))
         if memory != self.config.memory_size:
@@ -1098,8 +1148,9 @@ class Trainer:
             ("approx_kl", "kl"),
             ("explained_variance", "ev"),
             ("argmax_agreement", "agree"),
-            ("metabolic_agreement", "m_agree"),
-            ("metabolic_level_mean", "m_lvl"),
+            ("metabolic_error", "m_err"),
+            ("metabolic_unit_mean", "m_rate"),
+            ("metabolic_std", "m_std"),
             ("world_steps_per_sec", "w/s"),
             ("agent_steps_per_sec", "a/s"),
         ):
@@ -1123,7 +1174,7 @@ class Trainer:
         reproduce the rule's choices: soft distillation toward the rule's
         per-action scores when the imitation temperature is positive, hard
         cross-entropy to the rule's direction otherwise, plus the rule's
-        metabolic level when the network has that head.
+        metabolic throttle when the network has that head.
 
         Exists because a near-random initial policy is fatal to a small
         population. Twice, a learned predator took its population from 486 to
@@ -1158,7 +1209,7 @@ class Trainer:
             for _ in range(steps):
                 batch = self.env.rule_based_step()
                 for name in ("observation", "acted", "rule_action", "rule_scores",
-                             "rule_metabolic_level"):
+                             "rule_metabolic_unit"):
                     field = getattr(batch, name, None)
                     if field is not None:
                         setattr(batch, name, field.detach().to("cpu", non_blocking=True))
@@ -1199,13 +1250,13 @@ class Trainer:
             acted = stacked(lambda b: b.acted)
             rule_action = stacked(lambda b: b.rule_action)
             rule_scores = stacked(lambda b: b.rule_scores, half=True) if batches[0].rule_scores is not None else None
-            rule_level = (
-                stacked(lambda b: b.rule_metabolic_level)
-                if batches[0].rule_metabolic_level is not None else None
+            rule_unit = (
+                stacked(lambda b: b.rule_metabolic_unit)
+                if batches[0].rule_metabolic_unit is not None else None
             )
             self.world_steps += steps
 
-            totals = {"loss": 0.0, "argmax_agreement": 0.0, "metabolic_agreement": 0.0}
+            totals = {"loss": 0.0, "argmax_agreement": 0.0, "metabolic_error": 0.0}
             weight = 0.0
             for _ in range(max(ppo.epochs, 1)):
                 # On CPU because the stacked segment is: an index tensor has to
@@ -1227,14 +1278,23 @@ class Trainer:
                     else:
                         per_cell = -log_probs.gather(1, rule_action[index].to(self.device).unsqueeze(1)).squeeze(1)
                     loss = (per_cell * mask).sum() / count
-                    metabolic_agreement = float("nan")
-                    if "metabolic_logits" in out and rule_level is not None:
-                        met_log_probs = F.log_softmax(out["metabolic_logits"], dim=1)
-                        met = -met_log_probs.gather(1, rule_level[index].to(self.device).unsqueeze(1)).squeeze(1)
-                        loss = loss + ppo.metabolic_imitation_scale * (met * mask).sum() / count
-                        metabolic_agreement = float(
-                            ((out["metabolic_logits"].argmax(1) == rule_level[index].to(self.device)) & mask).sum() / count
+                    metabolic_error = float("nan")
+                    if "metabolic_mean" in out and rule_unit is not None:
+                        # Gaussian log-likelihood of the rule's own throttle,
+                        # added at the same weight as the direction term. The
+                        # two heads imitate one rule on one schedule; a separate
+                        # multiplier here was a knob with no argument behind it.
+                        target = rule_unit[index].to(self.device).float()
+                        mean = out["metabolic_mean"]
+                        log_std = out["metabolic_log_std"].clamp(MIN_LOG_STD, MAX_LOG_STD)
+                        std = log_std.exp()
+                        met = (
+                            0.5 * ((target - mean) / std) ** 2
+                            + log_std
+                            + 0.5 * math.log(2 * math.pi)
                         )
+                        loss = loss + (met * mask).sum() / count
+                        metabolic_error = float(((mean - target).abs() * mask).sum() / count)
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.network.parameters(), ppo.max_grad_norm)
@@ -1242,8 +1302,8 @@ class Trainer:
                     agreement = float(((out["logits"].argmax(1) == rule_action[index].to(self.device)) & mask).sum() / count)
                     totals["loss"] += float(loss) * count
                     totals["argmax_agreement"] += agreement * count
-                    if metabolic_agreement == metabolic_agreement:
-                        totals["metabolic_agreement"] += metabolic_agreement * count
+                    if metabolic_error == metabolic_error:
+                        totals["metabolic_error"] += metabolic_error * count
                     weight += count
 
             if weight == 0:
@@ -1259,7 +1319,7 @@ class Trainer:
             if verbose:
                 print(
                     f"pretrain {update + 1}/{updates}  loss {last['loss']:.3f}  "
-                    f"agreement {last['argmax_agreement']:.3f}  metabolic {last['metabolic_agreement']:.3f}  "
+                    f"agreement {last['argmax_agreement']:.3f}  metabolic err {last['metabolic_error']:.3f}  "
                     f"population {last['population']:.0f}"
                 )
 

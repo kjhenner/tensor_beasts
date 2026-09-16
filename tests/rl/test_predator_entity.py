@@ -15,7 +15,7 @@ SIZE = (64, 64)
 
 
 def test_predator_environment_exposes_the_full_contract():
-    env = MultiAgentWorldEnv(size=SIZE, device="cpu", entity_name="Predator", num_metabolic_levels=4)
+    env = MultiAgentWorldEnv(size=SIZE, device="cpu", entity_name="Predator", metabolic=True)
     _, acted = env.reset(seed=0)
     assert int(acted.sum()) > 0
     names = env.channel_names
@@ -23,16 +23,16 @@ def test_predator_environment_exposes_the_full_contract():
     assert any(n.startswith("herbivore:scent") for n in names), "predators must be able to smell prey"
     for _ in range(3):
         env.world.update()
-    batch = env.step(torch.randint(0, 5, SIZE), torch.zeros(SIZE, dtype=torch.long))
+    batch = env.step(torch.randint(0, 5, SIZE), torch.zeros(SIZE))
     assert batch.rule_action is not None and batch.rule_scores.shape == (5, *SIZE)
-    assert batch.rule_metabolic_level is not None
+    assert batch.rule_metabolic_unit is not None
     assert torch.all(batch.reward[~batch.acted] == 0)
 
 
 def test_predator_trains_evaluates_and_checkpoints(tmp_path):
     trainer = Trainer(
         TrainerConfig(size=SIZE[0], entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-                      metabolic_levels=4, warmup_steps=3, total_world_steps=8, segment_steps=4, eval_interval=0,
+                      metabolic=True, warmup_steps=3, total_world_steps=8, segment_steps=4, eval_interval=0,
                       eval_steps=4, eval_seeds=1, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
         PPOConfig(epochs=1, minibatch_steps=2, imitation_coef=1.0),
@@ -43,7 +43,7 @@ def test_predator_trains_evaluates_and_checkpoints(tmp_path):
     path = trainer.save_checkpoint(tmp_path / "predator.pt")
     payload = torch.load(path, weights_only=False)
     assert payload["trainer_config"]["entity"] == "Predator"
-    assert payload["num_metabolic_levels"] == 4
+    assert payload["metabolic"] is True
 
 
 def test_the_learner_observes_the_prey_field_before_the_prey_moves():

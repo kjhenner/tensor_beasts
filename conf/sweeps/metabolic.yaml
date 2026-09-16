@@ -1,34 +1,62 @@
-# The metabolic lever: can a predator learn when to burn?
+# Does a learned throttle beat the rule's throttle?
 #
 #   wandb sweep --project tensor-beasts-rl conf/sweeps/metabolic.yaml
 #   wandb agent <sweep-id>          # a second agent in another shell is fine
 #
-# 24 trials, about four hours with two agents.
+# 16 trials, about three hours with two agents.
 #
-# Until now the learned predator has controlled one lever. The external action
-# overrides its direction; the metabolic rate, the move probability and the
-# gradient history that sets the rate all still come from the rule-based policy.
-# So a learned predator chooses where to go while a hand-written rule decides
-# how hard it runs, reacting to gradients the policy may have chosen to ignore.
-# It cannot conserve on purpose, sprint at prey it has seen, or trade efficiency
-# for speed.
+# There is no control arm here, because the last sweep already is one. All 32
+# of its trials ran with the throttle left to the rule-based policy, so every
+# cell below has a no-metabolism twin at the same architecture, learning rate,
+# reward and anchor target. This runs the metabolism arm of the four best of
+# those cells and pairs them:
 #
-# The case is stronger for a predator than it was for the herbivore. A herbivore
-# grazes on 78% of steps and its throttle barely matters. A predator eats on
-# 2.5% and each meal follows a pursuit: endurance between hunts and speed during
-# one are the whole game, and the rule sets both from a smoothed scent gradient
-# rather than from anything about the hunt.
+#   reward mode   target   control score (throttle left to the rules)
+#   biomass       0.95     12,601
+#   biomass-0.5   0.8      12,563
+#   biomass       0.8      12,303
+#   biomass-0.5   0.95     11,704
 #
-# The herbivore attempt failed for a reason that is fixed and a reason that is
-# not:
-#   * Its reward counted NET biomass change, so burning biomass into energy cost
-#     reward directly and the throttle collapsed onto its coldest setting. The
-#     reward is now biomass EATEN, so burning is neutral to the foraging term
-#     and pays off only through the movement it buys. That artefact is gone.
-#   * The metabolic anchor taught the rule's own throttle, which rests near
-#     basal most of the time, so anchoring to it teaches the learner to run
-#     cold. How hard to anchor is therefore part of the axis here rather than a
-#     constant: the throttle modes span no anchor, a light one and a full one.
+# Four seeds each, because a single trial's standard error is near 6% and the
+# effect looked for here is plausibly that size. Read this as four paired
+# differences, each averaged over four seeds, not as a ranking of cells.
+#
+# WHAT THE THROTTLE IS
+#
+# Until now the learned predator controlled one lever. The external action
+# overrode its direction while the rule set its metabolic rate from a smoothed
+# scent gradient, so the policy chose where to go and a hand-written rule chose
+# how hard to run, reacting to gradients the policy may have ignored. It could
+# not conserve on purpose, sprint at prey it had seen, or trade efficiency for
+# speed.
+#
+# The throttle is now a continuous rate from a Gaussian head over
+# [basal_rate, max_metabolic_rate], anchored to the rule's own rate by Gaussian
+# log-likelihood on exactly the schedule that anchors movement, under one
+# weight for both heads. An earlier draft of this sweep had discrete levels and
+# a separate anchor scale, and both were wrong. The rate is a continuous
+# quantity, so binning it threw away resolution and made "how many bins" a
+# parameter that says nothing about the ecology. Direction and throttle are two
+# outputs of one policy imitating one rule, so there is no reason to trust the
+# rule's throttle differently from its direction; a separate scale also let the
+# throttle's anchor outlive the direction's, which is how the herbivore attempt
+# ended up pinned to a rule that rests near basal.
+#
+# The other half of that failure is fixed. Its reward counted NET biomass
+# change, so burning biomass into energy cost reward directly and the only
+# rational throttle was off. The biomass reward counts what an individual EATS,
+# so burning is neutral to the reward and pays off only through the movement it
+# buys, which is the trade the lever exists to make.
+#
+# WHAT TO LOOK AT
+#
+# metabolic_unit_mean is the mean throttle in [0, 1], where 0 is basal and 1 is
+# the configured maximum. The rule sits near 0.05. A learned throttle that ends
+# up there has found nothing; one that ends up high and flat is burning without
+# hunting; the interesting outcome is a mean that moves with the hunt, which is
+# what metabolic_std and the films can show. metabolic_error is the mean
+# absolute distance from the rule's throttle, so it says how far the policy
+# travelled from the rule once the anchor released.
 
 program: train_rl.py
 method: grid
@@ -37,50 +65,27 @@ metric:
   goal: maximize
 
 parameters:
-  # THE QUESTION, as one axis. Levels and anchor strength are not independent:
-  # with no metabolic head the anchor scale is inert, so crossing them as two
-  # axes would spend a third of the grid on identical controls.
-  #
-  #   rules      the throttle stays with the rule-based policy. The control, and
-  #              the configuration that scored 12,601 in the last sweep.
-  #   free-4     four levels, reward decides the throttle entirely
-  #   guided-4   four levels, anchored lightly to the rule's throttle
-  #   copied-4   four levels, anchored fully. This is the herbivore's failed
-  #              setting, kept as the comparison: the rule rests near basal, so
-  #              copying it teaches the learner to run cold.
-  #   free-8     eight levels, reward decides. The lever is a continuous
-  #   guided-8   quantity and four levels may be too coarse to express
-  #              drift, cruise and sprint.
-  throttle:
-    values: [rules, free-4, guided-4, copied-4, free-8, guided-8]
+  # The two axes that pick out the four paired cells. Crossed, these are the
+  # four best configurations of the last sweep, listed in the header.
+  reward-mode:
+    values: [biomass, biomass-0.5]
+  imitation-target:
+    values: [0.8, 0.95]
 
-  # Four training seeds per setting rather than one. The last sweep put a single
-  # trial's standard error near 6%, and the effect looked for here is plausibly
-  # that size, so seeds are the only lever that resolves it. Read this sweep by
-  # throttle-mode mean over four seeds, not by the best cell.
   seed:
     values: [0, 1, 2, 3]
 
-  # --- committed, from the overnight sweep's 32 trials ---
-  # conv over dilated, 11,108 against 10,526, and dilated collapsed entirely at
-  # the small learning rate. lr 1e-3 over 3e-4, 11,306 against 10,130, the
-  # largest effect in that sweep.
+  # THE CHANGE. On in every trial; the control is the previous sweep.
+  metabolic:
+    value: true
+
+  # Committed from the overnight sweep's 32 trials: conv over dilated, 11,108
+  # against 10,526, and dilated collapsed entirely at the smaller step; lr 1e-3
+  # over 3e-4, 11,306 against 10,130, its largest effect.
   arch:
     value: conv
   lr:
     value: 0.001
-  # The four reward modes spanned 6% against standard errors of 450, so the
-  # reward's composition is not the binding constraint. biomass wins nominally
-  # and needs one hand-chosen constant instead of three. Crucially it is also
-  # the reward that makes this experiment interpretable: it counts biomass
-  # EATEN, so burning is neutral rather than a direct cost, which is the
-  # artefact that neutered the herbivore's metabolic run.
-  reward-mode:
-    value: biomass
-  # 10,984 against 10,844 across 24 runs. A non-effect; fixed at the nominal
-  # winner to spend the budget on seeds instead.
-  imitation-target:
-    value: 0.95
 
   worlds:
     value: 4
@@ -120,9 +125,6 @@ parameters:
     value: 2880
   film-interval:
     value: 5760
-  # Evaluation only, and left off here. --pin-metabolic-level would hold the
-  # throttle fixed to separate its effect from movement's, which is the right
-  # follow-up once this sweep says whether the lever helps at all.
 
 command:
   - ${env}

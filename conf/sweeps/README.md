@@ -19,7 +19,7 @@ denominator. Every trial also reports `score_spread`, `score_min` and
 
 | Config | Trials | Question | Status |
 |---|---|---|---|
-| `metabolic` | 24 | Can a predator learn its own throttle? | **Ready** |
+| `metabolic` | 16 | Does a learned throttle beat the rule's throttle? | **Ready** |
 | `done-overnight` | 32 | Reward mode x architecture x learning rate x anchor target | Done |
 | `done-stageA-worlds` | 2 | Does training across four worlds help? | Done: yes |
 | `done-stage0-release` | 2 | Can the imitation anchor be released? | Done: yes |
@@ -44,6 +44,19 @@ modes span 6% against standard errors near 450, so the reward's composition is
 not the binding constraint. The lineage credit neither helped nor hurt, and
 reproductions were 487 to 511 across the top runs regardless of it, so the
 hoarding the credit was built to prevent does not happen.
+
+## Pairing against an earlier sweep
+
+`metabolic` has no control arm, because `done-overnight` is one: all 32 of its
+trials left the throttle to the rule-based policy. The 16 metabolic trials are
+the other arm of its four best cells, at the same architecture, learning rate,
+reward and anchor target, four seeds each. Read them as four paired
+differences rather than as a ranking.
+
+Doing it this way costs 16 trials instead of 40 and, more importantly, keeps
+the control honest: the comparison is against runs that already happened rather
+than against a control re-run alongside, which would differ in whatever else
+drifted between the two sweeps.
 
 ## How to read a sweep
 

@@ -70,6 +70,6 @@ optim:
   max_grad_norm: 5
 
 loss:
-  gamma: 0.9
+  gamma: 0.5
   hard_update_freq: 500
   num_updates: 1

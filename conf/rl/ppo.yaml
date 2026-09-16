@@ -26,10 +26,10 @@ trainer:
 
   arch: conv
   arch_kwargs: {}
-  # Second policy head over this many discrete metabolic levels, from basal to
-  # max_metabolic_rate, still capped by carried biomass. 0 leaves the rate to
-  # the rules and learns movement only; existing runs reproduce with 0.
-  metabolic_levels: 0
+  # Second policy head emitting a continuous metabolic rate, from basal to
+  # max_metabolic_rate, still capped by carried biomass. false leaves the rate
+  # to the rules and learns movement only; existing runs reproduce with false.
+  metabolic: false
   # Learned memory channels per individual. 0 disables. See planning/04.
   memory_size: 0
   # Supervised updates on rule-based rollouts before RL. 0 = off.
@@ -90,10 +90,6 @@ ppo:
   # Minimum anchor weight as a fraction of imitation_coef. 0 releases fully at
   # the target, which was seen to oscillate; 0.2 keeps a permanent light pull.
   imitation_floor: 0.0
-  # Metabolic anchor weight relative to the direction anchor. The rule rests
-  # 90% of the time, so 1.0 teaches the throttle to stay cold; 0 lets the
-  # reward decide it.
-  metabolic_imitation_scale: 1.0
   # Backpropagate memory writes through this many steps of the individual's
   # own trajectory. 0 = off (stage 1). See planning/04.
   recurrent_window: 0

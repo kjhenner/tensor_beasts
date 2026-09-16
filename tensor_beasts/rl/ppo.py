@@ -24,11 +24,11 @@ Two levers, one anchor
 When the network carries a metabolic head (see
 :class:`~tensor_beasts.rl.networks.ActorCritic`) the per-cell policy is the
 product of two independent categoricals, one over directions and one over
-metabolic levels. The joint log-probability is the sum of the two, the entropy
+a continuous throttle. The joint log-probability is the sum of the two, the entropy
 bonus is the sum of the two entropies, and the clipped ratio is taken over the
 joint, so ``rollout.log_prob`` must hold the joint log-prob at collection
 time. The imitation anchor gains a second term, hard cross-entropy of the
-metabolic level toward the rule's own level on the same observation, weighted
+throttle toward the rule's own rate on the same observation, weighted
 by the *same* cross-fade weight as the direction term: there is one anchor
 with two levers, and it releases as a whole when direction conformance
 reaches the target.
@@ -50,6 +50,8 @@ here are deliberately free functions for the same reason.
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Iterator, Optional, Protocol, Tuple, List
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -59,6 +61,14 @@ from tensor_beasts.rl.recurrent import propagate_memory
 from tensor_beasts.rl.rollout import Rollout
 
 NUM_ACTIONS = 5
+
+
+# Bounds on the metabolic head's learned log standard deviation. The floor stops
+# the Gaussian collapsing to a delta, which makes its log-probability explode
+# and the PPO ratio with it; the ceiling stops it widening to cover the whole
+# range, which is the other degenerate solution and costs nothing to rule out.
+MIN_LOG_STD = -4.0
+MAX_LOG_STD = 1.0
 
 
 def iter_minibatches_with_value(
@@ -79,7 +89,7 @@ def iter_minibatches_with_value(
 
     Yields:
         (observation, acted, action, log_prob, value, advantage, ret, rule_action,
-        rule_scores, metabolic_action, rule_metabolic_level), the last four None
+        rule_scores, metabolic_unit, rule_metabolic_unit), the last four None
         if the rollout does not carry them.
     """
     if shuffle:
@@ -114,8 +124,8 @@ def iter_minibatches_with_value(
             fold(rollout.ret[index]),
             fold(rollout.rule_action[index]) if rollout.rule_action is not None else None,
             fold(rollout.rule_scores[index].float()) if rollout.rule_scores is not None else None,
-            fold(rollout.metabolic_action[index]) if rollout.metabolic_action is not None else None,
-            fold(rollout.rule_metabolic_level[index]) if rollout.rule_metabolic_level is not None else None,
+            fold(rollout.metabolic_unit[index]) if rollout.metabolic_unit is not None else None,
+            fold(rollout.rule_metabolic_unit[index]) if rollout.rule_metabolic_unit is not None else None,
         )
 
 
@@ -211,12 +221,6 @@ class PPOConfig:
     # already know is good while leaving RL free to improve on it. Zero
     # preserves the earlier behaviour exactly.
     imitation_floor: float = 0.0
-    # Multiplier on the metabolic-level imitation term relative to the
-    # direction term. The rule burns at basal 90% of the time and never uses
-    # the top levels, so anchoring the throttle to it teaches "rest", and the
-    # first two-lever run collapsed onto the coldest level. Zero anchors
-    # direction only and lets the reward decide the throttle.
-    metabolic_imitation_scale: float = 1.0
     # Recurrent training of the memory write. Zero is off: the memory read at
     # each step is the stored one and the write is a fixed function of the
     # observation (stage 1 of planning/04). Positive N replays each segment in
@@ -307,14 +311,14 @@ class PPO:
         network: nn.Module,
         observation: torch.Tensor,
         action: torch.Tensor,
-        metabolic_action: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
     ):
         """One forward pass, every per-cell quantity the losses need.
 
         Returns a dict with ``logits``, ``log_probs`` (direction, (B,5,H,W)),
         ``log_prob`` (joint, (B,H,W)), ``entropy`` (joint), ``value``, and when
-        the network has a metabolic head also ``metabolic_logits``,
-        ``metabolic_log_probs`` and ``metabolic_log_prob``.
+        the network has a metabolic head also ``metabolic_mean``,
+        ``metabolic_log_std``, ``metabolic_log_prob`` and ``metabolic_entropy``.
 
         Written by hand rather than through ``torch.distributions.Categorical``
         because that would need a permute to put the action axis last on a
@@ -340,20 +344,32 @@ class PPO:
             "value": value,
         }
         if has_head:
-            if metabolic_action is None:
+            if metabolic_unit is None:
                 raise ValueError(
                     "The network has a metabolic head but the rollout carries no "
-                    "metabolic_action. Build the environment with the same "
-                    "num_metabolic_levels as the network."
+                    "metabolic_unit. Build the environment with metabolic=True, "
+                    "as the network was."
                 )
-            metabolic_log_probs = F.log_softmax(out["metabolic_logits"], dim=1)
-            metabolic_log_prob = metabolic_log_probs.gather(1, metabolic_action.unsqueeze(1)).squeeze(1)
-            metabolic_entropy = -(metabolic_log_probs.exp() * metabolic_log_probs).sum(dim=1)
+            # The throttle is a continuous rate, so its policy is a Gaussian
+            # over the normalised unit rather than a categorical over bins.
+            # Discrete levels were the earlier design and were a modelling
+            # error: they threw away resolution and made "how many bins" a
+            # parameter that says nothing about the ecology.
+            mean = out["metabolic_mean"]
+            log_std = out["metabolic_log_std"].clamp(MIN_LOG_STD, MAX_LOG_STD)
+            std = log_std.exp()
+            metabolic_log_prob = (
+                -0.5 * ((metabolic_unit - mean) / std) ** 2
+                - log_std
+                - 0.5 * math.log(2 * math.pi)
+            )
+            # Differential entropy of a Gaussian, one scalar broadcast per cell.
+            metabolic_entropy = (log_std + 0.5 * math.log(2 * math.pi * math.e)).expand_as(mean)
             # Independent heads: the joint log-prob and entropy are sums.
             result["log_prob"] = log_prob + metabolic_log_prob
             result["entropy"] = entropy + metabolic_entropy
-            result["metabolic_logits"] = out["metabolic_logits"]
-            result["metabolic_log_probs"] = metabolic_log_probs
+            result["metabolic_mean"] = mean
+            result["metabolic_log_std"] = log_std
             result["metabolic_log_prob"] = metabolic_log_prob
             result["metabolic_entropy"] = metabolic_entropy
         if "memory" in out:
@@ -365,14 +381,14 @@ class PPO:
         network: nn.Module,
         observation: torch.Tensor,
         action: torch.Tensor,
-        metabolic_action: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
     ):
         """Return (log_prob, entropy, value), each grid shaped ``(B, H, W)``.
 
         With a metabolic head on the network, ``log_prob`` and ``entropy`` are
         the joint quantities over both levers; see the module docstring.
         """
-        heads = PPO._heads(network, observation, action, metabolic_action)
+        heads = PPO._heads(network, observation, action, metabolic_unit)
         return heads["log_prob"], heads["entropy"], heads["value"]
 
     # ------------------------------------------------------------------
@@ -390,13 +406,13 @@ class PPO:
         ret: torch.Tensor,
         rule_action: Optional[torch.Tensor] = None,
         rule_scores: Optional[torch.Tensor] = None,
-        metabolic_action: Optional[torch.Tensor] = None,
-        rule_metabolic_level: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
+        rule_metabolic_unit: Optional[torch.Tensor] = None,
         heads: Optional[dict] = None,
     ):
         config = self.config
         if heads is None:
-            heads = self._heads(network, observation, action, metabolic_action)
+            heads = self._heads(network, observation, action, metabolic_unit)
         logits, value = heads["logits"], heads["value"]
         log_probs = heads["log_probs"]
         # Joint over both levers when the network has a metabolic head; the
@@ -471,28 +487,48 @@ class PPO:
         # and the mean chosen level are logged whether or not the term is
         # active, so the log shows whether the learner runs hot or cold.
         metabolic_imitation_loss = torch.zeros((), device=loss.device)
-        metabolic_agreement = float("nan")
-        metabolic_level_mean = float("nan")
+        metabolic_error = float("nan")
+        metabolic_unit_mean = float("nan")
         metabolic_entropy = float("nan")
-        if "metabolic_log_probs" in heads:
-            metabolic_log_probs = heads["metabolic_log_probs"]
+        metabolic_std = float("nan")
+        if "metabolic_mean" in heads:
             with torch.no_grad():
-                metabolic_level_mean = float(masked_mean(metabolic_action.float(), mask))
+                metabolic_unit_mean = float(masked_mean(metabolic_unit.float(), mask))
                 metabolic_entropy = float(masked_mean(heads["metabolic_entropy"], mask))
-            if rule_metabolic_level is not None:
-                rule_level_log_prob = metabolic_log_probs.gather(
-                    1, rule_metabolic_level.unsqueeze(1)
-                ).squeeze(1)
-                metabolic_imitation_loss = -masked_mean(rule_level_log_prob, mask)
+                metabolic_std = float(heads["metabolic_log_std"].exp())
+            if rule_metabolic_unit is not None:
+                # The anchor is the Gaussian log-likelihood of the rule's own
+                # throttle under the policy's throttle distribution: the
+                # continuous analogue of the cross-entropy that anchors the
+                # direction. Regressing the mean with a squared error would be
+                # the obvious alternative and is worse, because it ignores the
+                # spread and so cannot be traded off against the entropy term
+                # on the same footing as the direction's anchor.
+                mean = heads["metabolic_mean"]
+                log_std = heads["metabolic_log_std"]
+                std = log_std.exp()
+                rule_log_prob = (
+                    -0.5 * ((rule_metabolic_unit - mean) / std) ** 2
+                    - log_std
+                    - 0.5 * math.log(2 * math.pi)
+                )
+                metabolic_imitation_loss = -masked_mean(rule_log_prob, mask)
                 with torch.no_grad():
-                    metabolic_agreement = float(
-                        masked_mean((metabolic_log_probs.argmax(dim=1) == rule_metabolic_level).float(), mask)
+                    metabolic_error = float(
+                        masked_mean((mean - rule_metabolic_unit).abs(), mask)
                     )
 
         if soft or rule_action is not None:
             weight = self.imitation_weight()
             if weight > 0.0:
-                loss = loss + weight * (imitation_loss + config.metabolic_imitation_scale * metabolic_imitation_loss)
+                # One weight for both heads, on one schedule. Direction and
+                # throttle are two outputs of one policy imitating one rule, so
+                # there is no principled reason to trust the rule's throttle
+                # differently from its direction, and a separate scale was a
+                # knob with no argument behind it. It also made the throttle's
+                # anchor outlive the direction's, which is how the herbivore run
+                # ended up pinned to a rule that rests near basal.
+                loss = loss + weight * (imitation_loss + metabolic_imitation_loss)
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
@@ -515,9 +551,14 @@ class PPO:
             "conformance": conformance,
             "argmax_agreement": argmax_agreement,
             "metabolic_imitation_loss": float(metabolic_imitation_loss.detach()),
-            "metabolic_agreement": metabolic_agreement,
-            "metabolic_level_mean": metabolic_level_mean,
+            # Mean absolute error between the policy's throttle and the
+            # rule's, in normalised units, so 0.1 is a tenth of the range from
+            # basal to maximum. Replaces an argmax agreement, which a
+            # continuous action has no equivalent of.
+            "metabolic_error": metabolic_error,
+            "metabolic_unit_mean": metabolic_unit_mean,
             "metabolic_entropy": metabolic_entropy,
+            "metabolic_std": metabolic_std,
         }
         return loss, diagnostics
 
@@ -670,7 +711,7 @@ class PPO:
 
                 acted = rollout.acted[t : t + 1]
                 agent_steps = float(acted.sum())
-                heads = self._heads(network, observation, rollout.action[t : t + 1], part(rollout.metabolic_action, t))
+                heads = self._heads(network, observation, rollout.action[t : t + 1], part(rollout.metabolic_unit, t))
                 write = heads["memory"][0]
                 write_magnitudes.append(float(write.detach().abs().mean()))
                 read_prev = propagate_memory(
@@ -683,7 +724,7 @@ class PPO:
                         rollout.log_prob[t : t + 1], rollout.value[t : t + 1],
                         rollout.advantage[t : t + 1], rollout.ret[t : t + 1],
                         part(rollout.rule_action, t), part(rollout.rule_scores, t),
-                        part(rollout.metabolic_action, t), part(rollout.rule_metabolic_level, t),
+                        part(rollout.metabolic_unit, t), part(rollout.rule_metabolic_unit, t),
                         heads=heads,
                     )
                     # Weight each step by its agent-steps so a window's loss is the

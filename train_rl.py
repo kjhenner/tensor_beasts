@@ -39,27 +39,22 @@ DEFAULT_CONFIG = "conf/rl/ppo.yaml"
 # reward, whose scale is about one per step, a credit of fifty per division
 # would swamp everything else. Sweeping the terms separately would spend most
 # of a grid on combinations like that. A mode names each coherent reward once.
-# Metabolic presets, for --throttle. Levels and anchor strength are not
-# independent axes: with no metabolic head the anchor scale is inert, so a grid
-# crossing them spends a third of its cells on identical controls. Naming the
-# combinations once avoids that. "copied" is the setting that failed for the
-# herbivore, whose throttle rests near basal, so copying it teaches the learner
-# to run cold; it is kept as the comparison rather than as a recommendation.
-THROTTLE_MODES = {
-    "rules": dict(levels=0, scale=0.0),
-    "free-4": dict(levels=4, scale=0.0),
-    "guided-4": dict(levels=4, scale=0.3),
-    "copied-4": dict(levels=4, scale=1.0),
-    "free-8": dict(levels=8, scale=0.0),
-    "guided-8": dict(levels=8, scale=0.3),
-}
-
 REWARD_MODES = {
     "classic": dict(survival_reward=1.0, reproduction_reward=10.0, foraging_reward=0.02, offspring_credit=0.0),
     "biomass": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.0),
     "biomass-0.5": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.5),
     "biomass-1.0": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=1.0),
 }
+
+
+def _boolean(value: str) -> bool:
+    """Parse a boolean the way both a person and a sweep agent write one."""
+    text = str(value).strip().lower()
+    if text in ("true", "t", "yes", "y", "1"):
+        return True
+    if text in ("false", "f", "no", "n", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {value!r}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -147,31 +142,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model.add_argument("--hidden-channels", type=int, default=None)
     model.add_argument(
-        "--metabolic-levels",
-        type=int,
+        "--metabolic",
+        # nargs="?" with a const so both spellings work: "--metabolic" as a
+        # person types it, and "--metabolic=true" as a W&B sweep agent emits it.
+        # A plain store_true rejects the second with "ignored explicit argument",
+        # which would have failed every trial of a sweep that sets it.
+        nargs="?",
+        type=_boolean,
+        const=True,
         default=None,
-        metavar="N",
         help=(
-            "Let the policy set its own metabolic rate through a second head over "
-            "N discrete levels from basal to max_metabolic_rate, still capped by "
-            "carried biomass. 0 (the default) leaves the rate to the rules and "
-            "learns movement only, so existing runs reproduce. --eval-only and "
-            "--resume take the value from the checkpoint when this is not given."
+            "Let the policy set its own metabolic rate through a second head, as "
+            "a continuous throttle from basal_rate to max_metabolic_rate, still "
+            "capped by carried biomass. Off by default, which leaves the rate to "
+            "the rules and learns movement only, so existing runs reproduce. "
+            "--eval-only and --resume take the setting from the checkpoint when "
+            "neither this nor --no-metabolic is given."
         ),
     )
     model.add_argument(
-        "--throttle",
+        "--no-metabolic",
+        dest="metabolic",
+        action="store_false",
         default=None,
-        choices=sorted(THROTTLE_MODES),
-        help=(
-            "The metabolic lever, as one setting, so a sweep can cross it with "
-            "other axes without wasting cells. rules: the throttle stays with the "
-            "rule-based policy and only movement is learned, which is the control. "
-            "The others give the policy N levels from basal to max_metabolic_rate "
-            "and say how hard the anchor teaches the rule's own throttle: free "
-            "lets the reward decide it, guided anchors it lightly, copied anchors "
-            "it fully. Explicit --metabolic-levels wins over this."
-        ),
+        help="leave the metabolic rate to the rules and learn movement only",
     )
     model.add_argument(
         "--memory-size",
@@ -230,8 +224,6 @@ def build_parser() -> argparse.ArgumentParser:
                        help="softmax temperature over the rule's scores for soft distillation; 0 = hard argmax (default 0.01)")
     hyper.add_argument("--imitation-floor", type=float, default=None,
                        help="minimum anchor weight as a fraction of --imitation-coef, so the rules never fully let go (default 0)")
-    hyper.add_argument("--metabolic-imitation-scale", type=float, default=None,
-                       help="weight of the metabolic-level anchor relative to the direction anchor; 0 anchors direction only (default 1)")
     hyper.add_argument("--pretrain-updates", type=int, default=None,
                        help="supervised updates on rule-based rollouts before RL, one segment each (0 = off). "
                             "Needed for small populations such as predators, which a near-random start starves.")
@@ -242,13 +234,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     evaluation = parser.add_argument_group("evaluation")
     evaluation.add_argument(
-        "--pin-metabolic-level",
-        type=int,
+        "--pin-metabolic",
+        type=float,
         default=None,
+        metavar="UNIT",
         help=(
-            "Evaluation only: hold the learned policy's metabolic level fixed, e.g. 0 "
-            "for basal, to separate the throttle's effect from movement's. Works with "
-            "a direction-only checkpoint too."
+            "Evaluation only: hold the learned policy's throttle fixed at this unit "
+            "in [0, 1], where 0 is the basal rate and 1 the configured maximum, to "
+            "separate the throttle's effect from movement's. Works with a "
+            "direction-only checkpoint too."
         ),
     )
     evaluation.add_argument("--eval-interval", type=int, default=None)
@@ -318,10 +312,10 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "worlds": args.worlds,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
-        "metabolic_levels": args.metabolic_levels,
+        "metabolic": args.metabolic,
         "memory_size": args.memory_size,
         "pretrain_updates": args.pretrain_updates,
-        "eval_pin_metabolic_level": args.pin_metabolic_level,
+        "eval_pin_metabolic": args.pin_metabolic,
         "device": args.device,
         "seed": args.seed,
         "extinction_patience": args.extinction_patience,
@@ -359,16 +353,11 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "imitation_target_conformance": args.imitation_target,
         "imitation_temperature": args.imitation_temperature,
         "imitation_floor": args.imitation_floor,
-        "metabolic_imitation_scale": args.metabolic_imitation_scale,
         "recurrent_window": args.recurrent_window,
     }
 
     if args.reward_mode is not None:
         trainer.update(REWARD_MODES[args.reward_mode])
-    if args.throttle is not None:
-        preset = THROTTLE_MODES[args.throttle]
-        trainer["metabolic_levels"] = preset["levels"]
-        ppo["metabolic_imitation_scale"] = preset["scale"]
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})
     ppo.update({k: v for k, v in ppo_flags.items() if v is not None})
 
@@ -376,13 +365,13 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
     # not given, take the head configuration from the checkpoint rather than
     # refusing to load it.
     checkpoint = args.eval_only or args.resume
-    if checkpoint and args.metabolic_levels is None:
+    if checkpoint and args.metabolic is None:
         import torch
 
+        from tensor_beasts.rl.trainer import checkpoint_metabolic
+
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        trainer["metabolic_levels"] = int(
-            payload.get("num_metabolic_levels", payload["trainer_config"].get("metabolic_levels", 0))
-        )
+        trainer["metabolic"] = checkpoint_metabolic(payload)
 
     if args.hidden_channels is not None:
         arch_kwargs = dict(trainer.get("arch_kwargs") or {})
@@ -489,7 +478,7 @@ def main(argv: Optional[list] = None) -> int:
         f"receptive_field={trainer.network.receptive_field} "
         f"channels={trainer.observation_channels} device={trainer.device} "
         f"size={trainer_config.size}x{trainer_config.size} "
-        f"metabolic_levels={trainer_config.metabolic_levels}"
+        f"metabolic={trainer_config.metabolic}"
     )
 
     if args.eval_only:

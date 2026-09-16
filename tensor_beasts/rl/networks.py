@@ -19,11 +19,11 @@ The interface is::
 with ``observation`` of shape ``(B, C, H, W)``, ``logits`` of shape
 ``(B, 5, H, W)`` over [stay, up, down, left, right], and ``value`` of shape
 ``(B, H, W)``. That two-tuple is fixed: other algorithms and the tests depend
-on it. A network built with ``num_metabolic_levels > 0`` carries a second
-policy head over discrete metabolic levels, reachable through::
+on it. A network built with ``metabolic=True`` carries a second policy head
+emitting a continuous metabolic rate, reachable through::
 
     out = network.forward_all(observation)
-    out["logits"], out["value"], out["metabolic_logits"]  # (B, L, H, W)
+    out["logits"], out["value"], out["metabolic_mean"]  # (B, H, W)
 
 so a learner that controls both levers asks for everything and one that
 controls only movement keeps calling the network as before.
@@ -62,24 +62,34 @@ class ActorCritic(nn.Module):
     Args:
         in_channels: Observation channels.
         trunk_channels: Channels the subclass's trunk produces.
-        num_metabolic_levels: If positive, add a second 1x1 policy head over
-            this many discrete metabolic levels. Zero means the network
+        metabolic: Add a second 1x1 policy head emitting a continuous
+            metabolic rate. False means the network
             controls movement only and the simulation's rules set the rate.
     """
 
-    def __init__(self, in_channels: int, trunk_channels: int, num_metabolic_levels: int = 0, memory_size: int = 0):
+    def __init__(self, in_channels: int, trunk_channels: int, metabolic: bool = False, memory_size: int = 0):
         super().__init__()
         self.in_channels = in_channels
         self.trunk_channels = trunk_channels
-        self.num_metabolic_levels = int(num_metabolic_levels)
+        self.metabolic = bool(metabolic)
         self.policy_head = orthogonal_init(nn.Conv2d(trunk_channels, NUM_ACTIONS, 1), gain=0.01)
         self.value_head = orthogonal_init(nn.Conv2d(trunk_channels, 1, 1), gain=1.0)
-        if self.num_metabolic_levels > 0:
-            self.metabolic_head = orthogonal_init(
-                nn.Conv2d(trunk_channels, self.num_metabolic_levels, 1), gain=0.01
-            )
+        if self.metabolic:
+            # The metabolic rate is a continuous quantity, so the head emits a
+            # mean per cell and the policy is a Gaussian around it, squashed to
+            # [basal, max] by the environment. Discrete levels were the earlier
+            # design and were a modelling error: they threw away resolution and
+            # made "how many bins" a parameter that means nothing about the
+            # ecology.
+            self.metabolic_head = orthogonal_init(nn.Conv2d(trunk_channels, 1, 1), gain=0.01)
+            # One learned log-standard-deviation for the whole field rather than
+            # a per-cell one. The spread is exploration policy, not something an
+            # individual should condition on, and a state-dependent sigma is a
+            # well-known way to collapse a continuous policy early.
+            self.metabolic_log_std = nn.Parameter(torch.full((1,), -0.5))
         else:
             self.metabolic_head = None
+            self.metabolic_log_std = None
         # Learned memory write: K channels in [-1, 1] per cell, deterministic.
         # Unit gain, not the policy heads' 0.01: a near-zero write carries no
         # information, and there is no "collapse" risk for a state variable.
@@ -106,9 +116,10 @@ class ActorCritic(nn.Module):
         """Every head at once, from a single pass through the trunk.
 
         Returns ``logits`` and ``value`` exactly as :meth:`forward` does, plus
-        ``metabolic_logits`` of shape ``(B, L, H, W)`` when the network has a
-        metabolic head. The key is absent otherwise, so a caller can tell the
-        two kinds of network apart without inspecting the module.
+        ``metabolic_mean`` of shape ``(B, H, W)`` in [0, 1] and a scalar
+        ``metabolic_log_std`` when the network has a metabolic head. The keys
+        are absent otherwise, so a caller can tell the two kinds of network
+        apart without inspecting the module.
         """
         features = self.features(observation)
         out = {
@@ -116,7 +127,9 @@ class ActorCritic(nn.Module):
             "value": self.value_head(features).squeeze(1),
         }
         if self.metabolic_head is not None:
-            out["metabolic_logits"] = self.metabolic_head(features)
+            # Mean in [0, 1]; the environment maps it onto [basal, max].
+            out["metabolic_mean"] = torch.sigmoid(self.metabolic_head(features).squeeze(1))
+            out["metabolic_log_std"] = self.metabolic_log_std
         if self.memory_head is not None:
             out["memory"] = torch.tanh(self.memory_head(features))
         return out
@@ -144,8 +157,8 @@ class LinearPolicy(ActorCritic):
     everything below is a waste of time until that is fixed.
     """
 
-    def __init__(self, in_channels: int, num_metabolic_levels: int = 0, memory_size: int = 0):
-        super().__init__(in_channels, in_channels, num_metabolic_levels, memory_size)
+    def __init__(self, in_channels: int, metabolic: bool = False, memory_size: int = 0):
+        super().__init__(in_channels, in_channels, metabolic, memory_size)
         self.trunk = nn.Identity()
 
     def features(self, observation: torch.Tensor) -> torch.Tensor:
@@ -162,10 +175,10 @@ class ConvActorCritic(ActorCritic):
     """
 
     def __init__(
-        self, in_channels: int, hidden_channels: int = 64, depth: int = 3, num_metabolic_levels: int = 0,
+        self, in_channels: int, hidden_channels: int = 64, depth: int = 3, metabolic: bool = False,
         memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
+        super().__init__(in_channels, hidden_channels, metabolic, memory_size)
         layers = []
         channels = in_channels
         for _ in range(depth):
@@ -229,10 +242,10 @@ class ResidualActorCritic(ActorCritic):
     """
 
     def __init__(
-        self, in_channels: int, hidden_channels: int = 64, blocks: int = 4, num_metabolic_levels: int = 0,
+        self, in_channels: int, hidden_channels: int = 64, blocks: int = 4, metabolic: bool = False,
         memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
+        super().__init__(in_channels, hidden_channels, metabolic, memory_size)
         self.stem = orthogonal_init(nn.Conv2d(in_channels, hidden_channels, 3, padding=1), gain=2.0**0.5)
         self.blocks = nn.Sequential(*[ResidualBlock(hidden_channels) for _ in range(blocks)])
         self.out_norm = ChannelNorm(hidden_channels)
@@ -257,10 +270,10 @@ class DilatedActorCritic(ActorCritic):
         in_channels: int,
         hidden_channels: int = 48,
         dilations: Tuple[int, ...] = (1, 2, 4, 8),
-        num_metabolic_levels: int = 0,
+        metabolic: bool = False,
         memory_size: int = 0,
     ):
-        super().__init__(in_channels, hidden_channels, num_metabolic_levels, memory_size)
+        super().__init__(in_channels, hidden_channels, metabolic, memory_size)
         layers = []
         channels = in_channels
         for dilation in dilations:
@@ -287,11 +300,11 @@ ARCHITECTURES = {
 
 
 def build_network(
-    name: str, in_channels: int, num_metabolic_levels: int = 0, **kwargs
+    name: str, in_channels: int, metabolic: bool = False, **kwargs
 ) -> ActorCritic:
     """Construct a network by name. See ARCHITECTURES for the options.
 
-    ``num_metabolic_levels`` adds the metabolic head (see :class:`ActorCritic`)
+    ``metabolic`` adds the metabolic head (see :class:`ActorCritic`)
     and is passed through to every architecture.
 
     Always built on the CPU, whatever the default device is, and moved by the
@@ -303,4 +316,4 @@ def build_network(
     if name not in ARCHITECTURES:
         raise ValueError(f"Unknown architecture {name!r}. Options: {sorted(ARCHITECTURES)}")
     with torch.device("cpu"):
-        return ARCHITECTURES[name](in_channels, num_metabolic_levels=num_metabolic_levels, **kwargs)
+        return ARCHITECTURES[name](in_channels, metabolic=metabolic, **kwargs)

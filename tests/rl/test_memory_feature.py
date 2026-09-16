@@ -174,26 +174,48 @@ def test_evaluation_writes_memory_like_training_does():
     assert float(env.entity.memory.data[alive].abs().sum()) > 0.0, "evaluation never wrote memory"
 
 
-def test_pinned_metabolic_level_holds_the_throttle_at_basal():
+def test_pinned_metabolic_unit_holds_the_throttle_at_basal():
     from tensor_beasts.rl.ppo import PPOConfig
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     trainer = Trainer(
         TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
                       total_world_steps=0, eval_interval=0, eval_steps=4, eval_seeds=1, checkpoint_interval=0,
-                      device="cpu", eval_pin_metabolic_level=0),
+                      device="cpu", eval_pin_metabolic=0.0),
         PPOConfig(),
     )
     env = trainer._eval_env(0)
-    assert env.num_metabolic_levels >= 2, "pinning needs a level-to-rate mapping"
+    assert env.metabolic_range is not None, "pinning needs a unit-to-rate mapping"
     seen = []
     original = env.step
 
-    def spy(action, metabolic_action=None, memory=None):
-        seen.append(metabolic_action)
-        return original(action, metabolic_action, memory)
+    def spy(action, metabolic_unit=None, memory=None):
+        seen.append(metabolic_unit)
+        return original(action, metabolic_unit, memory)
 
     env.step = spy
     env.reset(seed=1)
     trainer._score(env, 4, "learned")
-    assert all(m is not None and bool((m == 0).all()) for m in seen), "throttle was not pinned to level 0"
+    assert all(m is not None and bool((m == 0.0).all()) for m in seen), "throttle was not pinned to the basal unit"
+
+
+def test_pinning_works_with_more_than_one_evaluation_seed():
+    """Evaluation runs one world per seed, so the pinned field is (B, H, W).
+
+    Built at (H, W) it reshaped into the batched field and raised, which meant
+    pinning only ever worked at eval_seeds=1 and blew up on the multi-seed
+    evaluation every real run uses.
+    """
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+                      total_world_steps=0, eval_interval=0, eval_steps=4, eval_seeds=2,
+                      checkpoint_interval=0, device="cpu", eval_pin_metabolic=0.0),
+        PPOConfig(),
+    )
+    env = trainer._eval_env(2)
+    assert env.field_shape == (2, 32, 32)
+    env.reset(seed=1)
+    trainer._score(env, 3, "learned")

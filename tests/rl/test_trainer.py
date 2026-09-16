@@ -297,7 +297,7 @@ def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_
 
     torch.manual_seed(0)
     trainer = Trainer(
-        TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic_levels=4,
+        TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic=True,
                       warmup_steps=5, segment_steps=16, pretrain_updates=6, total_world_steps=0,
                       eval_interval=0, checkpoint_interval=0, device="cpu", output_dir=str(tmp_path)),
         PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3, imitation_coef=1.0),
@@ -306,7 +306,11 @@ def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_
     trainer.warmup()
     result = trainer.pretrain(verbose=False)
     assert result["argmax_agreement"] > 0.5, f"agreement after pretraining {result['argmax_agreement']:.3f}"
-    assert result["metabolic_agreement"] > 0.5
+    # The throttle is continuous now, so pretraining is scored by how far the
+    # policy's mean sits from the rule's own throttle rather than by how often
+    # it picks the same bin. A fifth of the basal-to-max range is loose, and
+    # deliberately: this checks that the anchor pulls, not how far.
+    assert result["metabolic_error"] < 0.2
     assert trainer.algorithm.conformance == pytest.approx(result["argmax_agreement"])
     assert trainer.world_steps == 6 * 16
 
@@ -477,8 +481,8 @@ def test_unmeasured_and_non_numeric_values_are_not_logged_as_metrics():
         {
             "world_steps": 1024,
             "entropy": 0.58,
-            "metabolic_agreement": float("nan"),
-            "metabolic_level_mean": float("nan"),
+            "metabolic_error": float("nan"),
+            "metabolic_unit_mean": float("nan"),
             "checkpoint": "outputs/rl/checkpoint.pt",
         }
     )

@@ -49,9 +49,10 @@ class Rollout:
     acted: torch.Tensor  # (T, H, W) bool
     action: torch.Tensor  # (T, H, W) int64
     # (T, H, W) float32. When the policy has a metabolic head this is the JOINT
-    # log-probability, direction plus metabolic level, because the two heads
-    # are independent categoricals per cell and the PPO ratio is taken over the
-    # joint action. With no metabolic head it is the direction log-prob alone.
+    # log-probability, direction plus throttle, because the two heads
+    # are independent per cell, a categorical and a Gaussian, and the PPO ratio
+    # is taken over the joint action. With no metabolic head it is the
+    # direction log-prob alone.
     log_prob: torch.Tensor
     value: torch.Tensor  # (T, H, W) float32
     reward: torch.Tensor  # (T, H, W) float32
@@ -72,12 +73,12 @@ class Rollout:
     # (T, H, W) bool, individuals that divided this step. Recurrent training
     # needs it to route an inherited memory copy to the offspring.
     reproduced: Optional[torch.Tensor] = None
-    # (T, H, W) int64, the metabolic level each individual chose, or None when
-    # the policy has no metabolic head.
-    metabolic_action: Optional[torch.Tensor] = None
-    # (T, H, W) int64, the rule's own metabolic rate as the nearest level, or
-    # None. The anchor target for the metabolic head.
-    rule_metabolic_level: Optional[torch.Tensor] = None
+    # (T, H, W) float32 in [0, 1], the normalised throttle each individual
+    # chose, or None when the policy has no metabolic head.
+    metabolic_unit: Optional[torch.Tensor] = None
+    # (T, H, W) float32 in [0, 1], the rule's own metabolic rate in those same
+    # units. The anchor target for the metabolic head.
+    rule_metabolic_unit: Optional[torch.Tensor] = None
 
     @property
     def steps(self) -> int:
@@ -104,8 +105,8 @@ class RolloutBuffer:
         self._rule_action: List[torch.Tensor] = []
         self._rule_scores: List[torch.Tensor] = []
         self._reproduced: List[torch.Tensor] = []
-        self._metabolic_action: List[torch.Tensor] = []
-        self._rule_metabolic_level: List[torch.Tensor] = []
+        self._metabolic_unit: List[torch.Tensor] = []
+        self._rule_metabolic_unit: List[torch.Tensor] = []
 
     def __len__(self) -> int:
         return len(self._observation)
@@ -129,10 +130,10 @@ class RolloutBuffer:
         if batch.rule_scores is not None:
             self._rule_scores.append(batch.rule_scores.detach().to(torch.float16))
         self._reproduced.append(batch.reproduced.detach())
-        if batch.metabolic_action is not None:
-            self._metabolic_action.append(batch.metabolic_action.detach())
-        if batch.rule_metabolic_level is not None:
-            self._rule_metabolic_level.append(batch.rule_metabolic_level.detach())
+        if batch.metabolic_unit is not None:
+            self._metabolic_unit.append(batch.metabolic_unit.detach())
+        if batch.rule_metabolic_unit is not None:
+            self._rule_metabolic_unit.append(batch.rule_metabolic_unit.detach())
 
     def build(self) -> Rollout:
         return Rollout(
@@ -154,14 +155,14 @@ class RolloutBuffer:
                 if len(self._rule_scores) == len(self._successor)
                 else None
             ),
-            metabolic_action=(
-                torch.stack(self._metabolic_action)
-                if len(self._metabolic_action) == len(self._successor)
+            metabolic_unit=(
+                torch.stack(self._metabolic_unit)
+                if len(self._metabolic_unit) == len(self._successor)
                 else None
             ),
-            rule_metabolic_level=(
-                torch.stack(self._rule_metabolic_level)
-                if len(self._rule_metabolic_level) == len(self._successor)
+            rule_metabolic_unit=(
+                torch.stack(self._rule_metabolic_unit)
+                if len(self._rule_metabolic_unit) == len(self._successor)
                 else None
             ),
             reproduced=(
@@ -183,8 +184,8 @@ class RolloutBuffer:
             self._successor,
             self._rule_action,
             self._rule_scores,
-            self._metabolic_action,
-            self._rule_metabolic_level,
+            self._metabolic_unit,
+            self._rule_metabolic_unit,
             self._reproduced,
         ):
             store.clear()
