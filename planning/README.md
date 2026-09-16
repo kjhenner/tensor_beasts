@@ -12,6 +12,8 @@ This directory contains planning and status documents for major feature developm
 | Performance and RL foundation | In progress | [03-performance-and-rl-foundation.md](./03-performance-and-rl-foundation.md) |
 | Reinforcement learning | In progress | [04-reinforcement-learning.md](./04-reinforcement-learning.md) |
 | Project review | Reference | [05-review.md](./05-review.md) |
+| Predator sweep | In progress | [06-predator-sweep.md](./06-predator-sweep.md) |
+| Batched worlds | In progress | [07-batched-worlds.md](./07-batched-worlds.md) |
 
 ## Overview
 
