@@ -465,9 +465,15 @@ def main(argv: Optional[list] = None) -> int:
     print(f"logging to {trainer.log_path}")
     record = trainer.train(verbose=not args.quiet)
 
-    if "learned_total_reward" in record:
+    if "score" in record:
         print()
         print_evaluation(record)
+        if "score_spread" in record:
+            print(
+                f"spread across {trainer_config.eval_seeds} evaluation seeds: "
+                f"{record['score_spread']:.0f} "
+                f"({record['score_min']:.0f} to {record['score_max']:.0f})"
+            )
     return 0
 
 

@@ -1321,6 +1321,26 @@ class Trainer:
                         flush=True,
                     )
 
+        # Always finish on an evaluation. Without this the returned record is
+        # whatever the last segment happened to log, so a run whose final step
+        # was not an evaluation step reports no score at all, and a sweep
+        # reading the summary gets nothing to optimise. Skipped when the
+        # population is already gone, since there is nothing left to score.
+        if self.config.eval_interval and "score" not in record:
+            record.update(self.evaluate())
+            self._record_eval_summary(record)
+            self.log(record)
+            if verbose and "score" in record:
+                # Only the evaluation line: the step line was already printed
+                # for this segment by the loop above.
+                print(
+                    f"    eval  biomass={record['score']:.0f}  "
+                    f"pop={record.get('learned_mean_population', 0):.0f}  "
+                    f"repro={record.get('learned_reproductions', 0):.0f}  "
+                    f"(rules {record.get('rule_based_biomass_ema', 0):.0f})",
+                    flush=True,
+                )
+
         if self.config.checkpoint_interval:
             self.save_checkpoint()
         return record
