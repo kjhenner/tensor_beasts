@@ -349,6 +349,58 @@ will produce an apparent winner by chance alone.
 pair, at the best stage-1 corner, so the commitment in axis 3 is checked rather
 than assumed.
 
+## One world per run: what it does and does not cost
+
+The repo owner asked how individual simulation runs relate to the training
+loop, and whether anything standard is being left on the table. The answer is
+worth writing down because the obvious worry is the wrong one.
+
+**There is one simulation world per training run.** It is reset once and never
+again. The loop collects a segment from it, updates, and collects the next
+segment from the same world. Episodes belong to individual animals, born and
+dying inside that one continuous ecology.
+
+**The policy is exercised after every update, and the loop is strictly
+on-policy.** `collect` calls `act`, which uses the network's current weights,
+so segment N+1 is gathered by the policy that segment N's update produced.
+Measured over the first ten updates of the winning run, agreement with the
+rules moves 0.699 to 0.849 and the population responds 1,069 to 1,619. Stale
+experience is not a failure mode here.
+
+**What the single world does cost is gradient variance, not freshness.** At any
+update the policy faces one point in a boom-and-bust cycle rather than a
+mixture of them. The autocorrelation across segments separates the two effects:
+
+| Quantity | lag 1 | lag 5 | lag 25 |
+|---|---|---|---|
+| `population` | +0.94 | +0.37 | +0.31 |
+| `entropy` | +0.93 | +0.70 | +0.31 |
+| `argmax_agreement` | +0.91 | +0.46 | +0.10 |
+| `approx_kl` | **+0.27** | +0.14 | −0.05 |
+
+The policy-step quantity decorrelates almost immediately, which is what an
+effective on-policy update looks like. The high autocorrelation elsewhere is
+the ecology's own inertia: eight hundred predators cannot become sixteen
+hundred in ninety-six steps under any policy. That is a property of the problem
+rather than a defect in the loop.
+
+**What is left on the table, honestly ranked.** Parallel worlds are the
+standard answer and would reduce the variance of each update by averaging over
+several points of the cycle at once. `rl/envs/vector.py` already implements
+this and is benchmarked at about 4x on CPU, but it wraps the single-controller
+Gymnasium environment rather than `multiagent`, so the trainer that produced
+every result in this project cannot use it. On a GPU the right form is batching
+the world into a leading `(B, H, W)` dimension instead of spawning processes;
+`planning/03` measured that at only 1.7x and judged it not worth an invasive
+refactor, but that judgement was made before this project had a GPU and
+deserves re-measuring.
+
+The case for it is variance reduction, which would plausibly shrink both the
+seed spread and the 16% evaluation noise floor, and that would make every axis
+in this sweep easier to resolve. It is not a case that the current loop is
+broken. Measure the GPU batching speedup on a throwaway branch before
+committing to the refactor: if it is 1.5x rather than 4x it is not worth it.
+
 ## The thing I would not sweep
 
 `survival_reward`, but for a different reason now. Under the current reward it
