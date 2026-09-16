@@ -1,7 +1,7 @@
 > **ARCHIVED**: This document is a pre-implementation assessment from before the
 > registry, config validation, and dependency resolution improvements were implemented.
 > Many issues identified here have been addressed. Retained for historical context.
-> See PLAN.md for implementation status.
+> See 00-stabilization-plan.md for implementation status.
 
 ---
 

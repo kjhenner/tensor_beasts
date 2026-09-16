@@ -16,8 +16,8 @@ rule-based policy, then the ecology does not reward moving, and no amount of
 learning machinery will produce interesting behaviour until that changes.
 
 Usage:
-    source venv/bin/activate && python evaluate_policy.py
-    python evaluate_policy.py --episodes 10 --steps 500 --size 64
+    source venv/bin/activate && python tools/evaluate_policy.py
+    python tools/evaluate_policy.py --episodes 10 --steps 500 --size 64
 """
 
 import argparse

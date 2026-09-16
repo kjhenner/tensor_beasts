@@ -48,7 +48,7 @@ Three terms, all per individual:
 * Its episode ends when it dies.
 
 The metric this is a surrogate for is the one the project actually cares about,
-total herbivore-steps survived, which is what ``evaluate_policy.py`` reports for
+total herbivore-steps survived, which is what ``tools/evaluate_policy.py`` reports for
 the rule-based baseline. Survival reward tracks it directly; reproduction reward
 credits an individual for the future population it creates, which survival
 reward alone would attribute entirely to the offspring.

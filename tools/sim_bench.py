@@ -10,10 +10,10 @@ Two jobs:
   bench   Report steps per second across world sizes and devices.
 
 Usage:
-    source venv/bin/activate && python sim_bench.py golden
-    python sim_bench.py golden --save baseline.json
-    python sim_bench.py golden --check baseline.json
-    python sim_bench.py bench --device cpu --device mps
+    source venv/bin/activate && python tools/sim_bench.py golden
+    python tools/sim_bench.py golden --save baseline.json
+    python tools/sim_bench.py golden --check baseline.json
+    python tools/sim_bench.py bench --device cpu --device mps
 """
 
 import argparse
@@ -158,7 +158,7 @@ def main() -> int:
                 print(
                     f"\nNo baseline recorded for device {device!r}. This file has: "
                     f"{', '.join(sorted(stored['devices'])) if 'devices' in stored else 'one unlabelled device'}."
-                    f"\nCapture one with: python sim_bench.py golden --save {args.check}",
+                    f"\nCapture one with: python tools/sim_bench.py golden --save {args.check}",
                     file=sys.stderr,
                 )
                 return 2

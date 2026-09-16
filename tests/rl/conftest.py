@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ from tensor_beasts.config import load_config
 # Small world so tests stay fast; the config is otherwise the real one used by
 # the simulation, so a config/entity refactor will surface here.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# The repository's command-line tools live in tools/ rather than at the root, so
+# that the root holds the package, the configs and one entry point. They are
+# scripts rather than an installed package, so a test that exercises one has to
+# put that directory on the path itself.
+sys.path.insert(0, str(PROJECT_ROOT / "tools"))
 ENV_CONFIG_PATH = str(PROJECT_ROOT / "conf" / "base" / "simulation.yaml")
 ENV_SIZE = (16, 16)
 ENV_MAX_STEPS = 8

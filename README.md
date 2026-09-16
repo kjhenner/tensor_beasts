@@ -79,16 +79,16 @@ Display renderers must be explicit:
 
 ## Development tools
 
-Three scripts at the repository root, all of which take `--help`:
+In `tools/`, all of which take `--help` and are run from the repository root:
 
 ```bash
-python sim_bench.py golden        # hash world state; proves a change is behaviour-preserving
-python sim_bench.py bench         # steps per second by world size and device
-python evaluate_policy.py         # score a policy on herbivore survival
-python sim_diagnostics.py         # per-step ecosystem stats
+python tools/sim_bench.py golden        # hash world state; proves a change is behaviour-preserving
+python tools/sim_bench.py bench         # steps per second by world size and device
+python tools/evaluate_policy.py         # score a policy on herbivore survival
+python tools/sim_diagnostics.py         # per-step ecosystem stats
 ```
 
-`sim_bench.py golden --check baseline_golden.json` exits non-zero if simulation
+`tools/sim_bench.py golden --check baseline_golden.json` exits non-zero if simulation
 behaviour has drifted. Run it before and after any change meant to be a pure
 refactor or optimization. When a hash is *supposed* to move, re-capture the
 baseline in its own commit and say why, so behaviour changes stay visible in
@@ -104,8 +104,8 @@ python train_rl.py                          # train, then score against the base
 python train_rl.py --arch dilated --size 512
 python train_rl.py --eval-only outputs/rl/checkpoint.pt
 python train_rl.py --metabolic-levels 4     # learn the metabolic rate as well as the direction
-python sweep_rl.py --trials 16              # parallel hyperparameter search
-python evaluate_policy.py --size 512        # score the baseline on its own
+python tools/sweep_rl.py --trials 16              # parallel hyperparameter search
+python tools/evaluate_policy.py --size 512        # score the baseline on its own
 ```
 
 **Every living herbivore is its own agent**, all sharing one set of policy
@@ -161,6 +161,26 @@ to change the herbivore conclusion, since a herbivore's food is plants and
 plants barely move, but both are reasons to re-measure before quoting. The
 timing bug was fatal for the predator, which hunts food that moves: see
 `planning/04-reinforcement-learning.md`.
+
+### Sweeps
+
+`conf/sweeps/` holds W&B sweep configs for the predator work, staged so that
+each stage's result decides whether the next is worth running:
+
+```bash
+wandb sweep --project tensor-beasts-rl conf/sweeps/stage0-release.yaml
+wandb agent <sweep-id>
+```
+
+`stage0-release` lets the imitation anchor go, which every previous run held on;
+`stage1-screen` searches architecture, entropy and learning rate;
+`stage2-lineage-reward` replaces the hand-weighted reward with biomass plus a
+share of the offspring's. The reasoning behind every axis, and what would
+falsify each, is in `planning/06-predator-sweep.md`.
+
+They optimise `eval/ratio_mean_late` rather than the last evaluation, because
+the metric's noise floor is 16% across evaluation seeds and one evaluation is a
+single sample of it.
 
 ### Logging
 

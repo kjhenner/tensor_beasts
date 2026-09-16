@@ -5,9 +5,9 @@ Runs many short training runs in parallel and ranks them by the only number
 that matters: the learned policy's return divided by the rule-based policy's
 return, scored on the same seeds.
 
-    source venv/bin/activate && python sweep_rl.py --trials 16
-    python sweep_rl.py --grid --workers 4
-    python sweep_rl.py --report sweeps/sweep_20260911.json
+    source venv/bin/activate && python tools/sweep_rl.py --trials 16
+    python tools/sweep_rl.py --grid --workers 4
+    python tools/sweep_rl.py --report sweeps/sweep_20260911.json
 
 Random search rather than grid search by default. With this many interacting
 hyperparameters a grid spends most of its budget varying things that do not

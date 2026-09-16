@@ -62,7 +62,7 @@ class TrainerConfig:
         entity: Which entity the policy controls.
         survival_reward: Reward per step an individual stays alive. Leave at 1
             so that the summed reward is literally herbivore-steps survived,
-            the number ``evaluate_policy.py`` reports.
+            the number ``tools/evaluate_policy.py`` reports.
         reproduction_reward: Reward for dividing.
         foraging_reward: Reward per unit of biomass an individual gains in a
             step. Dense and action-dependent, unlike survival, which is nearly

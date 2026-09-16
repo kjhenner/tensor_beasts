@@ -239,7 +239,7 @@ def main():
     results.sort(key=lambda x: x["metrics"].get("score", 0), reverse=True)
 
     # Save full results
-    output_path = Path("grid_search_results.json")
+    output_path = Path("tools/grid_search_results.json")
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Full results saved to {output_path}")

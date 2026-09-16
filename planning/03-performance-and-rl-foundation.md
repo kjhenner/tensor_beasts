@@ -30,7 +30,7 @@ the README wishlist stay parked until that baseline exists.
 
 ### Verification is a harness, not a vibe
 
-`sim_bench.py golden` hashes full world state after a fixed number of steps
+`tools/sim_bench.py golden` hashes full world state after a fixed number of steps
 from a fixed seed. Every performance change in this session was required to
 reproduce the previous hash byte for byte, and `--check` exits non-zero on
 drift. `baseline_golden.json` is the committed reference.
@@ -220,7 +220,7 @@ default is still a trap worth removing.
 
 ## The baseline to beat
 
-`evaluate_policy.py` scores a policy through the environment's own reward,
+`tools/evaluate_policy.py` scores a policy through the environment's own reward,
 termination and truncation rules. Eight episodes, `conf/base/simulation.yaml`,
 128 x 128, 600 steps:
 

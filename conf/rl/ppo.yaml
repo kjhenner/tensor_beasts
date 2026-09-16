@@ -15,7 +15,7 @@ trainer:
   entity: Herbivore
 
   # survival_reward 1.0 makes the summed reward literally "herbivore-steps
-  # survived", which is the number evaluate_policy.py reports for the baseline.
+  # survived", which is the number tools/evaluate_policy.py reports for the baseline.
   survival_reward: 1.0
   reproduction_reward: 10.0
   # Dense biomass-change reward. Off by default: it is reward shaping. Turn it

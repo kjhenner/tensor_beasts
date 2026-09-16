@@ -84,7 +84,7 @@ Survival plus reproduction, per individual:
 - The individual's episode ends when it dies.
 
 The metric being approximated is total herbivore-steps survived, which is what
-`evaluate_policy.py` reports for the baseline. Survival reward tracks that
+`tools/evaluate_policy.py` reports for the baseline. Survival reward tracks that
 directly. Reproduction reward credits an individual for the future population
 it creates, which survival reward alone would attribute entirely to the
 offspring. The ratio between the two is the main thing to tune: too low and
@@ -1260,7 +1260,7 @@ not been done.
    herbivore-steps survived, which is legitimate and standard.
 2. **Sweep the reproduction-to-survival ratio.** Reproduction is rare, around
    0.7% of agent-steps, and is the only part of the current reward with real
-   variance. `sweep_rl.py` varies it from 0 to 30.
+   variance. `tools/sweep_rl.py` varies it from 0 to 30.
 3. **Fix the critic before blaming the policy.** Explained variance peaks around
    0.2. Until the critic can predict return, every advantage is mostly noise and
    no policy-gradient method will do better than drift.
