@@ -21,10 +21,17 @@
 program: train_rl.py
 method: grid
 metric:
-  # The level the policy settled at, not the last noisy draw. The metric's
-  # noise floor across evaluation seeds is 16%, so a single evaluation is one
-  # sample of it; this averages the second half of a run's evaluations.
-  name: eval/ratio_mean_late
+  # Smoothed total biomass of the controlled entity, averaged over the second
+  # half of a run's evaluations.
+  #
+  # Biomass rather than a ratio against the rule-based policy: that policy's
+  # constants were hand-chosen, so dividing by its score made every result a
+  # statement about those constants. It is still scored and reported, as
+  # context rather than as a denominator.
+  #
+  # Averaged over the later evaluations rather than taken from the last one,
+  # because a single evaluation is one draw from a noisy metric.
+  name: eval/score_mean_late
   goal: maximize
 
 parameters:

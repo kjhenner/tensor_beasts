@@ -185,11 +185,11 @@ class TrainerConfig:
 # Metrics that are only produced on an evaluation step, grouped so they form
 # their own sparse series instead of gaps in a dense one.
 _EVAL_PREFIXES = ("learned_", "rule_based_")
-_EVAL_KEYS = frozenset({"learned_over_rule_based"})
+_EVAL_KEYS = frozenset({"learned_over_rule_based", "biomass_over_rule_based", "score"})
 # Run-level summaries of the ratio, computed across evaluations. A sweep should
 # optimise eval/ratio_mean_late rather than the last value; see
 # Trainer._record_eval_summary.
-_EVAL_SUMMARY_PREFIX = "eval_ratio_"
+_EVAL_SUMMARY_PREFIX = "eval_score_"
 # Metrics produced on a film step.
 _FILM_PREFIX = "film_"
 
@@ -391,12 +391,44 @@ class EpisodeTracker:
 
 @dataclass
 class EvalResult:
-    """What one scored run of a policy produced."""
+    """What one scored run of a policy produced.
 
-    total_reward: float
-    survived_agent_steps: float
-    reproductions: float
+    The headline is ``biomass_ema``: the controlled entity's total carried
+    biomass, exponentially smoothed over the run. It is a physical quantity
+    with a unit, measurable without reference to any other policy.
+
+    What it replaced was a ratio against the hand-written rule-based policy,
+    and the reason is that the denominator was arbitrary. That policy's
+    navigation weights, metabolic sensitivity and log scale were all chosen by
+    hand, so dividing by its score made every result a statement about those
+    particular constants. This document's own record contains a case of that
+    going wrong: the throttle finding looked like a discovery about metabolism
+    and turned out to be integer truncation in the baseline. The ratio moved
+    because the denominator was broken.
+
+    Worse, the baseline is not a fixed reference. Predators and herbivores
+    share a world, so changing the learned predator changes the prey
+    population, which changes what the rule-based predator would have scored.
+    The denominator moved in response to the numerator.
+
+    Biomass rather than population count because it is what the ecology
+    actually conserves: an individual carries biomass, eats it, burns it and
+    halves it into its offspring. A population count weights a starving animal
+    about to die the same as a thriving one about to divide.
+
+    Smoothed rather than averaged because the predator-prey cycle swings by a
+    factor of four within a single run, so a plain mean is dominated by which
+    phase the window happened to catch. The EMA weights recent state more
+    heavily and settles toward the level the policy sustains.
+    """
+
+    biomass_ema: float
+    mean_biomass: float
+    final_biomass: float
     mean_population: float
+    reproductions: float
+    survived_agent_steps: float
+    total_reward: float
     episode_return: float
     episode_length: float
     episodes_finished: float
@@ -682,6 +714,13 @@ class Trainer:
         survived = 0.0
         reproductions = 0.0
         populations: List[float] = []
+        biomasses: List[float] = []
+        # Smoothing constant for the headline. 2/(N+1) with N the window, so
+        # this is a 100-step window: long enough that a single boom or crash
+        # does not set the number, short enough that the last quarter of the
+        # run dominates it, which is the level the policy actually sustains.
+        ema_alpha = 2.0 / (100.0 + 1.0)
+        biomass_ema: Optional[float] = None
 
         for _ in range(steps):
             if policy == "rule_based":
@@ -716,12 +755,22 @@ class Trainer:
             reproductions += float(batch.reproduced.sum())
             populations.append(float(env.population()))
 
+            # Total carried biomass, the quantity the ecology conserves.
+            carried = float(env.entity.biomass.data.sum())
+            biomasses.append(carried)
+            biomass_ema = carried if biomass_ema is None else (
+                ema_alpha * carried + (1.0 - ema_alpha) * biomass_ema
+            )
+
         summary = tracker.summary()
         return EvalResult(
-            total_reward=total_reward,
-            survived_agent_steps=survived,
-            reproductions=reproductions,
+            biomass_ema=float(biomass_ema or 0.0),
+            mean_biomass=sum(biomasses) / max(len(biomasses), 1),
+            final_biomass=biomasses[-1] if biomasses else 0.0,
             mean_population=sum(populations) / max(len(populations), 1),
+            reproductions=reproductions,
+            survived_agent_steps=survived,
+            total_reward=total_reward,
             episode_return=summary["episode_return"],
             episode_length=summary["episode_length"],
             episodes_finished=summary["episodes_finished"],
@@ -756,13 +805,24 @@ class Trainer:
         summary = {
             key: (sum(values) / len(values)) for key, values in results.items()
         }
-        # The headline ratio is defined on herbivore-steps survived, never on
-        # total reward. Reward may be shaped (foraging_reward makes it signed),
-        # and a sweep once reported ratios of -0.72 because this divided shaped
-        # rewards. What is optimized may change; what is judged must not.
+        # The headline is the learned policy's own smoothed biomass, an absolute
+        # quantity in the units the ecology conserves. It replaced a ratio
+        # against the rule-based policy, whose constants were hand-chosen, so
+        # every result was a statement about those constants rather than about
+        # the ecology; see EvalResult for the full argument.
+        summary["score"] = summary.get("learned_biomass_ema", 0.0)
+
+        # The baseline is still scored and reported, as context rather than as
+        # a divisor. The ratio is kept because it is what every result recorded
+        # before this change is quoted in, so the record stays readable, but it
+        # is no longer what a sweep optimises.
         baseline = summary.get("rule_based_survived_agent_steps", 0.0)
         summary["learned_over_rule_based"] = (
             summary.get("learned_survived_agent_steps", 0.0) / baseline if baseline else float("nan")
+        )
+        biomass_baseline = summary.get("rule_based_biomass_ema", 0.0)
+        summary["biomass_over_rule_based"] = (
+            summary["score"] / biomass_baseline if biomass_baseline else float("nan")
         )
         return summary
 
@@ -880,17 +940,17 @@ class Trainer:
         evaluations is the only lever that beats the noise floor without more
         seeds. ``eval/ratio_last`` is kept for continuity.
         """
-        ratio = record.get("learned_over_rule_based")
-        if not isinstance(ratio, (int, float)) or ratio != ratio:
+        score = record.get("score")
+        if not isinstance(score, (int, float)) or score != score:
             return
-        self._eval_ratios.append((int(self.world_steps), float(ratio)))
+        self._eval_ratios.append((int(self.world_steps), float(score)))
 
-        ratios = [value for _, value in self._eval_ratios]
-        late = ratios[len(ratios) // 2:] or ratios
-        record["eval_ratio_best"] = max(ratios)
-        record["eval_ratio_mean_late"] = sum(late) / len(late)
-        record["eval_ratio_last"] = ratios[-1]
-        record["eval_count"] = float(len(ratios))
+        scores = [value for _, value in self._eval_ratios]
+        late = scores[len(scores) // 2:] or scores
+        record["eval_score_best"] = max(scores)
+        record["eval_score_mean_late"] = sum(late) / len(late)
+        record["eval_score_last"] = scores[-1]
+        record["eval_count"] = float(len(scores))
 
     def _film_display_config(self, load_config):
         """The display entry the films render through, or None if it is absent."""
@@ -1204,11 +1264,13 @@ class Trainer:
             self.log(record)
             if verbose:
                 print(self.format_record(record), flush=True)
-                if "learned_total_reward" in record:
+                if "score" in record:
                     print(
-                        f"    eval  learned={record['learned_total_reward']:.0f}  "
-                        f"rule_based={record['rule_based_total_reward']:.0f}  "
-                        f"ratio={record['learned_over_rule_based']:.3f}",
+                        f"    eval  biomass={record['score']:.0f}  "
+                        f"pop={record.get('learned_mean_population', 0):.0f}  "
+                        f"repro={record.get('learned_reproductions', 0):.0f}  "
+                        f"lifespan={record.get('learned_episode_length', 0):.1f}  "
+                        f"(rules {record.get('rule_based_biomass_ema', 0):.0f})",
                         flush=True,
                     )
 

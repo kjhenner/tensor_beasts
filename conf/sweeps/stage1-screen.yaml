@@ -14,7 +14,7 @@
 program: train_rl.py
 method: grid
 metric:
-  name: eval/ratio_mean_late
+  name: eval/score_mean_late
   goal: maximize
 
 parameters:

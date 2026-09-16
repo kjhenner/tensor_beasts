@@ -335,22 +335,29 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def print_evaluation(summary: Dict[str, float]) -> None:
-    header = f"{'policy':12} {'return':>12} {'survived':>12} {'repro':>10} {'pop':>9} {'ep_ret':>9} {'ep_len':>9}"
+    """The ecology, with smoothed biomass as the headline.
+
+    The rule-based policy is reported as one row among the numbers rather than
+    as a denominator: its constants were chosen by hand, so a ratio against it
+    describes those constants as much as the ecology.
+    """
+    header = (
+        f"{'policy':12} {'biomass':>11} {'mean bio':>11} {'pop':>9} "
+        f"{'repro':>8} {'lifespan':>9} {'survived':>12}"
+    )
     print(header)
     print("-" * len(header))
     for policy, label in (("learned", "learned"), ("rule_based", "rule-based")):
         print(
             f"{label:12} "
-            f"{summary[f'{policy}_total_reward']:12.0f} "
-            f"{summary[f'{policy}_survived_agent_steps']:12.0f} "
-            f"{summary[f'{policy}_reproductions']:10.0f} "
+            f"{summary[f'{policy}_biomass_ema']:11.0f} "
+            f"{summary[f'{policy}_mean_biomass']:11.0f} "
             f"{summary[f'{policy}_mean_population']:9.1f} "
-            f"{summary[f'{policy}_episode_return']:9.1f} "
-            f"{summary[f'{policy}_episode_length']:9.1f}"
+            f"{summary[f'{policy}_reproductions']:8.0f} "
+            f"{summary[f'{policy}_episode_length']:9.1f} "
+            f"{summary[f'{policy}_survived_agent_steps']:12.0f}"
         )
-    print(f"\nlearned / rule-based = {summary['learned_over_rule_based']:.3f}x")
-    if summary["learned_over_rule_based"] < 1.0:
-        print("The learned policy has not beaten the baseline.")
+    print(f"\nscore (smoothed biomass) = {summary['score']:.0f}")
 
 
 def check_device_headroom(trainer, estimate: int) -> None:

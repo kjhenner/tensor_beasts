@@ -11,7 +11,7 @@ Two trials, the imitation floor at zero:
 
 | | Anchored, floor 0.3 | Released, target 0.8 | Released, target 0.95 |
 |---|---|---|---|
-| `eval/ratio_mean_late` | 1.064 | **1.116** | 1.025 |
+| ratio against the rules | 1.064 | **1.116** | 1.025 |
 
 **The anchor was suppressing the result, not protecting it.** Releasing it does
 not regress, and the looser target does better, which is consistent: less pull
@@ -20,6 +20,38 @@ against a 16% noise floor is a sign, not a measurement, but the sign is what
 stage 0 existed to establish. `imitation_floor: 0` is now a commitment, and
 `imitation_target` stays in the grid at {0.8, 0.95} because stage 0 hints the
 two differ and cannot show it.
+
+## The metric changed: smoothed biomass, not a ratio
+
+Stage 0's numbers above are ratios against the rule-based policy, which is what
+every result in this project has been quoted in. That is no longer the headline,
+and the reason is that the denominator was arbitrary.
+
+The rule-based policy's navigation weights, metabolic sensitivity and log scale
+were chosen by hand. Dividing by its score made every result a statement about
+those particular constants, and `planning/04` already contains a case of that
+going wrong: the throttle finding looked like a discovery about metabolism and
+turned out to be integer truncation in the baseline. The ratio moved because
+the denominator was broken. Worse, the baseline is not a fixed reference at all,
+since predators and herbivores share a world: changing the learned predator
+changes the prey population, which changes what the rule-based predator would
+have scored. The denominator responded to the numerator.
+
+**The headline is now `score`: the controlled entity's total carried biomass,
+exponentially smoothed over the run**, in the units the ecology conserves.
+Biomass rather than a population count because the ecology conserves it, and a
+count weights a starving animal about to die the same as a thriving one about
+to divide. Smoothed over a 100-step window rather than averaged because the
+predator-prey cycle swings by a factor of four inside one run, so a plain mean
+mostly reports which phase the window caught.
+
+Reported alongside it, as the ecology rather than as a score: mean and final
+biomass, mean population, reproductions, lifespan, survived agent-steps. The
+rule-based policy is still run and still reported, as one row of context. The
+old ratio is still computed so the existing record stays readable, but nothing
+optimises it.
+
+Sweeps target `eval/score_mean_late`.
 
 ## The thing that must be fixed before any sweep runs
 
