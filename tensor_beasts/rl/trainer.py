@@ -1037,12 +1037,27 @@ class Trainer:
 
         for update in range(updates):
             batches = [self.env.rule_based_step() for _ in range(steps)]
-            observations = torch.stack([policy_input(b.observation) for b in batches])
-            acted = torch.stack([b.acted for b in batches])
-            rule_action = torch.stack([b.rule_action for b in batches])
-            rule_scores = torch.stack([b.rule_scores for b in batches]) if batches[0].rule_scores is not None else None
+
+            def stacked(select):
+                """Stack a field over the segment, folding worlds into the batch.
+
+                Each field is (H, W) or (B, H, W), so stacking gives (T, H, W)
+                or (T, B, H, W). The convolution wants one batch axis, and a
+                timestep and a world are both just independent samples for a
+                supervised fit, so the two fold together. Same rule as the RL
+                minibatch iterator in ppo.py.
+                """
+                stack = torch.stack([select(b) for b in batches])
+                if self.env.num_worlds == 1:
+                    return stack
+                return stack.reshape(stack.shape[0] * self.env.num_worlds, *stack.shape[2:])
+
+            observations = stacked(lambda b: policy_input(b.observation))
+            acted = stacked(lambda b: b.acted)
+            rule_action = stacked(lambda b: b.rule_action)
+            rule_scores = stacked(lambda b: b.rule_scores) if batches[0].rule_scores is not None else None
             rule_level = (
-                torch.stack([b.rule_metabolic_level for b in batches])
+                stacked(lambda b: b.rule_metabolic_level)
                 if batches[0].rule_metabolic_level is not None else None
             )
             self.world_steps += steps

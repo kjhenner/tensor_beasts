@@ -412,6 +412,7 @@ def main(argv: Optional[list] = None) -> int:
         observation_channels=trainer.env.observation_channels,
         height=trainer_config.size,
         width=trainer_config.size,
+        worlds=trainer_config.worlds,
     )
     print(f"estimated peak memory {format_bytes(estimate)}")
     check_device_headroom(trainer, estimate)

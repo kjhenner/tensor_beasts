@@ -87,11 +87,20 @@ def estimate_training_bytes(
     observation_channels: int,
     height: int,
     width: int,
+    worlds: int = 1,
 ) -> int:
-    """Rough peak resident bytes for one training process."""
+    """Rough peak resident bytes for one training process.
+
+    ``worlds`` multiplies both terms, and it multiplies them hard: the stored
+    rollout is one observation per step per world, so four worlds over a
+    96-step segment at 512 is 5.8 GB of float16 before the backward pass adds
+    anything. A run that forgets this dies partway through with a CUDA
+    out-of-memory pointing at whatever allocation happened to be last.
+    """
+    worlds = max(1, int(worlds))
     return estimate_activation_bytes(
-        network, minibatch_steps, height, width
-    ) + estimate_rollout_bytes(segment_steps, observation_channels, height, width)
+        network, minibatch_steps * worlds, height, width
+    ) + estimate_rollout_bytes(segment_steps * worlds, observation_channels, height, width)
 
 
 def total_system_bytes() -> Optional[int]:
