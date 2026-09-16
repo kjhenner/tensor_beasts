@@ -401,6 +401,69 @@ in this sweep easier to resolve. It is not a case that the current loop is
 broken. Measure the GPU batching speedup on a throwaway branch before
 committing to the refactor: if it is 1.5x rather than 4x it is not worth it.
 
+## Stage 0 result: the anchor was holding the policy back
+
+Two trials, floor at zero, everything else committed. Against the anchored
+run's 1.064x best:
+
+| | Anchored, floor 0.3 | Released, target 0.8 | Released, target 0.95 |
+|---|---|---|---|
+| Best ratio | 1.064 | **1.116** | 1.039 |
+| Mean anchor weight | 0.300, pinned | 0.086 | 0.148 |
+| Agreement at the end | 0.901 | 0.813 | 0.864 |
+
+**The released policy does not regress; it improves.** The anchor genuinely
+fades now, mean weight 0.086 against a constant 0.300, and agreement with the
+rules falls to 0.81 as the policy departs from them. The repo owner's call was
+the right one: the floor was suppressing the result, not protecting it.
+
+The looser target wins, which is the opposite of what a floor-like mechanism
+would predict and is consistent with the same reading: less pull toward the
+rules is better once the observation timing is fixed. Two trials at a 16% noise
+floor is not a claim, and 1.116 against 1.064 is well inside it. What the stage
+establishes is the sign: releasing is safe, so stage 1 is worth running.
+
+Both runs reached their full 6,000 steps with no extinction.
+
+## The parallel-worlds measurement
+
+The owner's framing: each update should draw on decorrelated worlds, or what is
+learned in a boom is unlearned in a bust. This is standard practice, PPO's own
+reference implementations run 8 to 128 environments, and this project runs one.
+Before committing to the refactor that would give the trainer a batched
+`(B, H, W)` world, the question is whether the hardware has room.
+
+Measured on the 3090 with independent 512 worlds in separate processes, which
+needs no code change and is a lower bound on what batching would achieve, since
+a batched world avoids the duplicate kernel launches N processes pay:
+
+| Workers | Total steps/s | Scaling | Marginal gain |
+|---|---|---|---|
+| 1 | 66.1 | 1.00x | |
+| 2 | 116.0 | 1.76x | +50.0 per world |
+| 4 | 168.3 | 2.55x | +26.1 per world |
+| 8 | 192.0 | 2.91x | +5.9 per world |
+
+Peak memory is 0.14 GB per world, so memory is not the constraint on a 24 GB
+card; contention is.
+
+**The verdict is that a second world costs 12% of throughput rather than 100%,
+and four cost about 36%.** That is cheap enough to be worth having. Beyond four
+the returns collapse: the eighth world buys almost nothing, so the card is
+saturated somewhere between four and eight. Four is the number to build for.
+
+Why the card saturates at all, given a 512 world uses 0.14 GB: the simulation is
+74% of a collection step, 14.7 ms against the network's 5.3 ms, and it is many
+small kernels over a 512x512 grid rather than a few large ones. That is
+launch-bound work, which is exactly what a batch dimension fixes and what extra
+processes cannot. So the measured 2.55x at four processes is a floor on what a
+batched world would give, and the real figure is plausibly better.
+
+This supersedes `planning/03`'s judgement that batching was worth only 1.7x and
+not worth an invasive refactor. That was measured on CPU, before this project
+had a GPU, and the reasoning it gave, that the work is memory-bandwidth bound
+at these sizes, does not hold here.
+
 ## The thing I would not sweep
 
 `survival_reward`, but for a different reason now. Under the current reward it
