@@ -34,6 +34,18 @@ from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
 DEFAULT_CONFIG = "conf/rl/ppo.yaml"
 
+# Reward presets, for --reward-mode. The four reward terms are not independent
+# axes: the offspring credit is denominated in biomass, so under the classic
+# reward, whose scale is about one per step, a credit of fifty per division
+# would swamp everything else. Sweeping the terms separately would spend most
+# of a grid on combinations like that. A mode names each coherent reward once.
+REWARD_MODES = {
+    "classic": dict(survival_reward=1.0, reproduction_reward=10.0, foraging_reward=0.02, offspring_credit=0.0),
+    "biomass": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.0),
+    "biomass-0.5": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.5),
+    "biomass-1.0": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=1.0),
+}
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -58,6 +70,19 @@ def build_parser() -> argparse.ArgumentParser:
             "action-dependent, unlike survival, which sits near 99.4%% per step "
             "and so carries almost no signal. Reward shaping: it changes what is "
             "optimized, never what is evaluated."
+        ),
+    )
+    world.add_argument(
+        "--reward-mode",
+        default=None,
+        choices=sorted(REWARD_MODES),
+        help=(
+            "Set the whole reward as one unit, so a sweep can cross it with other "
+            "axes. classic: survival 1, reproduction 10, foraging 0.02, the reward "
+            "every result before the lineage work used. biomass: foraging 1.0 and "
+            "nothing else, so biomass is the entire signal. biomass-0.5 and "
+            "biomass-1.0: the same plus that fraction of each offspring's biomass "
+            "credited to its parent. Explicit --survival-reward etc. still win."
         ),
     )
     world.add_argument(
@@ -309,6 +334,8 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "recurrent_window": args.recurrent_window,
     }
 
+    if args.reward_mode is not None:
+        trainer.update(REWARD_MODES[args.reward_mode])
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})
     ppo.update({k: v for k, v in ppo_flags.items() if v is not None})
 

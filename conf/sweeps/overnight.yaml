@@ -1,0 +1,134 @@
+# The overnight sweep: one grid, four axes, 32 trials, unattended.
+#
+#   wandb sweep --project tensor-beasts-rl conf/sweeps/overnight.yaml
+#   wandb agent <sweep-id>          # a second agent in another shell is fine
+#
+# Every axis here is one where the argument for each value is written down and
+# the values are few enough that each level is averaged over 16 trials. That is
+# what a full factorial buys against this metric's noise: a single trial's
+# score has a standard error of roughly 6% at 16 evaluation seeds, so two
+# trials that differ by less than that are the same trial, but a main effect
+# averaged over 16 trials is resolvable at a couple of percent. Read the sweep
+# by axis marginals, not by the winning cell.
+#
+# Committed rather than swept, with the measurement that committed each:
+#   worlds 4, segment 32, minibatch 2   stage A: four worlds cut median approx_kl
+#                                        0.00704 -> 0.00483 over the same 170
+#                                        updates, and the shorter segment cost
+#                                        nothing measurable
+#   imitation-floor 0                    stage 0: released, the policy improved
+#                                        (1.116x vs 1.064x anchored); the floor
+#                                        was suppressing the result
+#   gamma 0.997                          a predator lives ~81 steps; at 0.99 the
+#                                        back half of its life carried 0.44 weight
+#   entropy-coef 0.002                   the policy already commits ~88% to one
+#                                        direction; the effect is below the noise
+#   steps 5760                           same as stage A, so its worlds=4 run is a
+#                                        comparable 33rd point (conv, classic,
+#                                        lr 3e-4, target 0.95): score 8,849
+
+program: train_rl.py
+method: grid
+metric:
+  # Smoothed total biomass of the predator population, averaged over the later
+  # evaluations of a run. Absolute, in the units the ecology conserves; not a
+  # ratio against the hand-tuned rule-based policy, whose constants would
+  # otherwise be baked into every result. The rules are still scored and
+  # reported alongside as context.
+  name: eval/score_mean_late
+  goal: maximize
+
+parameters:
+  # THE QUESTION. classic is the three-term reward every earlier result used:
+  # survival 1, reproduction 10, foraging 0.02. Measured, survival is 90% of it
+  # and fires on 98.9% of steps, so it is nearly a constant; reproduction, which
+  # is what the population integrates, is 10%. biomass makes what the ecology
+  # conserves the entire signal. The credit variants pay a parent that fraction
+  # of its offspring's biomass at birth, because division halves the parent's
+  # biomass and a pure biomass reward is otherwise maximised by never dividing.
+  # biomass with credit 0 is the control that says whether the credit does
+  # anything. A mode rather than four separate axes because the terms are not
+  # independent: a biomass-scale credit under the classic reward would swamp it.
+  reward-mode:
+    values: [classic, biomass, biomass-0.5, biomass-1.0]
+
+  # Every result so far used conv, a 7-cell receptive field on three smooth
+  # diffused scent gradients, which is the same keyhole the rule-based policy
+  # looks through. dilated reads 31 cells for fewer parameters (76k vs 92k) and
+  # is the first network here that can see a gradient the rules structurally
+  # cannot. Pretraining is architecture-agnostic; whether dilated FITS the
+  # rules' labels as well as conv is not known and this is where we find out.
+  # residual is left out: 315k parameters, estimated 23.6 GB at four worlds
+  # against ~20 GB free, refused before it starts.
+  arch:
+    values: [conv, dilated]
+
+  # Median approx_kl at four worlds was 0.0048 against a target-kl of 0.02 and
+  # the early stop almost never fired: about 4x of unused movement budget.
+  # target-kl stays as the safety net if 1e-3 overshoots.
+  lr:
+    values: [0.0003, 0.001]
+
+  # When the anchor lets go. Pretraining reaches ~0.93 agreement, so at 0.8 the
+  # anchor is already released when RL begins; at 0.95 it holds through the
+  # first updates and then fades. Stage 0 favoured 0.8 (1.116x vs 1.025x) on
+  # two trials, which is a hint and not a result. This resolves it.
+  imitation-target:
+    values: [0.8, 0.95]
+
+  # --- committed ---
+  worlds:
+    value: 4
+  segment-steps:
+    value: 32
+  minibatch-steps:
+    value: 2
+  gamma:
+    value: 0.997
+  imitation-floor:
+    value: 0.0
+  imitation-coef:
+    value: 1.0
+  entropy-coef:
+    value: 0.002
+  target-kl:
+    value: 0.02
+  epochs:
+    value: 2
+  pretrain-updates:
+    value: 10
+  steps:
+    value: 5760
+  entity:
+    value: Predator
+  size:
+    value: 512
+  # A bare "cuda" picks the card with the most free memory, not cuda:0, because
+  # PCI_BUS_ID and FASTEST_FIRST ordering disagree about which card that is.
+  device:
+    value: cuda
+  # 16 seeds is ~71 s and ~9 GB at 512, and it is the peak allocation of a
+  # trial. Lower this first if a run does not fit. The spread across seeds is
+  # reported beside the score, so every trial carries its own error bar.
+  eval-seeds:
+    value: 16
+  eval-interval:
+    value: 1440
+  eval-steps:
+    value: 400
+  checkpoint-interval:
+    value: 2880
+  # One film at the end of each trial: two individuals, one from the typical
+  # band of the return distribution and one from the top decile, logged to W&B.
+  # Snapshots live on the CPU and the film env is a single world, so it costs
+  # seconds and no GPU memory.
+  film-interval:
+    value: 5760
+  seed:
+    value: 0
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}

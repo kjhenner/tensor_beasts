@@ -909,7 +909,10 @@ class Trainer:
             if display_config is None:
                 return {}
 
-            env = self._make_env()
+            # One world, whatever the training batch is: a film follows one
+            # individual through one ecology, and the tracker, the snapshots and
+            # the crop all address a single (H, W) grid.
+            env = self._make_env(worlds=1)
             env.reset(seed=self.config.seed + 20_000 if seed is None else seed)
             tracker = IndividualTracker(env.size, self.device)
             tracker.begin(env._alive())
