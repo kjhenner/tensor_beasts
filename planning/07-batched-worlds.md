@@ -153,5 +153,43 @@ B=8 is where the card saturates, at 23.4 ms a step for 4.26x, which agrees with
 the process experiment finding the knee between four and eight. **Four is the
 number to train at.**
 
-Gate 3, a learned policy training on a batched world, is the remaining work: the
-trainer and `MultiAgentWorldEnv` still assume one world.
+## Gate 3: training across worlds, and the number that is smaller than it looks
+
+The trainer takes `--worlds N`. The first epoch of a batched update has unit
+PPO ratio, which is this codebase's standard correctness check and only holds
+if the update sees exactly what collection saw.
+
+Measured at 512 on the 3090, one segment of 32 steps, two epochs, minibatch 4:
+
+| Worlds | Collect | Update | Total | Agent-steps/s |
+|---|---|---|---|---|
+| 1 | 0.67s | 0.76s | 1.43s | 4,797 |
+| 2 | 0.76s | 1.39s | 2.15s | 6,998 |
+| 4 | 1.07s | 2.68s | 3.75s | 7,952 |
+
+**Collection batches beautifully and the update does not.** Four worlds cost
+1.60x the collection time for 4x the data, which is the 3.80x simulation result
+showing through. The update costs 3.53x, near-linear, because the backward pass
+over full-resolution activations is genuinely compute-bound: there is no idle
+launch capacity for a batch dimension to fill.
+
+So the honest headline is **1.66x the agent-steps per second at four worlds,
+not 3.80x**. Per unit of data collected the picture is better, 0.94s a world
+against 1.43s, but wall-clock per update is what a training run actually
+spends.
+
+**This does not undermine the reason for doing it.** The point was never
+throughput; it was that each update's gradient should average over several
+points of the predator-prey cycle rather than one. That is now true, and it
+costs 2.6x the wall-clock per update for 4x the decorrelated data. Whether that
+trade is worth it is an experimental question: run the recipe at `--worlds 1`
+and `--worlds 4` for the same number of *updates* and compare both the ratio
+and the seed spread. If the variance reduction is real it should show up as a
+tighter spread across training seeds, which is the thing the 16% noise floor
+has been obscuring all along.
+
+What would make the update batch as well as collection is a larger minibatch
+rather than more worlds: `minibatch_steps` 4 with 4 worlds is already 16
+effective samples per step, so the same wall-clock could buy fewer, larger
+updates. That interacts with `--worlds` and belongs in the sweep rather than in
+this document.
