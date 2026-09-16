@@ -229,6 +229,7 @@ class MultiAgentWorldEnv:
         reproduction_reward: float = 10.0,
         foraging_reward: float = 0.0,
         offspring_credit: float = 0.0,
+        worlds: int = 1,
         device: Optional[str] = None,
         num_metabolic_levels: int = 0,
         memory_size: int = 0,
@@ -245,6 +246,8 @@ class MultiAgentWorldEnv:
         config = load_config(config_path)
         if size is not None:
             config.world.size = list(size)
+        if worlds and worlds > 1:
+            config.world.batch = int(worlds)
         self.world_config = config.world
         self.size: Tuple[int, int] = tuple(config.world.size)
 
@@ -265,9 +268,11 @@ class MultiAgentWorldEnv:
 
         self._flat_index = torch.arange(
             self.size[0] * self.size[1], device=self.device
-        ).reshape(*self.size)
+        ).reshape(*self.size).expand(self.field_shape)
 
-        self.observation_channels = self._build_observation().shape[0]
+        # Indexed from the end: shape[0] is the batch axis on a batched world, so
+        # reading it there would size the network with B input channels.
+        self.observation_channels = self._build_observation().shape[-3]
         self.channel_names = self._channel_names()
         self._level_rates = self._build_level_rates()
 
@@ -302,7 +307,7 @@ class MultiAgentWorldEnv:
         env.device = world.entity_dict[entity_name].biomass.data.device
         env._flat_index = torch.arange(env.size[0] * env.size[1], device=env.device).reshape(*env.size)
         env.num_metabolic_levels = int(num_metabolic_levels)
-        env.observation_channels = env._build_observation().shape[0]
+        env.observation_channels = env._build_observation().shape[-3]
         env.channel_names = env._channel_names()
         env._level_rates = env._build_level_rates()
         return env
@@ -310,9 +315,34 @@ class MultiAgentWorldEnv:
     # ------------------------------------------------------------------
     # Entity access
     # ------------------------------------------------------------------
+    def _memory_field(self, memory: torch.Tensor) -> torch.Tensor:
+        """Network memory ``(K, H, W)`` or ``(B, K, H, W)`` to the feature's layout.
+
+        The feature stores memory with its channel axis trailing, ``(H, W, K)``
+        or ``(B, H, W, K)``, so the channel axis moves to the end rather than
+        being permuted by fixed positions.
+        """
+        memory = memory.reshape(*self.world.batch_shape, self.memory_size, *self.size)
+        return memory.movedim(-3, -1).to(self.device)
+
     @property
     def entity(self):
         return self.world.entity_dict[self.entity_name]
+
+    @property
+    def field_shape(self) -> Tuple[int, ...]:
+        """Shape of one per-cell field: ``(H, W)``, or ``(B, H, W)`` batched.
+
+        Every action, reward and mask the learner exchanges with the simulation
+        has this shape. ``self.size`` stays the spatial extent so that code
+        reading height and width keeps working.
+        """
+        return self.world.batch_shape + self.size
+
+    @property
+    def num_worlds(self) -> int:
+        """Independent worlds stepped together. 1 when unbatched."""
+        return self.world.num_worlds
 
     @property
     def memory_size(self) -> int:
@@ -349,7 +379,7 @@ class MultiAgentWorldEnv:
         """
         if self._level_rates is None:
             raise ValueError("This environment was built without metabolic levels.")
-        level = level.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        level = level.reshape(self.field_shape).to(device=self.device, dtype=torch.long)
         return self._level_rates[level.clamp(0, self.num_metabolic_levels - 1)]
 
     def metabolic_rate_to_level(self, rate: torch.Tensor) -> torch.Tensor:
@@ -410,6 +440,9 @@ class MultiAgentWorldEnv:
         for key, weight in weights.items():
             if key not in observation.directional:
                 continue
+            # The action axis is built leading, as get_directional_values
+            # produces it, then moved to -3 so the scores line up with the
+            # policy's logits: (5, H, W) unbatched, (B, 5, H, W) batched.
             part = torch.cat(
                 [
                     (observation.current[key].float() * weight).unsqueeze(0),
@@ -418,8 +451,8 @@ class MultiAgentWorldEnv:
             )
             combined = part if combined is None else combined + part
         if combined is None:
-            return torch.zeros(NUM_ACTIONS, *self.size, device=self.device)
-        return combined.clamp(min=0)
+            return torch.zeros(*self.world.batch_shape, NUM_ACTIONS, *self.size, device=self.device)
+        return combined.clamp(min=0).movedim(0, -3)
 
     def _build_observation(self) -> torch.Tensor:
         """Stack the individual's local view into a (C, H, W) field."""
@@ -504,7 +537,11 @@ class MultiAgentWorldEnv:
             memory = entity.memory.data
             channels.extend(memory[..., k].float() for k in range(self.memory_size))
 
-        return torch.stack(channels, dim=0), observation
+        # Stacked at -3, the channel axis a convolution expects, rather than at
+        # 0. Each channel is (H, W) unbatched and (B, H, W) batched, so dim=0
+        # would give (C, B, H, W) and hand the network the batch as its
+        # channels. At one world the two are identical.
+        return torch.stack(channels, dim=-3), observation
 
     # ------------------------------------------------------------------
     # Interaction
@@ -567,7 +604,7 @@ class MultiAgentWorldEnv:
         offspring = transition.offspring
         divided = transition.reproduced & acted
         if not bool(divided.any()):
-            return torch.zeros(self.size, dtype=torch.float32, device=self.device)
+            return torch.zeros(self.field_shape, dtype=torch.float32, device=self.device)
         endowed = gather_per_world(self.entity.biomass.data, offspring.clamp(min=0))
         endowment = torch.where(divided, endowed, torch.zeros_like(endowed))
         return endowment * float(self.offspring_credit)
@@ -606,7 +643,7 @@ class MultiAgentWorldEnv:
             An :class:`AgentBatch` whose ``observation`` is the state *before*
             the step, matching the actions that were taken from it.
         """
-        action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        action = action.reshape(self.field_shape).to(device=self.device, dtype=torch.long)
         observation, raw = self._observe()
         decision = self._rule_decision(raw)
         rule_action = decision.move_direction.to(torch.long)
@@ -619,13 +656,13 @@ class MultiAgentWorldEnv:
         else:
             fields = {"direction": action}
             if metabolic_action is not None:
-                metabolic_action = metabolic_action.reshape(*self.size).to(
+                metabolic_action = metabolic_action.reshape(self.field_shape).to(
                     device=self.device, dtype=torch.long
                 )
                 fields["metabolic_rate"] = self.metabolic_level_to_rate(metabolic_action)
             if memory is not None:
                 # Network layout is (K, H, W); the feature is (H, W, K).
-                fields["memory"] = memory.reshape(self.memory_size, *self.size).permute(1, 2, 0).to(self.device)
+                fields["memory"] = self._memory_field(memory)
             entity_action = TensorDict(fields, batch_size=[])
         self.world.update(TensorDict({self.entity_name: entity_action}, batch_size=[]))
 
@@ -701,7 +738,7 @@ class MultiAgentWorldEnv:
         return AgentBatch(
             observation=captured["observation"],
             acted=acted,
-            action=captured["action"].reshape(*self.size).to(self.device, torch.long),
+            action=captured["action"].reshape(self.field_shape).to(self.device, torch.long),
             reward=reward,
             done=acted & ~alive_after,
             successor=successor,
@@ -714,17 +751,17 @@ class MultiAgentWorldEnv:
 
     def _entity_action(self, action, metabolic_action, memory):
         """The TensorDict or bare tensor ``Animal.update`` expects."""
-        action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        action = action.reshape(self.field_shape).to(device=self.device, dtype=torch.long)
         if metabolic_action is None and memory is None:
             return action
         fields = {"direction": action}
         if metabolic_action is not None:
-            metabolic_action = metabolic_action.reshape(*self.size).to(
+            metabolic_action = metabolic_action.reshape(self.field_shape).to(
                 device=self.device, dtype=torch.long
             )
             fields["metabolic_rate"] = self.metabolic_level_to_rate(metabolic_action)
         if memory is not None:
-            fields["memory"] = memory.reshape(self.memory_size, *self.size).permute(1, 2, 0).to(self.device)
+            fields["memory"] = self._memory_field(memory)
         return TensorDict(fields, batch_size=[])
 
     def rule_based_step(self) -> AgentBatch:
@@ -751,7 +788,7 @@ class MultiAgentWorldEnv:
         return AgentBatch(
             observation=observation,
             acted=acted,
-            action=torch.zeros(self.size, dtype=torch.long, device=self.device),
+            action=torch.zeros(self.field_shape, dtype=torch.long, device=self.device),
             reward=reward,
             done=acted & ~alive_after,
             successor=successor,
