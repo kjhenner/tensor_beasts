@@ -252,3 +252,68 @@ def test_one_world_trains_exactly_as_before():
     assert rollout.observation.shape == (steps, trainer.observation_channels, 64, 64)
     assert rollout.reward.shape == (steps, 64, 64)
     trainer.algorithm.update(trainer.network, rollout, trainer.optimizer)
+
+
+def test_evaluation_scores_each_seed_separately():
+    """Evaluation seeds are the batch axis, and must not blend together.
+
+    Each world is an independent seed, so its numbers have to survive to the
+    caller. Summing over the batch before reporting would hide the spread
+    between seeds, which is exactly the quantity every claim in this project is
+    hedged against, and would do it silently.
+    """
+    import tempfile
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    seeds = 4
+    trainer = Trainer(
+        TrainerConfig(
+            size=96, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
+            warmup_steps=10, total_world_steps=0, eval_steps=40, eval_seeds=seeds,
+            eval_interval=0, checkpoint_interval=0, device="cpu",
+            output_dir=tempfile.mkdtemp(), wandb=False,
+        ),
+        PPOConfig(),
+    )
+
+    # The evaluation world holds every seed at once.
+    assert trainer._eval_env(seeds).num_worlds == seeds
+
+    summary = trainer.evaluate()
+
+    # The headline is a mean over seeds, and the spread survives beside it.
+    assert "score" in summary
+    assert summary["score_max"] >= summary["score"] >= summary["score_min"]
+    assert summary["score_spread"] > 0.0, (
+        "four independent seeds produced identical scores, so they are not "
+        "independent"
+    )
+
+
+def test_scoring_reports_one_number_per_world():
+    """_score's accumulators must sum over the grid but not over the batch."""
+    import tempfile
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    worlds = 3
+    trainer = Trainer(
+        TrainerConfig(
+            size=96, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
+            warmup_steps=10, total_world_steps=0, eval_steps=30, eval_seeds=worlds,
+            eval_interval=0, checkpoint_interval=0, device="cpu",
+            output_dir=tempfile.mkdtemp(), wandb=False,
+        ),
+        PPOConfig(),
+    )
+    env = trainer._eval_env(worlds)
+    env.reset(seed=0)
+
+    result = trainer._score(env, 30, "rule_based")
+
+    for field in ("biomass_ema", "mean_biomass", "mean_population", "reproductions"):
+        values = getattr(result, field)
+        assert len(values) == worlds, f"{field} collapsed the batch"

@@ -354,7 +354,18 @@ class MultiAgentWorldEnv:
         return entity.biomass.data >= entity.config.survival_threshold
 
     def population(self) -> int:
+        """Living individuals across every world. See population_per_world."""
         return int(self._alive().sum())
+
+    def population_per_world(self) -> torch.Tensor:
+        """Living individuals in each world, ``(worlds,)``.
+
+        Evaluation needs this rather than the total: each world is its own
+        seed, and summing them before they are reported hides the spread
+        between seeds, which is the quantity every claim here is hedged
+        against.
+        """
+        return self._alive().sum(dim=(-2, -1)).reshape(self.num_worlds).float()
 
     # ------------------------------------------------------------------
     # Metabolic levels

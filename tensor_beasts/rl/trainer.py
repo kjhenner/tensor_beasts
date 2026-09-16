@@ -422,19 +422,34 @@ class EvalResult:
     heavily and settles toward the level the policy sustains.
     """
 
-    biomass_ema: float
-    mean_biomass: float
-    final_biomass: float
-    mean_population: float
-    reproductions: float
-    survived_agent_steps: float
-    total_reward: float
+    biomass_ema: List[float]
+    mean_biomass: List[float]
+    final_biomass: List[float]
+    mean_population: List[float]
+    reproductions: List[float]
+    survived_agent_steps: List[float]
+    total_reward: List[float]
     episode_return: float
     episode_length: float
     episodes_finished: float
 
     def to_dict(self, prefix: str) -> Dict[str, float]:
-        return {f"{prefix}_{key}": value for key, value in asdict(self).items()}
+        """Mean over worlds for each per-world field, scalars passed through."""
+        out: Dict[str, float] = {}
+        for key, value in asdict(self).items():
+            if isinstance(value, list):
+                out[f"{prefix}_{key}"] = sum(value) / len(value) if value else 0.0
+            else:
+                out[f"{prefix}_{key}"] = value
+        return out
+
+    def per_world(self, prefix: str) -> Dict[str, List[float]]:
+        """The per-world values themselves, for reporting the spread."""
+        return {
+            f"{prefix}_{key}": value
+            for key, value in asdict(self).items()
+            if isinstance(value, list)
+        }
 
 
 def _observe(env: MultiAgentWorldEnv) -> torch.Tensor:
@@ -525,7 +540,7 @@ class Trainer:
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
-    def _make_env(self) -> MultiAgentWorldEnv:
+    def _make_env(self, worlds: Optional[int] = None) -> MultiAgentWorldEnv:
         config = self.config
         return MultiAgentWorldEnv(
             config_path=config.config_path,
@@ -535,7 +550,7 @@ class Trainer:
             reproduction_reward=config.reproduction_reward,
             foraging_reward=config.foraging_reward,
             offspring_credit=config.offspring_credit,
-            worlds=config.worlds,
+            worlds=config.worlds if worlds is None else worlds,
             device=str(self.device),
             # Pinning needs a level-to-rate mapping even for a direction-only
             # policy; two levels make level 0 exactly the basal rate.
@@ -702,25 +717,33 @@ class Trainer:
     # ------------------------------------------------------------------
     # Evaluation: the actual experiment
     # ------------------------------------------------------------------
-    def _eval_env(self, seed: int) -> MultiAgentWorldEnv:
-        if seed not in self._eval_envs:
-            self._eval_envs[seed] = self._make_env()
-        return self._eval_envs[seed]
+    def _eval_env(self, worlds: int) -> MultiAgentWorldEnv:
+        """A cached evaluation world holding ``worlds`` independent seeds.
+
+        Separate from the training environment because evaluation's batch width
+        is the seed count, which has nothing to do with how many worlds the
+        training loop steps.
+        """
+        if worlds not in self._eval_envs:
+            self._eval_envs[worlds] = self._make_env(worlds=worlds)
+        return self._eval_envs[worlds]
 
     @torch.no_grad()
     def _score(self, env: MultiAgentWorldEnv, steps: int, policy: str) -> EvalResult:
         tracker = EpisodeTracker(env.field_shape, self.device)
-        total_reward = 0.0
-        survived = 0.0
-        reproductions = 0.0
-        populations: List[float] = []
-        biomasses: List[float] = []
+        worlds = env.num_worlds
+        zeros = torch.zeros(worlds, device=self.device)
+        total_reward = zeros.clone()
+        survived = zeros.clone()
+        reproductions = zeros.clone()
+        populations: List[torch.Tensor] = []
+        biomasses: List[torch.Tensor] = []
         # Smoothing constant for the headline. 2/(N+1) with N the window, so
         # this is a 100-step window: long enough that a single boom or crash
         # does not set the number, short enough that the last quarter of the
         # run dominates it, which is the level the policy actually sustains.
         ema_alpha = 2.0 / (100.0 + 1.0)
-        biomass_ema: Optional[float] = None
+        biomass_ema: Optional[torch.Tensor] = None
 
         for _ in range(steps):
             if policy == "rule_based":
@@ -750,27 +773,39 @@ class Trainer:
                 batch = env.step_with_policy(decide)
 
             tracker.update(batch)
-            total_reward += float(batch.reward.sum())
-            survived += float((batch.acted & ~batch.done).sum())
-            reproductions += float(batch.reproduced.sum())
-            populations.append(float(env.population()))
+            # Summed over the grid but NOT over the batch: each world is an
+            # independent evaluation seed and must produce its own number, or
+            # the batch silently averages worlds together before anyone can see
+            # the spread between them.
+            grid = (-2, -1)
+            total_reward += batch.reward.sum(dim=grid).reshape(worlds)
+            survived += (batch.acted & ~batch.done).sum(dim=grid).reshape(worlds).float()
+            reproductions += batch.reproduced.sum(dim=grid).reshape(worlds).float()
+            populations.append(env.population_per_world())
 
             # Total carried biomass, the quantity the ecology conserves.
-            carried = float(env.entity.biomass.data.sum())
+            carried = env.entity.biomass.data.sum(dim=grid).reshape(worlds)
             biomasses.append(carried)
             biomass_ema = carried if biomass_ema is None else (
                 ema_alpha * carried + (1.0 - ema_alpha) * biomass_ema
             )
 
         summary = tracker.summary()
+        # Each field is one number per world, so the caller can average over
+        # seeds AND see the spread between them. Episode statistics are pooled
+        # across worlds on purpose: an episode is one individual's life, and
+        # lives are comparable wherever they happened.
+        stacked_biomass = torch.stack(biomasses) if biomasses else zeros.unsqueeze(0)
+        stacked_population = torch.stack(populations) if populations else zeros.unsqueeze(0)
+        ema = biomass_ema if biomass_ema is not None else zeros
         return EvalResult(
-            biomass_ema=float(biomass_ema or 0.0),
-            mean_biomass=sum(biomasses) / max(len(biomasses), 1),
-            final_biomass=biomasses[-1] if biomasses else 0.0,
-            mean_population=sum(populations) / max(len(populations), 1),
-            reproductions=reproductions,
-            survived_agent_steps=survived,
-            total_reward=total_reward,
+            biomass_ema=ema.tolist(),
+            mean_biomass=stacked_biomass.mean(dim=0).tolist(),
+            final_biomass=stacked_biomass[-1].tolist(),
+            mean_population=stacked_population.mean(dim=0).tolist(),
+            reproductions=reproductions.tolist(),
+            survived_agent_steps=survived.tolist(),
+            total_reward=total_reward.tolist(),
             episode_return=summary["episode_return"],
             episode_length=summary["episode_length"],
             episodes_finished=summary["episodes_finished"],
@@ -790,21 +825,33 @@ class Trainer:
         # the training stream depend on the evaluation schedule.
         rng_state = torch.get_rng_state()
         self.network.eval()
-        results: Dict[str, List[float]] = {}
-        for index in range(max(self.config.eval_seeds, 1)):
-            seed = self.config.seed + 10_000 + index
-            for policy in ("learned", "rule_based"):
-                env = self._eval_env(index)
-                env.reset(seed=seed)
-                scored = self._score(env, self.config.eval_steps, policy)
-                for key, value in scored.to_dict(policy).items():
-                    results.setdefault(key, []).append(value)
+        seeds = max(self.config.eval_seeds, 1)
+        seed = self.config.seed + 10_000
+
+        summary: Dict[str, float] = {}
+        spread: Dict[str, List[float]] = {}
+        for policy in ("learned", "rule_based"):
+            # One batched world holding every evaluation seed, rather than one
+            # world per seed run in sequence. The seeds become the batch axis.
+            # Both policies are scored from the same reset, so the comparison
+            # stays paired exactly as it was when this was a loop.
+            env = self._eval_env(seeds)
+            env.reset(seed=seed)
+            scored = self._score(env, self.config.eval_steps, policy)
+            summary.update(scored.to_dict(policy))
+            spread.update(scored.per_world(policy))
         self.network.train()
         torch.set_rng_state(rng_state)
 
-        summary = {
-            key: (sum(values) / len(values)) for key, values in results.items()
-        }
+        # The spread across seeds is the quantity every claim in this project is
+        # hedged against, so it is reported rather than averaged away.
+        learned = spread.get("learned_biomass_ema") or []
+        if len(learned) > 1:
+            mean = sum(learned) / len(learned)
+            variance = sum((value - mean) ** 2 for value in learned) / (len(learned) - 1)
+            summary["score_spread"] = variance ** 0.5
+            summary["score_min"] = min(learned)
+            summary["score_max"] = max(learned)
         # The headline is the learned policy's own smoothed biomass, an absolute
         # quantity in the units the ecology conserves. It replaced a ratio
         # against the rule-based policy, whose constants were hand-chosen, so
