@@ -22,3 +22,27 @@ Or for one-off commands:
 ```bash
 venv/bin/python <script.py>
 ```
+
+## Layout
+
+- `tensor_beasts/` the package. `rl/` holds the learning stack, `entities/` and
+  `features/` the simulation.
+- `train_rl.py` at the root is the entry point for training and evaluation.
+- `tools/` the command-line tools, run from the repository root because they
+  load configs by relative path. See `tools/README.md`.
+- `conf/` simulation and RL configs; `conf/sweeps/` the W&B sweep configs.
+- `planning/` the design record, numbered in order. It is written so the
+  reasoning survives, including the parts that turned out to be wrong, and
+  several documents contain corrections of their own earlier claims. Read the
+  relevant one before changing anything it covers.
+- `outputs/` and `wandb/` are gitignored run artifacts.
+
+## Before claiming a change is behaviour-preserving
+
+```bash
+venv/bin/python tools/sim_bench.py golden --check baseline_golden.json
+```
+
+Hashes are only comparable within one device, so the baseline records which
+produced them. When a hash is supposed to move, re-capture it in its own commit
+and say why.
