@@ -148,6 +148,24 @@ class AgentBatch:
         return int(self.acted.sum())
 
 
+def gather_per_world(field: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """``field`` read at ``index``, where both are grids and ``index`` is per world.
+
+    The simulation's successor and offspring maps hold a flat cell index within
+    one world: cell (h, w) is ``h * width + w`` in every world. Flattening a
+    batched ``(B, H, W)`` field with ``reshape(-1)`` and indexing it with those
+    would read world 0's cells for every world, and produce entirely plausible
+    numbers while doing it. Reshaping to ``(worlds, H * W)`` and gathering along
+    the last axis keeps each world to itself, and at one world is exactly the
+    old arithmetic. See planning/07-batched-worlds.md.
+    """
+    grid = index.shape
+    cells = grid[-2] * grid[-1]
+    worlds = index.numel() // cells
+    gathered = field.reshape(worlds, cells).gather(1, index.reshape(worlds, cells))
+    return gathered.reshape(grid)
+
+
 def metabolic_level_rates(basal_rate: float, max_rate: float, num_levels: int) -> torch.Tensor:
     """Rate for each discrete metabolic level, ``(num_levels,)`` float32.
 
@@ -502,11 +520,11 @@ class MultiAgentWorldEnv:
         successor = transition.successor.clamp(min=0)
 
         entity = self.entity
-        biomass_flat = entity.biomass.data.reshape(-1)
         # An individual is alive afterwards if the cell it moved into holds
         # enough biomass to survive. Same predicate the simulation applies at
         # the top of the next step.
-        alive_after = (biomass_flat[successor] >= entity.config.survival_threshold) & acted
+        biomass_after = gather_per_world(entity.biomass.data, successor)
+        alive_after = (biomass_after >= entity.config.survival_threshold) & acted
 
         reward = (
             alive_after.float() * self.survival_reward
@@ -519,7 +537,7 @@ class MultiAgentWorldEnv:
             # and it punished the metabolic lever: burning biomass into energy
             # is what metabolism does, so every unit burned cost reward and the
             # learned throttle collapsed onto the coldest setting.
-            eaten = transition.eaten.reshape(-1)[successor].reshape(*self.size)
+            eaten = gather_per_world(transition.eaten, successor)
             reward = reward + alive_after.float() * eaten * self.foraging_reward
 
         if self.offspring_credit and transition.offspring is not None:
@@ -550,10 +568,8 @@ class MultiAgentWorldEnv:
         divided = transition.reproduced & acted
         if not bool(divided.any()):
             return torch.zeros(self.size, dtype=torch.float32, device=self.device)
-        biomass_flat = self.entity.biomass.data.reshape(-1)
-        endowment = torch.zeros(self.size, dtype=torch.float32, device=self.device)
-        cells = offspring.clamp(min=0)
-        endowment = torch.where(divided, biomass_flat[cells].reshape(*self.size), endowment)
+        endowed = gather_per_world(self.entity.biomass.data, offspring.clamp(min=0))
+        endowment = torch.where(divided, endowed, torch.zeros_like(endowed))
         return endowment * float(self.offspring_credit)
 
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:

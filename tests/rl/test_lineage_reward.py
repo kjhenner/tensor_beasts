@@ -151,3 +151,42 @@ def test_the_credit_is_first_generation_only():
         assert torch.equal(credited > 0, transition.reproduced & transition.acted)
         seen += int(transition.reproduced.sum())
     assert seen > 0, "no reproduction observed; the test proved nothing"
+
+
+def test_gather_per_world_reads_each_world_from_itself():
+    """Successor and offspring indices are per world, not per batch.
+
+    A flat `(B*H*W)` read indexed with per-world indices returns world 0's cells
+    for every world, silently. This is the helper every reward gather goes
+    through, so it is the single place that has to be right.
+    """
+    from tensor_beasts.rl.multiagent import gather_per_world
+
+    height = width = 3
+    cells = height * width
+    # Three worlds whose values are distinguishable: world b holds b*100 + cell.
+    field = torch.stack(
+        [torch.arange(cells).reshape(height, width) + 100 * b for b in range(3)]
+    ).float()
+    # Every world reads its own cell 4 (the centre).
+    index = torch.full((3, height, width), 4, dtype=torch.long)
+
+    out = gather_per_world(field, index)
+
+    assert out.shape == (3, height, width)
+    for b in range(3):
+        assert torch.all(out[b] == 100 * b + 4), (
+            f"world {b} read {out[b].flatten()[0].item()} instead of {100 * b + 4}; "
+            "the worlds are coupled"
+        )
+
+
+def test_gather_per_world_matches_the_unbatched_read():
+    """One world must be exactly the old `reshape(-1)[index]` arithmetic."""
+    from tensor_beasts.rl.multiagent import gather_per_world
+
+    generator = torch.Generator().manual_seed(0)
+    field = torch.rand(5, 5, generator=generator)
+    index = torch.randint(0, 25, (5, 5), generator=generator)
+
+    assert torch.equal(gather_per_world(field, index), field.reshape(-1)[index])
