@@ -228,7 +228,12 @@ class World:
         same point in the step the entity's own policy would run, so a learned
         policy and the rule-based one it is compared against see the same world.
         """
-        self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
+        # One independent draw per world. Sized from feature_shape rather than
+        # size: a single (H, W) field broadcast across a batch would give every
+        # world the same randomness, correlating plant germination and the ids
+        # offspring draw from it. Worlds that share their noise are not
+        # independent worlds, which is the entire point of batching them.
+        self.td.set("random", torch.randint(0, 256, self.feature_shape, dtype=torch.uint8))
 
         # Update entities (includes emission for SharedFeatures)
         for entity_name in self._entity_order:
