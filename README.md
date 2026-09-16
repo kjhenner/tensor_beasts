@@ -35,9 +35,16 @@ twenty CPU cores, which is the difference between iterating at 256 and
 iterating at the size where the ecology is valid.
 
 A 512 run needs roughly 6 GB of device memory at the default minibatch, and
-`train_rl.py` prints its own estimate before it starts. Lower `--minibatch-steps`
-if that does not fit: the backward pass over full-resolution activations is what
-uses the memory, not the stored rollout.
+`train_rl.py` prints its own estimate and the chosen card's free memory before
+it starts, refusing outright if the run cannot fit. Lower `--minibatch-steps` if
+that happens: the backward pass over full-resolution activations is what uses
+the memory, not the stored rollout.
+
+On a machine with more than one GPU, `--device cuda` means *the card with the
+most free memory*, not `cuda:0`. An index is not a stable name for a card:
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`, which is what `nvidia-smi` prints, and CUDA's
+own `FASTEST_FIRST` default disagree about which card is index zero. Pass
+`--device cuda:N` to name one explicitly.
 
 ## Usage
 

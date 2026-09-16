@@ -56,6 +56,11 @@ parameters:
     value: Predator
   size:
     value: 512
+  # A bare "cuda" means the card with the most free memory, not cuda:0:
+  # PCI_BUS_ID and FASTEST_FIRST ordering disagree about which card index
+  # zero is, so an index is not a stable name. Agents run one trial at a
+  # time; a 512 run needs about 6 GB and train_rl.py refuses up front if
+  # that will not fit, rather than dying inside pretraining.
   device:
     value: cuda
   steps:
