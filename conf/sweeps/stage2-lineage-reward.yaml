@@ -63,14 +63,16 @@ parameters:
     value: 0.0
   imitation-target:
     value: 0.95
-  # Set together with `worlds`, because at this memory budget they trade
-  # against each other: worlds=4 with segment=96 needs 52 GB and is refused.
-  # Stage A chooses the pair. These are the worlds=1 values; if stage A says
-  # four worlds wins, change to worlds 4 / segment 32 / minibatch 2.
+  # Set by stage A, which compared worlds 1 and 4 over the same 170 updates.
+  # Four worlds cut gradient noise: median approx_kl 0.00483 against 0.00704
+  # and clip_fraction 0.066 against 0.090. The scores tied, well inside the
+  # seed spread, so the KL is the evidence. worlds and segment-steps trade
+  # against each other at this memory budget, and stage A resolved it toward
+  # worlds.
   worlds:
-    value: 1
+    value: 4
   segment-steps:
-    value: 96
+    value: 32
   gamma:
     value: 0.997
   entity:
@@ -89,7 +91,7 @@ parameters:
   epochs:
     value: 2
   minibatch-steps:
-    value: 4
+    value: 2
   imitation-coef:
     value: 1.0
   pretrain-updates:

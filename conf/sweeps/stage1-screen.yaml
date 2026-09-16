@@ -22,8 +22,13 @@ parameters:
   # on three smooth diffused scent gradients. dilated sees 31 cells for FEWER
   # parameters, 76k against 92k. This is the axis most likely to let the policy
   # find something the 7-cell rules structurally cannot.
+  # residual is dropped. It is the largest of the three, 315k parameters
+  # against conv's 92k, and at worlds=4 its estimated peak is 23.6 GB against
+  # about 20 GB free, so train_rl.py refuses it before it starts. It was also
+  # the least motivated value: planning/06 argues dilated is the one to bet on,
+  # since it sees 31 cells against conv's 7 for fewer parameters.
   arch:
-    values: [conv, dilated, residual]
+    values: [conv, dilated]
 
   # Axis 2. Entropy 0.505 over five actions means the policy commits to one
   # direction about 88% of the time: it is executing, not exploring. For a
@@ -46,16 +51,21 @@ parameters:
     value: 0.0
   imitation-target:
     value: 0.95
-  # A predator lives 81 steps. 96 fits a typical life in one segment; 0.997 is
-  # the soft half of the same horizon. Set apart, they are incoherent.
-  # Set together with `worlds`, because at this memory budget they trade
-  # against each other: worlds=4 with segment=96 needs 52 GB and is refused.
-  # Stage A chooses the pair. These are the worlds=1 values; if stage A says
-  # four worlds wins, change to worlds 4 / segment 32 / minibatch 2.
+  # Set by stage A, which compared worlds 1 and 4 over the same 170 updates.
+  # Four worlds cut gradient noise: median approx_kl 0.00483 against 0.00704
+  # and clip_fraction 0.066 against 0.090, so each step is genuinely less
+  # noisy. The scores tied, 8,849 against 8,676, which is well inside a seed
+  # spread of about 3,500, so the KL is the evidence and the scores are not.
+  #
+  # worlds and segment-steps trade against each other at this memory budget:
+  # worlds=4 with segment=96 needs 52 GB and is refused. Stage A resolved that
+  # toward worlds, since the shorter segment cost nothing measurable while the
+  # decorrelation showed up in the KL. gamma stays 0.997, the soft half of the
+  # horizon argument, which does not depend on the segment length.
   worlds:
-    value: 1
+    value: 4
   segment-steps:
-    value: 96
+    value: 32
   gamma:
     value: 0.997
   entity:
@@ -74,7 +84,7 @@ parameters:
   epochs:
     value: 2
   minibatch-steps:
-    value: 4
+    value: 2
   imitation-coef:
     value: 1.0
   foraging-reward:

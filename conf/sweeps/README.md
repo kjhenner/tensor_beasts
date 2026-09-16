@@ -20,19 +20,22 @@ separate seed study.
 
 | Stage | Trials | Question | Status |
 |---|---|---|---|
-| `stageA-worlds` | 2 | Does training across several worlds help? | Ready |
-| `stage1-screen` | 12 | Architecture, entropy, learning rate | Waiting on A |
+| `stageA-worlds` | 2 | Does training across several worlds help? | **Done**: yes, worlds=4 |
+| `stage1-screen` | 8 | Architecture, entropy, learning rate | Ready |
 | `stage2-lineage-reward` | 3 | Does crediting offspring biomass help? | Waiting on 1 |
 | `done-stage0-release` | 2 | Can the imitation anchor be released? | **Done**: yes |
 
 ## Order matters
 
-**Stage A first.** It answers a question the later stages depend on, and it
-resolves a real conflict: the horizon argument wants a 96-step segment so credit
-spans an 81-step predator life, four worlds want the memory, and at this budget
-both do not fit. Stage A says which to keep. Stages 1 and 2 currently carry the
-one-world values; if A says four worlds wins, set `worlds: 4`,
-`segment-steps: 32` and `minibatch-steps: 2` in both before running them.
+**Stage A is done.** Over the same 170 updates, four worlds cut gradient noise:
+median `approx_kl` 0.00483 against 0.00704 and `clip_fraction` 0.066 against
+0.090. The scores tied, 8,849 against 8,676, which is well inside a seed spread
+of about 3,500, so the KL is the evidence and the scores are not. Stages 1 and 2
+now carry `worlds: 4`, `segment-steps: 32`, `minibatch-steps: 2`.
+
+`residual` is dropped from stage 1's architecture axis: at four worlds its
+estimated peak is 23.6 GB against about 20 GB free, so it is refused before it
+starts. Eight trials instead of twelve.
 
 **Read stage A on the KL, not the score.** If four worlds genuinely reduce
 gradient noise, `approx_kl` and `clip_fraction` fall. That is the direct
