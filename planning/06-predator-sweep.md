@@ -41,138 +41,233 @@ more successful hunts cannot move the number.
 
 ## The sweep
 
-Seven axes, in the order I would bet on them. Each says what the measurement
-is, what the mechanism would be, and what would falsify it.
+Seven items, in the order I would bet on them, revised after the repo owner's
+review. Two are now commitments rather than axes, one is a build rather than a
+knob, and four are swept. Each says what the measurement is, what the mechanism
+would be, and what would falsify it.
 
-### 1. The anchor's release: `imitation_floor` and `imitation_target`
+| # | Item | Disposition |
+|---|---|---|
+| 1 | Imitation anchor | **Commit**: fade to zero. `imitation_target` swept |
+| 2 | `gamma` | **Commit**: 0.997, reasoning below |
+| 3 | `segment_steps` | **Commit**: 96, with one control run |
+| 4 | Reward | **Build**: biomass of self and offspring, then sweep the credit |
+| 5 | `entropy_coef` | Sweep {0, 0.002, 0.01} |
+| 6 | `arch` | Sweep {conv, dilated, residual} |
+| 7 | `lr` | Sweep {3e-4, 1e-3} |
 
-**The measurement.** The anchor weight is
+### 1. The anchor fades to zero, and is not a sweep axis
+
+**The repo owner's call, and it is the right one.** The anchor is scaffolding
+for the start of training, not a term in the objective. Once the policy is at
+parity, a regression when the anchor lets go is information: it says the reward
+is wrong. Holding the policy near the rules with a permanent floor hides that
+information and buys a number we cannot interpret. So the floor goes to zero and
+stays there; it is a decision, not a parameter.
+
+**The measurement that makes this urgent.** The anchor weight is
 `imitation_coef * max(floor, 1 - conformance / target)`. With `target` 0.8 and
 measured conformance at 0.913, the computed term is negative on 96.8% of
-updates, so the weight is exactly `floor` on 340 of 345. I set that floor to
-0.3 to stop the collapse that happened without it, and the collapse turned out
-to be the stale-observation bug, not the anchor releasing. **The floor is now
-solving a problem that no longer exists.**
+updates, so the weight was exactly the floor on 340 of 345. Every result so far
+was produced under a permanent pull toward the rules, by a policy that still
+agrees with them 90% of the time. **We have never observed what this policy
+does when it is free.**
 
-**The mechanism.** A permanent cross-entropy pull toward the rules is a
-constraint on the policy's asymptote, not just its initialization. The
-herbivore work found exactly this and recorded it: matching the rules more
-faithfully did not convert into survival, and the plausible reading there was
-that the edge comes from *departing* from the rules in particular ways. The
-predator now has a working critic, 0.87 explained variance against the
-herbivore's 0.2 ceiling, so unlike the herbivore it has a reliable advantage
-signal to move on once released.
+**What this implies for how to read the sweep.** With the floor at zero, a
+configuration that regresses below parity is not a failed trial to be discarded.
+It is the reward function failing a test it could not previously fail, and the
+configuration that regresses *least* is evidence about which reward term is
+load-bearing. The anchor's release is therefore the instrument the rest of the
+sweep is measured with, which is a second reason not to sweep it: a varying
+instrument makes every other axis unreadable.
 
-**Sweep.** `imitation_floor` in {0.0, 0.05, 0.15, 0.3}, crossed with
-`imitation_target` in {0.8, 0.95}. A target of 0.95 with a zero floor is the
-interesting corner: the anchor stays engaged until agreement is genuinely high,
-then lets go completely.
+**Kept as a parameter:** `imitation_target`, which sets when the fade completes,
+not whether. At 0.8 the anchor is already released before RL begins, given
+pretraining reaches 0.93. Raising it to 0.95 means the anchor holds through the
+first updates and then genuinely lets go, which is the behaviour the design
+intends and has never actually exhibited. Two values, {0.8, 0.95}, and it is
+the only imitation knob in the grid.
 
-**Falsified if** the zero-floor runs drift below parity the way the herbivore's
-soft-distillation runs did. That is a real possibility and it is why the floor
-values are swept rather than simply removed.
+**Falsified if** every zero-floor configuration collapses. That outcome is not a
+reason to restore the floor; it is the finding that the reward cannot sustain
+the policy on its own, and it redirects the work to axis 4.
 
-### 2. The discount horizon: `gamma`
+### 2. The discount horizon: why the commitment below is 0.997
 
 **The measurement.** `gamma` is 0.99, an effective horizon of 100 steps. A
-predator's episode is 81 steps at evaluation. So the discount weight on a
-reward at the end of a typical life is 0.443: **the policy values the back half
-of its own lifetime at less than half weight.**
+predator's episode is 81 steps at evaluation, so the discount weight on a reward
+at the end of a typical life is 0.443: **the policy values the back half of its
+own lifetime at less than half weight.**
 
-**The mechanism.** This matters far more for a predator than for a herbivore,
-and the asymmetry is the argument. A herbivore eats on 78% of steps, so its
-reward arrives continuously and a short horizon loses little. A predator eats
-on 2.5% of steps and reproduces on 1.1%: its entire payoff is a handful of
-widely spaced events, and the investment that produces them, crossing open
-ground toward a scent gradient, pays out tens of steps later. A 100-step
-horizon systematically underprices exactly the behaviour we want.
+| gamma | horizon | weight on a reward 81 steps out |
+|---|---|---|
+| 0.99 | 100 | 0.443 |
+| 0.995 | 200 | 0.666 |
+| 0.997 | 333 | 0.784 |
 
-**Sweep.** `gamma` in {0.99, 0.995, 0.997}. At 0.997 a reward 81 steps out
-keeps 0.784 weight instead of 0.443.
+**The mechanism, and the asymmetry that makes it a predator problem.** A
+herbivore eats on 78% of steps, so its reward arrives continuously and a short
+horizon loses little. A predator eats on 2.5% of steps and reproduces on 1.1%:
+its entire payoff is a handful of widely spaced events, and the investment that
+produces them, crossing open ground toward a scent gradient, pays out tens of
+steps later. A 100-step horizon systematically underprices exactly the behaviour
+we want.
 
-**Falsified if** the longer horizons raise value loss without moving the ratio,
-which would mean the critic cannot support the longer credit assignment. Watch
-`explained_variance`: if it falls from 0.87, the horizon is too long for the
-data.
+This is the soft half of the horizon argument; the hard half is the segment
+length, and the two are set together in the next section rather than swept
+independently.
 
-**Caveat, stated honestly.** `segment_steps` is 32, so GAE is truncated and
-bootstrapped at 32 steps regardless of gamma. Raising gamma without raising the
-segment mostly changes how much the bootstrap is trusted rather than extending
-real credit assignment. Which is why the next axis is coupled to this one.
+### 3. The segment length: one commitment, not an axis
 
-### 3. The segment length: `segment_steps`
+**The repo owner's call: commit rather than sweep.** Agreed, and the reasoning
+is that this axis has a defensible answer from first principles, so spending
+trials on it buys less than spending them elsewhere.
 
-**The measurement.** Segments are 32 steps; training episode length reports
-16.5, which is a truncation artefact of exactly that. Evaluation lifespan is
-81. **Credit never propagates across more than 32 steps of an 81-step life.**
+**The commitment: `segment_steps` 96, `gamma` 0.997.**
 
-**The mechanism.** A kill is preceded by a pursuit. If the pursuit began more
-than 32 steps before the kill, no gradient connects them. This is the same
-argument as gamma but about a hard cutoff rather than a soft one, and the two
-have to move together: raising gamma while the segment stays at 32 buys the
-bootstrap's opinion, not the actual return.
+**Why 96.** A predator lives 81 steps at evaluation. Credit should reach across
+a typical life, and a segment shorter than that truncates it: at 32, the
+training log's episode length reads 16.5, which is purely the truncation. 96 is
+the smallest round number above 81, so a typical life fits inside one segment
+without paying for a longer one. 128 would buy only the tail of the lifespan
+distribution at a third more memory and a third fewer updates per unit time.
 
-**Sweep.** `segment_steps` in {32, 64, 128}, crossed with gamma. Measured peak
-memory at 512 with the `conv` network and minibatch 4: 3.46 GB at a segment of
-32, 4.23 GB at 64, 5.77 GB at 128. All three fit on either card, so this axis
-is cheaper than it looks.
+**Why the two move together.** These are the soft and hard versions of the same
+horizon and it is incoherent to set them apart. A gamma of 0.997 weights a
+reward 81 steps out at 0.784, so the discount no longer discards the back half
+of a life; a segment of 96 means the return that gamma discounts is actually
+observed rather than bootstrapped. Setting one without the other buys the
+critic's opinion instead of the data.
 
-**Falsified if** longer segments raise wall-clock without raising the ratio.
-There is a real risk here: longer segments mean fewer updates for the same
-budget, and the ecology is non-stationary, so stale data may cost more than
-longer credit gains.
+**Measured cost.** Peak memory at 512 with `conv` and minibatch 4: 3.46 GB at a
+segment of 32, 4.23 GB at 64, 5.77 GB at 128. 96 interpolates to roughly 5 GB,
+which fits on either card.
 
-### 4. The reward composition: `reproduction_reward` and `foraging_reward`
+**The risk, stated plainly.** Longer segments mean fewer policy updates per unit
+of world time, and this ecology is non-stationary, so the data ages. If the
+committed setting underperforms the 32-step baseline at equal wall-clock, that
+is the explanation, and the answer is more world steps rather than a shorter
+segment.
 
-**The measurement.** Per agent-step, at the current settings:
+**One control run**, at the best stage-1 corner with the old 32 / 0.99 pair, to
+check the commitment rather than assume it. One trial, not an axis.
 
-| Term | Contribution | Share |
+### 4. The reward: expected total biomass of self and offspring
+
+**The repo owner's proposal, and it is the most valuable item here.** The
+current reward is three hand-weighted terms standing in for fitness. The
+proposal replaces the proxy with the thing itself: an individual's reward is the
+biomass it accumulates, plus the biomass its descendants accumulate. That is
+lifetime reproductive success measured in the currency the simulation actually
+conserves.
+
+**Why the current reward is close to the inverse of the metric.** Measured per
+agent-step over the winning run:
+
+| Term | Contribution | Share of reward |
 |---|---|---|
 | Survival (1.0 x 98.9%) | 0.989 | 89.6% |
 | Reproduction (10.0 x 1.14%) | 0.114 | 10.4% |
 | Foraging (0.02 x eaten) | 0.052 | measured residual |
 
-**Survival is 90% of the reward and is nearly constant**, which is the finding
-this project already recorded for the herbivore: a term that fires on 98.9% of
-steps carries almost no gradient, it just adds a large mean. Meanwhile
-reproduction, the thing that actually drives the score, is 10%.
+Survival is 90% of the reward and fires on 98.9% of steps, so it is very nearly
+a constant: it contributes almost no gradient, only a large mean that the
+advantage normalizer then removes. Reproduction, which is what the score
+integrates, is 10%. The evaluation counts population over time, population is a
+stock driven by births, and births come from biomass. **The reward spends its
+signal on the one quantity that barely varies.**
 
-**The mechanism.** The evaluation metric is population integrated over time, and
-the population is a stock driven by births. The reward's weighting is close to
-the inverse of what the metric rewards. Raising `reproduction_reward` aligns
-the two. This is legitimate reward shaping: what is optimized may change, what
-is judged stays survived agent-steps.
+**Why biomass is the right currency.** It is the simulation's own conserved
+resource: a predator eats biomass, carries biomass, divides when biomass crosses
+a threshold, and passes half of it to its offspring. Survival, reproduction and
+foraging are three lossy projections of it. Rewarding biomass directly removes
+the three weights, and with them the question of what their ratio should be,
+which this document was otherwise going to spend nine trials on.
 
-**Sweep.** `reproduction_reward` in {10, 30, 60}, and `foraging_reward` in
-{0.01, 0.02, 0.05}. The foraging coefficient was set by matching the reward's
-coefficient of variation to the herbivore recipe's, which was a reasoned guess
-and is explicitly flagged in `04` as wanting a sweep.
+**Why the offspring term is the hard and interesting part.** Without it, biomass
+alone is a hoarding reward: an individual maximizes it by eating and never
+dividing, and division actively halves it. That is the same failure mode
+recorded in `04` when net biomass change punished the metabolic lever. Crediting
+an individual with its descendants' biomass makes division an investment rather
+than a loss, which is exactly the trade the metric rewards.
 
-**Falsified if** high reproduction reward produces predators that divide at the
-threshold and then starve, tanking lifespan. Watch `learned_episode_length`
-against `learned_reproductions`: if reproductions rise while lifespan falls
-enough to cancel them, the trade is bad.
+**It is implementable, and here is the mechanism.** At division the simulation
+leaves the offspring in the parent's origin cell and moves the parent to its
+destination, so both endpoints are known at the step reproduction happens. The
+existing successor map already follows individuals through time, and
+`IndividualTracker` in `rl/film.py` already chains it to reconstruct whole
+lives. A lineage credit is the same machinery with one addition: when
+`reproduced` is set, record an edge from parent to the offspring's cell, and
+propagate the offspring's accumulated biomass back along that edge with a decay.
+
+**The design question to settle before coding it, not after.** Whether the
+offspring's contribution is discounted by generation, and by how much. Undiscounted
+lineage credit is unbounded in a growing population and makes an early ancestor's
+return depend on a hundred descendants it never saw, which is a variance disaster.
+A per-generation discount, or crediting only the first generation, bounds it. My
+recommendation is **first generation only, at a swept weight**, because it
+captures the investment-in-division mechanism with bounded variance, and deeper
+lineage can follow once the one-generation version is shown to work.
+
+**Sweep.** `offspring_credit` in {0, 0.5, 1.0}, the fraction of an offspring's
+own accumulated biomass credited back to its parent, with 0 as the control that
+isolates whether the lineage term does anything. Held fixed alongside:
+`survival_reward` 0 and biomass as the base reward, since keeping the old terms
+in parallel would leave the comparison unreadable.
+
+**Falsified if** the biomass reward without the lineage term hoards, which is
+the prediction, and the lineage term does not fix it. Watch reproductions per
+agent-step directly: if it falls below the rules' 0.718 births per step while
+biomass per individual rises, the reward is being gamed exactly as predicted.
+
+**Note that this is a real piece of work**, not a config change: it needs a
+reward mode in `MultiAgentWorldEnv`, a parent-to-offspring edge in
+`TransitionInfo`, and a test that a lineage's credit is conserved. It should be
+built and tested before the sweep runs, and it is the reason stage 2 exists as a
+separate stage.
 
 ### 5. Entropy: `entropy_coef`
 
-**The measurement.** Entropy sits at 0.50 against a maximum of ln(5) = 1.609,
-and `approx_kl` has a median of 0.0056 against a `target_kl` of 0.02. The policy
-is confident and barely moving. I set `entropy_coef` to 0.002, down from the
-default 0.01, to stop the first run's entropy from rising, and that rise was
-also the observation bug rather than the coefficient.
+I owed a pitch here and gave a shrug. Here is the argument.
 
-**The mechanism.** For a predator, exploration is not obviously good: hesitation
-in a chase is costly, and the earlier noise test showed 30% random actions cost
-only 7% of survival, so the policy is not fragile to noise but also gains
-nothing from it. The honest position is that I do not have a first-principles
-reason to prefer a value here, which is exactly what a sweep is for.
+**The measurement, decoded.** Entropy sits at 0.505 median against a maximum of
+ln(5) = 1.609. That number is abstract until it is inverted: for a distribution
+putting `p` on one direction and the rest uniform,
 
-**Sweep.** `entropy_coef` in {0.0, 0.002, 0.01}. Include zero: with a working
-critic and an anchor, the usual argument for an entropy bonus, preventing
-premature collapse, is largely already covered.
+| p(top direction) | Entropy |
+|---|---|
+| 0.85 | 0.631 |
+| 0.90 | 0.464 |
+| 0.92 | 0.390 |
 
-**Falsified if** zero entropy produces a policy that collapses onto one
-direction. Watch the entropy trace, not the ratio.
+So **the policy is committing to a single direction about 88% of the time.** It
+is not exploring; it is executing.
+
+**Why that is the wrong default for this animal, and the asymmetry is again the
+argument.** A herbivore is surrounded by food: any direction is nearly as good
+as any other, sampling costs little, and an entropy bonus is cheap insurance
+against premature collapse. A predator's prey is sparse and mobile. Its
+information is a scent gradient it must follow across many steps, and a policy
+that samples a different direction 12% of the time is not exploring the space of
+strategies, it is adding noise to a pursuit. The measured noise test supports
+this reading: 30% random actions cost only 7% of survival, so the policy is
+robust to noise but gains nothing from it. **Entropy here buys robustness the
+predator does not need and pays for it in pursuit coherence.**
+
+**The counter-argument, which is why it stays in the grid.** Axis 1 removes the
+anchor. The anchor was the thing preventing collapse onto a degenerate policy,
+and with it gone the entropy bonus becomes the only remaining regularizer. The
+right value with a released anchor is therefore not knowable from the anchored
+run, and that interaction is precisely what makes it worth a column rather than
+a commitment.
+
+**Sweep.** `entropy_coef` in {0.0, 0.002, 0.01}, and it must be crossed with the
+anchor's release rather than tuned against the old anchored runs.
+
+**Falsified if** entropy at 0.0 falls toward zero and the policy commits to one
+direction regardless of observation. Watch the entropy trace, not the ratio: a
+run that wins on ratio while entropy collapses has probably found a degenerate
+strategy the 400-step evaluation window is too short to punish.
 
 ### 6. Architecture: `arch`
 
@@ -214,46 +309,65 @@ anchor needs the policy to be able to move.
 
 ## What I would actually run
 
-`sweep_rl.py` exists and its memory guard is sized against CPU RAM, which is now
-the wrong constraint; that wants fixing first, or the sweep wants driving by a
-small script that runs trials serially on the GPU.
+Four axes remain after the owner's decisions: two are commitments, one is a
+build, and the grid is small enough to read.
 
-**Stage 1, the two-factor screen, 12 trials.** The anchor and the architecture
-are the two axes with a mechanism argument strong enough to bet on, and they are
-plausibly interacting: a wider receptive field is only useful if the policy is
-allowed to depart from the rules to use it.
+**Commitments, not swept.** `imitation_floor` 0, so the anchor fades entirely.
+`segment_steps` 96 with `gamma` 0.997, so credit spans a typical 81-step life.
 
-    imitation_floor  in {0.0, 0.15, 0.3}
-    arch             in {conv, dilated}
-    gamma            in {0.99, 0.997}
+**Stage 0: the release, 2 trials.** Before anything else, run the current best
+configuration with the floor at 0 and `imitation_target` at 0.8 and 0.95. This
+is the cheapest and most informative experiment available, because it answers
+the question every other result depends on: what does this policy do when it is
+free? If it holds parity, the anchor was never load-bearing and the rest of the
+sweep is a search for gains. If it regresses, the reward is the whole problem
+and stage 2 becomes the only work worth doing. Either answer redirects the
+effort, which is what a first experiment should do.
 
-At 512, 6,000 world steps, 8 evaluation seeds, roughly 12 minutes a trial on the
-3090 plus 6 minutes of evaluation. Call it four hours serially.
+**Stage 1: the screen, 12 trials.**
 
-**Stage 2, the reward, 9 trials**, at the best stage-1 corner:
+    imitation_target in {0.8, 0.95}
+    arch             in {conv, dilated, residual}
+    entropy_coef     in {0.0, 0.002}
 
-    reproduction_reward in {10, 30, 60}
-    foraging_reward     in {0.01, 0.02, 0.05}
+with `lr` at 3e-4, plus 6 more trials repeating the best three at `lr` 1e-3,
+since the learning rate is table stakes and cheap to bolt on rather than cross
+fully. Roughly 18 trials at about 20 minutes each with the longer segment: six
+hours serially.
 
-**Stage 3, confirmation.** The best two configurations on five training seeds
-each, because the 16% noise floor means a 12-trial screen will produce an
-apparent winner by chance alone. **This stage is not optional.** The screen
-ranks; only the seeds decide.
+**Stage 2: the lineage reward, after building it.** Not a continuation of the
+grid, because it changes the objective rather than a hyperparameter. Build the
+biomass-plus-offspring reward, test it, then run `offspring_credit` in
+{0, 0.5, 1.0} at the best stage-1 configuration. Three trials, and the zero
+control is the one that says whether the lineage term does anything.
+
+**Stage 3: confirmation, five seeds each.** The best two configurations overall.
+Not optional, and the reason is arithmetic: 18 trials against a 16% noise floor
+will produce an apparent winner by chance alone.
+
+**One control run** of the committed segment and gamma against the old 32 / 0.99
+pair, at the best stage-1 corner, so the commitment in axis 3 is checked rather
+than assumed.
 
 ## The thing I would not sweep
 
-`survival_reward`. It is 1.0 so that the summed training reward is literally
-predator-steps survived, which is the quantity the evaluation reports. Changing
-it breaks the correspondence between what is optimized and what is judged for no
-gain that could not be had by changing the other two terms instead.
+`survival_reward`, but for a different reason now. Under the current reward it
+is 1.0 so that the summed training reward is literally predator-steps survived,
+matching what the evaluation reports. Under the lineage reward of axis 4 it goes
+to zero, because biomass replaces it rather than complements it. What must not
+happen is a grid that varies it against the other terms: that is the
+hand-weighting the lineage reward exists to abolish, and running both is how a
+sweep produces a number nobody can interpret.
 
 ## The honest caveat about all of this
 
-The metric's noise floor is 16% across evaluation seeds, and every effect
-proposed here is plausibly a few percent. A 12-trial screen at 8 evaluation
-seeds resolves about 11%. **Most of this sweep will return noise, and the
-correct reading of a 1.1x trial next to a 1.0x trial is that they are the same
-trial.** The sweep's real job is to find an effect large enough to survive
-stage 3, and the axis most likely to produce one is the anchor, because that is
-the one where the current setting is not a tuning choice at all but a workaround
-for a bug that has since been fixed.
+The metric's noise floor is 16% across evaluation seeds, and most effects
+proposed here are plausibly a few percent. **Most of this screen will return
+noise, and the correct reading of a 1.1x trial next to a 1.0x trial is that they
+are the same trial.** The screen ranks; only stage 3 decides.
+
+Two things escape that caveat, and they are the reason to run this at all.
+Stage 0 does not measure a small effect: releasing the anchor either holds
+parity or it does not, and the difference will be far larger than 16%. And axis
+4 is not a tuning change but a different objective, which is the only kind of
+change with a mechanism for a large gain rather than a marginal one.
