@@ -90,7 +90,8 @@ multirun/
 # Local experiment output
 rl_baseline_512.txt
 runs/
-sweeps/
+# Local sweep output directories, not conf/sweeps/ which holds the configs.
+/sweeps/
 sweep_run.log
 
 # Run logs written to the repo root by background jobs

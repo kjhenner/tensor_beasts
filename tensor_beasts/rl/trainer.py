@@ -179,6 +179,10 @@ class TrainerConfig:
 # their own sparse series instead of gaps in a dense one.
 _EVAL_PREFIXES = ("learned_", "rule_based_")
 _EVAL_KEYS = frozenset({"learned_over_rule_based"})
+# Run-level summaries of the ratio, computed across evaluations. A sweep should
+# optimise eval/ratio_mean_late rather than the last value; see
+# Trainer._record_eval_summary.
+_EVAL_SUMMARY_PREFIX = "eval_ratio_"
 # Metrics produced on a film step.
 _FILM_PREFIX = "film_"
 
@@ -214,7 +218,9 @@ def wandb_record(record: Dict[str, object]) -> Dict[str, object]:
             continue
         if value != value:  # NaN: a metric that was not measured this step
             continue
-        if key.startswith(_EVAL_PREFIXES) or key in _EVAL_KEYS:
+        if key.startswith(_EVAL_SUMMARY_PREFIX) or key == "eval_count":
+            out[f"eval/{key[5:] if key.startswith('eval_') else key}"] = value
+        elif key.startswith(_EVAL_PREFIXES) or key in _EVAL_KEYS:
             out[f"eval/{key}"] = value
         elif key.startswith(_FILM_PREFIX):
             out[f"film/{key[len(_FILM_PREFIX):]}"] = value
@@ -426,6 +432,7 @@ class Trainer:
         self.log_path = self.output_dir / self.config.log_name
 
         self._eval_envs: Dict[int, MultiAgentWorldEnv] = {}
+        self._eval_ratios: List[Tuple[int, float]] = []
         self._wandb = None
 
     # ------------------------------------------------------------------
@@ -785,6 +792,34 @@ class Trainer:
             self.network.train()
             torch.set_rng_state(rng_state)
 
+    def _record_eval_summary(self, record: Dict[str, object]) -> None:
+        """Keep the summary statistics a sweep should actually optimize.
+
+        W&B's summary holds the *last* value of each metric, and with this
+        metric's measured 16% noise floor across evaluation seeds the last
+        evaluation is one noisy draw. A sweep told to maximize it is largely
+        ranking luck.
+
+        Three summaries instead. ``eval/ratio_best`` is the best evaluation the
+        run reached, which is what a checkpoint-selecting workflow would keep.
+        ``eval/ratio_mean_late`` averages the evaluations from the second half
+        of the run, which is the one to optimize: it is the level the policy
+        settled at rather than a single sample of it, and averaging several
+        evaluations is the only lever that beats the noise floor without more
+        seeds. ``eval/ratio_last`` is kept for continuity.
+        """
+        ratio = record.get("learned_over_rule_based")
+        if not isinstance(ratio, (int, float)) or ratio != ratio:
+            return
+        self._eval_ratios.append((int(self.world_steps), float(ratio)))
+
+        ratios = [value for _, value in self._eval_ratios]
+        late = ratios[len(ratios) // 2:] or ratios
+        record["eval_ratio_best"] = max(ratios)
+        record["eval_ratio_mean_late"] = sum(late) / len(late)
+        record["eval_ratio_last"] = ratios[-1]
+        record["eval_count"] = float(len(ratios))
+
     def _film_display_config(self, load_config):
         """The display entry the films render through, or None if it is absent."""
         config = load_config(self.config.config_path)
@@ -1045,6 +1080,7 @@ class Trainer:
             if self.config.eval_interval and self.world_steps >= self._next_eval:
                 record.update(self.evaluate())
                 self._next_eval = self.world_steps + self.config.eval_interval
+                self._record_eval_summary(record)
 
             if self.config.checkpoint_interval and self.world_steps >= self._next_checkpoint:
                 record["checkpoint"] = str(self.save_checkpoint())

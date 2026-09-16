@@ -1,0 +1,92 @@
+# Stage 1: the screen. Run only after stage 0 says the released policy is viable.
+#
+# Three axes, 12 trials on a grid. Every other setting is a commitment argued
+# in planning/06-predator-sweep.md rather than a value to search.
+#
+# Read the results knowing the metric's noise floor is 16% across evaluation
+# seeds and eight seeds resolves about 11%. A 1.1x trial next to a 1.0x trial
+# is the same trial. This screen RANKS; only the five-seed confirmation in
+# stage 3 decides.
+#
+#   wandb sweep --project tensor-beasts-rl conf/sweeps/stage1-screen.yaml
+#   wandb agent <sweep-id>
+
+program: train_rl.py
+method: grid
+metric:
+  name: eval/ratio_mean_late
+  goal: maximize
+
+parameters:
+  # Axis 1. Every result so far used conv, whose receptive field is 7 cells,
+  # on three smooth diffused scent gradients. dilated sees 31 cells for FEWER
+  # parameters, 76k against 92k. This is the axis most likely to let the policy
+  # find something the 7-cell rules structurally cannot.
+  arch:
+    values: [conv, dilated, residual]
+
+  # Axis 2. Entropy 0.505 over five actions means the policy commits to one
+  # direction about 88% of the time: it is executing, not exploring. For a
+  # predator following a scent gradient across many steps, sampling is noise in
+  # a pursuit rather than exploration. But removing the anchor removes the only
+  # other regulariser, so the right value is not knowable from the anchored
+  # runs and must be crossed with the release.
+  entropy-coef:
+    values: [0.0, 0.002]
+
+  # Axis 3. Median approx_kl was 0.0056 against a target of 0.02, and the KL
+  # early stop almost never fired, so there is roughly 3.5x of unused movement
+  # budget. target-kl is the safety net if this overshoots.
+  lr:
+    values: [0.0003, 0.001]
+
+  # Committed. The anchor fades entirely: holding the policy near the rules
+  # hides the reward flaw we are trying to find.
+  imitation-floor:
+    value: 0.0
+  imitation-target:
+    value: 0.95
+  # A predator lives 81 steps. 96 fits a typical life in one segment; 0.997 is
+  # the soft half of the same horizon. Set apart, they are incoherent.
+  segment-steps:
+    value: 96
+  gamma:
+    value: 0.997
+  entity:
+    value: Predator
+  size:
+    value: 512
+  device:
+    value: cuda
+  steps:
+    value: 6000
+  epochs:
+    value: 2
+  minibatch-steps:
+    value: 4
+  imitation-coef:
+    value: 1.0
+  foraging-reward:
+    value: 0.02
+  pretrain-updates:
+    value: 30
+  target-kl:
+    value: 0.02
+  eval-interval:
+    value: 1500
+  eval-steps:
+    value: 400
+  eval-seeds:
+    value: 8
+  checkpoint-interval:
+    value: 3000
+  film-interval:
+    value: 0
+  seed:
+    value: 0
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}

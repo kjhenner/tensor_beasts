@@ -1,0 +1,89 @@
+# Stage 0: what does the predator do when the anchor lets go?
+#
+# Two trials. This is the cheapest and most informative experiment available,
+# and it is deliberately separate from the screen because its answer decides
+# whether the screen is worth running.
+#
+# Every predator result so far was produced with imitation_floor at 0.3, and
+# measured conformance of 0.913 against a target of 0.8 means the weight sat
+# exactly at that floor on 98.6% of updates. So the policy has never been
+# observed unanchored. If it holds parity here, the anchor was scaffolding and
+# stage 1 is a search for gains. If it regresses, the reward is the whole
+# problem and the lineage reward in stage 2 becomes the only work worth doing.
+#
+# Either answer redirects the effort, which is what a first experiment is for.
+# Note that a regression is a result, not a failed trial: it is the reward
+# failing a test the anchor previously hid.
+#
+#   wandb sweep --project tensor-beasts-rl conf/sweeps/stage0-release.yaml
+#   wandb agent <sweep-id>
+
+program: train_rl.py
+method: grid
+metric:
+  # The level the policy settled at, not the last noisy draw. The metric's
+  # noise floor across evaluation seeds is 16%, so a single evaluation is one
+  # sample of it; this averages the second half of a run's evaluations.
+  name: eval/ratio_mean_late
+  goal: maximize
+
+parameters:
+  # The one axis. 0.8 releases before RL even begins, since pretraining reaches
+  # 0.93 agreement; 0.95 is the first value where the anchor actually holds
+  # through the early updates and then genuinely lets go.
+  imitation-target:
+    values: [0.8, 0.95]
+
+  # Committed, not swept.
+  imitation-floor:
+    value: 0.0
+  entity:
+    value: Predator
+  size:
+    value: 512
+  arch:
+    value: conv
+  device:
+    value: cuda
+  # A predator lives 81 steps; 96 fits a typical life in one segment, and
+  # gamma 0.997 is the soft half of the same horizon. See planning/06.
+  segment-steps:
+    value: 96
+  gamma:
+    value: 0.997
+  steps:
+    value: 6000
+  epochs:
+    value: 2
+  minibatch-steps:
+    value: 4
+  imitation-coef:
+    value: 1.0
+  foraging-reward:
+    value: 0.02
+  pretrain-updates:
+    value: 30
+  target-kl:
+    value: 0.02
+  entropy-coef:
+    value: 0.002
+  eval-interval:
+    value: 1500
+  eval-steps:
+    value: 400
+  # Eight paired seeds resolves about 11%; three resolves 18%, which cannot see
+  # anything this sweep is looking for.
+  eval-seeds:
+    value: 8
+  checkpoint-interval:
+    value: 3000
+  film-interval:
+    value: 0
+  seed:
+    value: 0
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}
