@@ -102,3 +102,26 @@ Everything else is committed at a best guess. In the morning:
 Read `world_resets` first, by axis. Then the paired metabolic differences at
 matched seeds. Then the scores against the rules, which are now scores on
 the settled ecology and are not comparable with anything before this night.
+
+## First result: the frozen diagnostic
+
+Run at the committed settings with zero PPO epochs, so the policy is the
+pretrained one, unchanged, for the whole 5,760 steps.
+
+| | Frozen pretrained policy | Rules, same warmed worlds |
+|---|---|---|
+| Smoothed biomass, 8 seeds | 119,496 (97,513 to 168,500) | 66,373 |
+| Mean population per world | 1,547 | |
+| Mean lifespan | 122 steps | |
+| World resets in training | 0 | |
+
+The pretrained policy alone is stable across every trough in 5,760 steps and
+carries 1.8 times the rules' biomass on the settled ecology. On the old
+transient window it had looked like half the rules. So the hypothesis that
+"the start is bad" is out: it is RL that made the policy worse and then
+killed it, in all eight paired runs. Drift after release, step size and
+exposure remain, and they are what overnight2 varies.
+
+Every earlier evaluation, being of a fresh world's first 400 steps, ranked
+policies by how they handle a startup transient the training worlds are
+never in. That is now a settled point, not a hypothesis.
