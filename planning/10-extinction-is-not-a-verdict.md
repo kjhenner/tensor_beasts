@@ -84,20 +84,26 @@ training, and whether that falls. Not whether one world lived.
 
 ## What runs overnight
 
-In order, unattended, on the 3090 with two agents:
+In order, unattended, on the 3090, one agent at a time (a second agent was
+refused by the memory guard and burned three cells before it was stopped;
+those run again as the make-up sweeps):
 
 1. The frozen diagnostic: one run at the committed settings with zero PPO
    epochs, so the pretrained policy is scored and its resets counted.
-2. `conf/sweeps/overnight2.yaml`: metabolic on and off, release over 20 or
-   100 updates, lr 3e-4 or 1e-3, three seeds. 24 runs.
-3. `conf/sweeps/overnight2-long.yaml`: twice the budget at release 100 and
-   lr 3e-4, metabolic on and off, two seeds. 4 runs.
+2. `conf/sweeps/overnight2.yaml`, sweep `ypprc6q9`: metabolic on and off,
+   release over 20 or 100 updates, lr 3e-4 or 1e-3, three seeds. 24 runs,
+   of which three were burned and are re-run as `vbst3pbj` and `tvt49ilc`.
+3. `conf/sweeps/overnight2-long.yaml`, sweep `fzv7yfni`: twice the budget
+   at release 100 and lr 3e-4, metabolic on and off, two seeds. 4 runs.
 
 Everything else is committed at a best guess. In the morning:
 
-    venv/bin/python tools/sweep_report.py <overnight2 id> --pair metabolic
-    venv/bin/python tools/sweep_report.py <overnight2 id> --pair imitation-release-updates
-    venv/bin/python tools/sweep_report.py <overnight2-long id> --pair metabolic
+    venv/bin/python tools/sweep_report.py ypprc6q9,vbst3pbj,tvt49ilc --pair metabolic
+    venv/bin/python tools/sweep_report.py ypprc6q9,vbst3pbj,tvt49ilc --pair imitation-release-updates
+    venv/bin/python tools/sweep_report.py fzv7yfni --pair metabolic
+
+The driver is `outputs/overnight/run3.sh` and its logs sit beside it;
+`touch outputs/overnight/STOP` stops it between phases.
 
 Read `world_resets` first, by axis. Then the paired metabolic differences at
 matched seeds. Then the scores against the rules, which are now scores on

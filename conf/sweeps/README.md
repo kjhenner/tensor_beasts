@@ -8,8 +8,11 @@ wandb agent <sweep-id>
 venv/bin/python tools/sweep_report.py <sweep-id> --pair metabolic   # read it back
 ```
 
-A second agent in another shell shares the grid. The GPU is the bottleneck, so
-two agents do not halve the wall-clock, but they usually beat one.
+One agent per card. A run at 512 with four worlds reserves about 10.5 GB on
+the 3090 against a 9.5 GB estimate, and the card has about 20 GB free beside
+the resident llama-server, so a second agent is refused by the trainer's
+memory guard and the sweep records its cells as crashed. That happened on
+the night of 16 September and cost three cells (`overnight2-makeup-*`).
 
 Everything optimises `eval/score_mean_late`: the predator population's total
 carried biomass, exponentially smoothed over the run and averaged over the
@@ -22,6 +25,7 @@ denominator. Every trial also reports `score_spread`, `score_min` and
 |---|---|---|---|
 | `overnight2` | 24 | Metabolic x release speed x lr, on the corrected ecology with extinct worlds reset | **Running 17 Sep** |
 | `overnight2-long` | 4 | Twice the budget at the best-guess cell | **Running 17 Sep** |
+| `overnight2-makeup-a`, `-b` | 3 | The overnight2 cells a second agent burned | **Running 17 Sep** |
 | `done-metabolic-paired` | 8 | Does a learned throttle beat the rule's throttle? Paired, cold start | Done: all runs went extinct, see planning/10 |
 | `done-metabolic-anchored` | 16 | The same question, first attempt | Done: no answer, see below |
 | `done-overnight` | 32 | Reward mode x architecture x learning rate x anchor target | Done |
@@ -133,5 +137,6 @@ Measured at 512, `worlds=4 segment=32 minibatch=2`, 16 evaluation seeds:
 | Evaluation, 16 seeds | 9.3 GB |
 
 Evaluation is the peak, so `eval-seeds` is what to lower first if a run does
-not fit. The 3090 has about 20 GB free with the resident llama-server, so two
-agents fit with room to spare.
+not fit. The 3090 has about 20 GB free with the resident llama-server, which
+fits one run: reserved memory runs a couple of GB above the estimate, and two
+runs together do not fit.

@@ -1,0 +1,74 @@
+# Make-up for overnight2: cells a second sweep agent burned when the trainer's
+# memory guard refused them (two agents do not fit on the 3090 at these
+# settings). Same committed settings as overnight2.yaml. Read together:
+#   venv/bin/python tools/sweep_report.py ypprc6q9,<this id>,<the other> --pair metabolic
+#
+program: train_rl.py
+method: grid
+metric:
+  name: eval/score_mean_late
+  goal: maximize
+
+parameters:
+  metabolic:
+    values: [true]
+  imitation-release-updates:
+    value: 20
+  lr:
+    value: 0.0003
+  seed:
+    values: [1, 2]
+
+  # --- committed ---
+  arch:
+    value: conv
+  reward-mode:
+    value: biomass
+  imitation-coef:
+    value: 1.0
+  warmup-steps:
+    value: 1200
+  extinction-patience:
+    value: 1
+  worlds:
+    value: 4
+  segment-steps:
+    value: 32
+  minibatch-steps:
+    value: 2
+  gamma:
+    value: 0.997
+  entropy-coef:
+    value: 0.002
+  target-kl:
+    value: 0.02
+  epochs:
+    value: 2
+  pretrain-updates:
+    value: 10
+  steps:
+    value: 5760
+  entity:
+    value: Predator
+  size:
+    value: 512
+  device:
+    value: cuda
+  eval-seeds:
+    value: 8
+  eval-warmup-steps:
+    value: 600
+  eval-steps:
+    value: 800
+  eval-interval:
+    value: 1440
+  checkpoint-interval:
+    value: 2880
+  film-interval:
+    value: 5760
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}

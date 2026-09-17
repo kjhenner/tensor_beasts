@@ -4,6 +4,7 @@
     venv/bin/python tools/sweep_report.py kfb90mco
     venv/bin/python tools/sweep_report.py kfb90mco --pair metabolic --by seed
     venv/bin/python tools/sweep_report.py kfb90mco --metric eval/score_last --columns world_resets,eval/score_best
+    venv/bin/python tools/sweep_report.py ypprc6q9,abc123,def456 --pair metabolic   # a sweep plus its make-ups
 
 Every sweep so far has been read by an ad hoc script; this is that script,
 kept. The default metric is the sweep's own, eval/score_mean_late. `--pair`
@@ -58,21 +59,33 @@ def fmt(value: Any) -> str:
     return str(value)
 
 
-def load(project: str, sweep_id: str) -> tuple:
+def load(project: str, sweep_ids: str) -> tuple:
+    """Rows from one sweep, or from several given comma-separated, merged.
+
+    Several because a make-up sweep for cells a crashed agent burned is the
+    same experiment as the sweep it patches, and should be read with it. The
+    swept axes are the union, so a make-up sweep that fixes an axis at one
+    value still lines up under the original's columns.
+    """
     import wandb
     api = wandb.Api()
-    sweep = api.sweep(f"{project}/{sweep_id}")
-    swept = [k for k, v in (sweep.config or {}).get("parameters", {}).items() if "values" in v]
+    sweeps = [api.sweep(f"{project}/{sweep_id.strip()}") for sweep_id in sweep_ids.split(",")]
+    swept: List[str] = []
+    for sweep in sweeps:
+        for k, v in (sweep.config or {}).get("parameters", {}).items():
+            if "values" in v and k not in swept:
+                swept.append(k)
     rows = []
-    for run in sweep.runs:
-        summary = {k: v for k, v in run.summary._json_dict.items() if not isinstance(v, dict)}
-        rows.append({"id": run.id, "state": run.state, "config": dict(run.config), "summary": summary})
-    return sweep, swept, rows
+    for sweep in sweeps:
+        for run in sweep.runs:
+            summary = {k: v for k, v in run.summary._json_dict.items() if not isinstance(v, dict)}
+            rows.append({"id": run.id, "state": run.state, "config": dict(run.config), "summary": summary})
+    return sweeps[0], swept, rows
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("sweep", help="sweep id")
+    parser.add_argument("sweep", help="sweep id, or several comma-separated to read as one")
     parser.add_argument("--project", default="tensor-beasts-rl")
     parser.add_argument("--metric", default=None, help="summary key to compare (default: the sweep's metric)")
     parser.add_argument("--columns", default=None, help="comma-separated summary keys to show")
