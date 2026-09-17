@@ -1,0 +1,111 @@
+# Overnight, 17 September 2026: the first grid on the corrected ecology, run
+# with the trainer that resets an extinct world instead of stopping.
+#
+#   wandb sweep --project tensor-beasts-rl conf/sweeps/overnight2.yaml
+#   wandb agent <sweep-id>
+#
+# 24 trials, about five hours with two agents. Read it with
+#   venv/bin/python tools/sweep_report.py <sweep-id> --pair metabolic
+#
+# WHAT CHANGED SINCE THE PAIRED METABOLIC SWEEP (planning/10)
+#
+# All eight of its runs went extinct between a quarter and half of the way
+# through, and the old guard stopped each one there, so the scores were of a
+# policy in collapse. Under the rules alone the corrected ecology never goes
+# extinct: four seeds at 512 for 6,000 steps cycle between roughly 500 and
+# 1,500 predators. The learned predator dies in troughs the rules survive.
+#
+# Three things are different here. An extinct world is reset in place and
+# warmed up under the rules, so a run spends its whole budget and extinction
+# is a count (world_resets) rather than a verdict. Training starts after
+# 1,200 rule steps rather than 100, past the startup transient and into the
+# cycles, and long enough that the four worlds drift out of phase, which is
+# what batching them was for. And evaluation warms each world up for 600
+# rule steps before scoring 800, so the score is of the settled ecology; the
+# rules' smoothed biomass at step 400 of a fresh world was a fifth of their
+# steady-state level, and every earlier score was of that transient.
+#
+# THE QUESTIONS, AS AXES
+#
+# metabolic: the original question, now on an ecology that holds.
+# imitation-release-updates: whether drifting from the rule after a fast
+#   release is what kills the policy in the bust. 20 is the previous fade;
+#   100 holds it through the first trough.
+# lr: the KL early stop fired on nearly every update at 1e-3, so the runs
+#   got about 1.4 of their 2 epochs. 3e-4 is what that says to try.
+#
+# WHAT TO LOOK AT FIRST
+#
+# world_resets, per run and by axis. A policy that survives busts resets
+# rarely; one that does not resets every cycle, roughly every 600 steps. Then
+# the paired metabolic differences at matched seeds, then the marginals.
+
+program: train_rl.py
+method: grid
+metric:
+  name: eval/score_mean_late
+  goal: maximize
+
+parameters:
+  metabolic:
+    values: [true, false]
+  imitation-release-updates:
+    values: [20, 100]
+  lr:
+    values: [0.0003, 0.001]
+  seed:
+    values: [0, 1, 2]
+
+  # --- committed ---
+  arch:
+    value: conv
+  reward-mode:
+    value: biomass
+  imitation-coef:
+    value: 1.0
+  warmup-steps:
+    value: 1200
+  extinction-patience:
+    value: 1
+  worlds:
+    value: 4
+  segment-steps:
+    value: 32
+  minibatch-steps:
+    value: 2
+  gamma:
+    value: 0.997
+  entropy-coef:
+    value: 0.002
+  target-kl:
+    value: 0.02
+  epochs:
+    value: 2
+  pretrain-updates:
+    value: 10
+  steps:
+    value: 5760
+  entity:
+    value: Predator
+  size:
+    value: 512
+  device:
+    value: cuda
+  eval-seeds:
+    value: 8
+  eval-warmup-steps:
+    value: 600
+  eval-steps:
+    value: 800
+  eval-interval:
+    value: 1440
+  checkpoint-interval:
+    value: 2880
+  film-interval:
+    value: 5760
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}

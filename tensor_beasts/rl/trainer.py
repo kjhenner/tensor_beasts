@@ -125,12 +125,16 @@ class TrainerConfig:
     metabolic: bool = False
     # Channels of learned memory each individual carries; 0 disables it.
     memory_size: int = 0
-    # Stop the run when the controlled population has been extinct for this many
-    # consecutive segments. An extinct population produces no transitions, so
-    # every gradient, every diagnostic and every evaluation after that point is
-    # empty: a predator run once spent 89% of its world steps training on a
-    # world with no predators in it and reported NaN agreement the whole way.
-    # 0 disables the guard.
+    # Reset a world whose controlled population has been extinct for this many
+    # consecutive segments. An extinct world produces no transitions and, the
+    # simulation having no immigration, never repopulates, so leaving it in
+    # the batch trains on nothing: a predator run once spent 89% of its world
+    # steps that way. It used to stop the run instead, which treated one
+    # world's fate as the run's verdict and, worse, punished exactly the runs
+    # that met a bust early. The world is reset and warmed up under the rules
+    # in place, the other worlds are untouched, and the run spends its whole
+    # budget. Extinction stays visible as `world_resets` in the log. 0
+    # disables the reset and an extinct world simply stays empty.
     extinction_patience: int = 3
     # Supervised updates on rule-based rollouts before RL starts, each over one
     # segment of world steps. Zero skips it. See Trainer.pretrain for why a
@@ -153,6 +157,15 @@ class TrainerConfig:
     eval_steps: int = 500
     eval_seeds: int = 2
     eval_deterministic: bool = False
+    # World steps each evaluation world runs under the rules, from its reset,
+    # before either policy is scored on it. A fresh world spends its first
+    # several hundred steps in a startup transient (predators dip to a third
+    # of their starting count and recover), and a 400-step evaluation from the
+    # reset measured that transient rather than the settled cycles training
+    # happens in: the rules' smoothed biomass at step 400 was a fifth of their
+    # steady-state level. Both policies start from the same warmed state, so
+    # the comparison stays paired. 0 reproduces the old behaviour.
+    eval_warmup_steps: int = 0
 
     checkpoint_interval: int = 2_000
     output_dir: str = "outputs/rl"
@@ -544,6 +557,9 @@ class Trainer:
         self.size = self.env.size
         self.world_steps = 0
         self.updates = 0
+        # Worlds replaced after extinction, over the run; see reset_extinct_worlds.
+        self.world_resets = 0
+        self._extinct_segments: Optional[torch.Tensor] = None
         self.agent_steps = 0
         self.start_time = time.time()
         self._next_eval = 0
@@ -758,8 +774,14 @@ class Trainer:
         )
 
         agent_steps = rollout.num_agent_steps
+        per_world = self.env.population_per_world()
         stats = {
             "population": sum(populations) / max(len(populations), 1),
+            # The extremes across worlds, so a batch whose worlds sit at
+            # different phases of the cycle can be seen to, and an extinct
+            # world shows up before the reset does.
+            "population_min_world": float(per_world.min()),
+            "population_max_world": float(per_world.max()),
             "reward_per_agent_step": float(rollout.reward.sum()) / max(agent_steps, 1),
             "reproduction_rate": reproductions / max(agent_steps, 1),
             "survival_rate": survived / max(agent_steps, 1),
@@ -901,6 +923,11 @@ class Trainer:
             # stays paired exactly as it was when this was a loop.
             env = self._eval_env(seeds)
             env.reset(seed=seed)
+            # Past the startup transient before anything is scored. The
+            # reset seeded the RNG, so both policies see the same warmed
+            # worlds.
+            for _ in range(self.config.eval_warmup_steps):
+                env.rule_based_step()
             scored = self._score(env, self.config.eval_steps, policy)
             summary.update(scored.to_dict(policy))
             spread.update(scored.per_world(policy))
@@ -1187,6 +1214,63 @@ class Trainer:
         for _ in range(self.config.warmup_steps):
             self.env.rule_based_step()
 
+    def reset_extinct_worlds(self) -> int:
+        """Replace every world whose controlled population has been extinct for
+        ``extinction_patience`` consecutive segments with a fresh one, warmed
+        up under the rules for ``warmup_steps``. Returns how many were reset.
+
+        The fresh world is built as its own unbatched environment, run under
+        the rules, and copied leaf by leaf into the extinct world's slice of
+        the batched TensorDict, so the other worlds are not touched. Every
+        batched leaf is the unbatched leaf with a leading world axis, which is
+        what makes the copy a slice assignment; the one scalar (the water
+        oscillator's phase) is shared by all worlds and is left alone.
+
+        The fresh world's seed comes from the trainer's, offset by the reset
+        count, and the global RNG is restored afterwards so the training
+        stream does not depend on when a world happened to die.
+        """
+        patience = int(self.config.extinction_patience)
+        if patience <= 0:
+            return 0
+        per_world = self.env.population_per_world()
+        if self._extinct_segments is None or self._extinct_segments.numel() != per_world.numel():
+            self._extinct_segments = torch.zeros_like(per_world)
+        self._extinct_segments = torch.where(
+            per_world <= 0, self._extinct_segments + 1, torch.zeros_like(per_world)
+        )
+        due = torch.nonzero(self._extinct_segments >= patience).flatten().tolist()
+        if not due:
+            return 0
+
+        rng_state = torch.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        destination = self.env.world.td
+        batched = bool(self.env.world.batch_shape)
+        for index in due:
+            self.world_resets += 1
+            fresh = self._make_env(worlds=1)
+            fresh.reset(seed=self.config.seed + 20_000 + self.world_resets)
+            for _ in range(self.config.warmup_steps):
+                fresh.rule_based_step()
+            source = fresh.world.td
+            for key in source.keys(True, True):
+                value = source.get(key)
+                target = destination.get(key)
+                if value.dim() == 0 or target.shape != (
+                    (self.env.num_worlds,) + tuple(value.shape) if batched else tuple(value.shape)
+                ):
+                    continue
+                if batched:
+                    target[index].copy_(value)
+                else:
+                    target.copy_(value)
+            self._extinct_segments[index] = 0
+        torch.set_rng_state(rng_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
+        return len(due)
+
     def pretrain(self, verbose: bool = True) -> Dict[str, float]:
         """Supervised pretraining on the rule-based policy before any RL.
 
@@ -1355,7 +1439,6 @@ class Trainer:
         agent_steps_at_start = self.agent_steps
 
         record: Dict[str, object] = {}
-        extinct_segments = 0
         while self.world_steps < self.config.total_world_steps:
             steps = min(self.config.segment_steps, self.config.total_world_steps - self.world_steps)
 
@@ -1397,29 +1480,20 @@ class Trainer:
                 record.update(self.record_film())
                 self._next_film = self.world_steps + self.config.film_interval
 
-            # An extinct population is the end of the experiment, not a bad
-            # patch to train through: with nothing alive there are no
-            # transitions, so the loss has nothing to act on and the world can
-            # never repopulate, the simulation having no immigration.
-            if self.config.extinction_patience:
-                if collect_stats.get("population", 1.0) <= 0.0:
-                    extinct_segments += 1
-                else:
-                    extinct_segments = 0
-                if extinct_segments >= self.config.extinction_patience:
-                    record["extinct"] = True
-                    record["extinct_at_world_step"] = self.world_steps
-                    self.log(record)
-                    if verbose:
-                        print(self.format_record(record), flush=True)
-                        print(
-                            f"\n{self.config.entity} went extinct: no living individual for "
-                            f"{extinct_segments} consecutive segments, stopping at world step "
-                            f"{self.world_steps} of {self.config.total_world_steps}. Every "
-                            "gradient from here would be empty.",
-                            flush=True,
-                        )
-                    break
+            # A world that has gone extinct is reset, not mourned. Its dead
+            # individuals already entered the loss as the low returns they
+            # earned; what remains is an empty world that can teach nothing,
+            # so it is replaced by a fresh one and the run goes on. Done here,
+            # after the update, so no segment straddles a reset.
+            reset_now = self.reset_extinct_worlds()
+            record["worlds_reset_now"] = float(reset_now)
+            record["world_resets"] = float(self.world_resets)
+            if reset_now and verbose:
+                print(
+                    f"    reset {reset_now} extinct world(s) at world step {self.world_steps}; "
+                    f"{self.world_resets} resets so far",
+                    flush=True,
+                )
 
             self.log(record)
             if verbose:

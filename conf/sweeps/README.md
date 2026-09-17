@@ -3,8 +3,9 @@
 Run from the repository root:
 
 ```bash
-wandb sweep --project tensor-beasts-rl conf/sweeps/overnight.yaml
+wandb sweep --project tensor-beasts-rl conf/sweeps/overnight2.yaml
 wandb agent <sweep-id>
+venv/bin/python tools/sweep_report.py <sweep-id> --pair metabolic   # read it back
 ```
 
 A second agent in another shell shares the grid. The GPU is the bottleneck, so
@@ -19,7 +20,9 @@ denominator. Every trial also reports `score_spread`, `score_min` and
 
 | Config | Trials | Question | Status |
 |---|---|---|---|
-| `metabolic` | 8 | Does a learned throttle beat the rule's throttle? Paired, cold start | **Ready** |
+| `overnight2` | 24 | Metabolic x release speed x lr, on the corrected ecology with extinct worlds reset | **Running 17 Sep** |
+| `overnight2-long` | 4 | Twice the budget at the best-guess cell | **Running 17 Sep** |
+| `done-metabolic-paired` | 8 | Does a learned throttle beat the rule's throttle? Paired, cold start | Done: all runs went extinct, see planning/10 |
 | `done-metabolic-anchored` | 16 | The same question, first attempt | Done: no answer, see below |
 | `done-overnight` | 32 | Reward mode x architecture x learning rate x anchor target | Done |
 | `done-stageA-worlds` | 2 | Does training across four worlds help? | Done: yes |
@@ -89,8 +92,8 @@ Evaluation worlds derive from the training seed (`seed + 10_000`), so two
 trials at the same seed are scored on the same worlds and their difference is
 the measurement. A control from an earlier sweep only pairs with a trial at
 the seed it ran at. The first metabolic sweep paired 16 trials against the
-overnight grid's seed 0 and so had one clean pair per cell; `metabolic` runs
-both arms at four seeds.
+overnight grid's seed 0 and so had one clean pair per cell; every sweep since
+runs both arms at the same seeds.
 
 ## How to read a sweep
 

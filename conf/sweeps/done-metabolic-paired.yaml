@@ -1,3 +1,6 @@
+# DONE. All eight runs went extinct between a quarter and half of the budget and
+# the old guard stopped them there; see planning/10. Superseded by overnight2.yaml.
+#
 # Does a learned throttle beat the rule's throttle? Paired, this time.
 #
 #   wandb sweep --project tensor-beasts-rl conf/sweeps/metabolic.yaml

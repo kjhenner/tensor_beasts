@@ -191,10 +191,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SEGMENTS",
         help=(
-            "Stop when the controlled population has been extinct for this many "
+            "Reset a world whose controlled population has been extinct for this many "
             "consecutive segments (default 3, 0 disables). The simulation has no "
-            "immigration, so an extinct entity never returns and every gradient "
-            "after that point is empty."
+            "immigration, so an extinct world never repopulates; it is replaced by a "
+            "fresh one warmed up under the rules, and the run continues. Resets are "
+            "logged as world_resets."
         ),
     )
 
@@ -247,6 +248,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation.add_argument("--eval-interval", type=int, default=None)
     evaluation.add_argument("--eval-steps", type=int, default=None)
     evaluation.add_argument("--eval-seeds", type=int, default=None)
+    evaluation.add_argument("--eval-warmup-steps", type=int, default=None,
+                            help="world steps each evaluation world runs under the rules before scoring, "
+                                 "so the score is of the settled ecology rather than the startup transient (default 0)")
     evaluation.add_argument(
         "--eval-deterministic", action="store_true", default=None,
         help="argmax at evaluation instead of sampling",
@@ -324,6 +328,7 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "eval_interval": args.eval_interval,
         "eval_steps": args.eval_steps,
         "eval_seeds": args.eval_seeds,
+        "eval_warmup_steps": args.eval_warmup_steps,
         "eval_deterministic": args.eval_deterministic,
         "film_interval": args.film_interval,
         "film_steps": args.film_steps,

@@ -332,14 +332,12 @@ def test_pretraining_off_does_nothing(tmp_path):
     assert all(torch.equal(before[k], after[k]) for k in before)
 
 
-def test_training_stops_when_the_population_goes_extinct(tmp_path):
-    """An extinct population produces no gradient, so the run must end.
-
-    A predator run once trained for 6,000 world steps after its last predator
-    died, reporting NaN for every diagnostic, because nothing checked. The
-    simulation has no immigration: once a controlled entity is gone it cannot
-    come back, so continuing is pure waste.
-    """
+def test_a_dead_batch_is_reset_and_the_run_reaches_its_budget(tmp_path):
+    """An extinct world produces no gradient. The run used to stop there,
+    which treated one world's fate as the run's verdict and punished exactly
+    the runs that met a bust early. The world is reset instead: a predator run
+    once trained for 6,000 world steps after its last predator died, reporting
+    NaN for every diagnostic, and now it trains on a fresh ecology."""
     import torch
 
     from tensor_beasts.rl.ppo import PPOConfig
@@ -348,22 +346,30 @@ def test_training_stops_when_the_population_goes_extinct(tmp_path):
     trainer = Trainer(
         TrainerConfig(
             size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
-            warmup_steps=0, total_world_steps=400, segment_steps=8, eval_interval=0,
+            warmup_steps=0, total_world_steps=64, segment_steps=8, eval_interval=0,
             checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
             extinction_patience=2,
         ),
         PPOConfig(epochs=1, minibatch_steps=2),
     )
-    trainer.env.reset(seed=0)
-    # Kill every predator, which is what a collapsing policy eventually does.
-    trainer.env.entity.biomass.data.zero_()
+    # Kill every predator after the first segment, which is what a collapsing
+    # policy eventually does. train() resets the world itself, so the kill has
+    # to land inside the loop. This is the unbatched path; the batched one is
+    # covered below.
+    original_collect = trainer.collect
 
+    def collect_then_kill(steps):
+        rollout, stats = original_collect(steps)
+        trainer.env.entity.biomass.data.zero_()
+        trainer.env.entity.energy.data.zero_()
+        return rollout, stats
+
+    trainer.collect = collect_then_kill
     record = trainer.train(verbose=False)
 
-    assert record.get("extinct") is True
-    assert trainer.world_steps < trainer.config.total_world_steps, (
-        "the loop should stop early rather than run to completion on an empty world"
-    )
+    assert trainer.world_steps == trainer.config.total_world_steps
+    assert record["world_resets"] >= 1
+    assert "extinct" not in record
 
 
 def test_extinction_guard_can_be_disabled(tmp_path):
@@ -534,3 +540,90 @@ def test_device_selection_survives_a_card_that_cannot_be_queried(monkeypatch):
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", flaky)
     assert trainer_module.resolve_device("auto") == torch.device("cuda:1")
+
+
+# ----------------------------------------------------------------------
+# Extinction is a world event, not the run's verdict
+# ----------------------------------------------------------------------
+def _slice_hashes(world):
+    """One hash per world of every batched leaf, so untouched worlds can be
+    shown untouched to the bit."""
+    import hashlib
+    worlds = world.num_worlds
+    digests = [hashlib.sha256() for _ in range(worlds)]
+    for key in sorted(world.td.keys(True, True), key=str):
+        value = world.td.get(key)
+        if value.dim() == 0 or value.shape[0] != worlds:
+            continue
+        for index in range(worlds):
+            digests[index].update(str(key).encode())
+            digests[index].update(value[index].detach().cpu().contiguous().numpy().tobytes())
+    return [d.hexdigest() for d in digests]
+
+
+def test_an_extinct_world_is_reset_in_place_and_the_others_are_untouched(tmp_path):
+    trainer = make_trainer(tmp_path, worlds=3, warmup_steps=3, extinction_patience=2)
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+    entity = trainer.env.entity
+
+    # Kill world 1 outright: no biomass, no energy, nothing left to act.
+    entity.biomass.data[1].zero_()
+    entity.energy.data[1].zero_()
+    before = _slice_hashes(trainer.env.world)
+    rng_before = torch.get_rng_state()
+    assert float(trainer.env.population_per_world()[1]) == 0
+
+    assert trainer.reset_extinct_worlds() == 0, "one empty segment is inside the patience"
+    assert trainer.reset_extinct_worlds() == 1, "the second is not"
+    assert trainer.world_resets == 1
+
+    after = _slice_hashes(trainer.env.world)
+    assert after[0] == before[0] and after[2] == before[2], "the living worlds are bit-identical"
+    assert after[1] != before[1]
+    assert float(trainer.env.population_per_world()[1]) > 0, "the reset world is populated"
+    assert torch.equal(torch.get_rng_state(), rng_before), "the training RNG stream is untouched"
+    assert trainer.reset_extinct_worlds() == 0, "a repopulated world is not reset again"
+
+    # And the batch keeps stepping: a collect over the reset world must work.
+    rollout, stats = trainer.collect(2)
+    assert stats["population_min_world"] > 0
+    assert rollout.observation.shape[1] == 3
+
+
+def test_an_extinct_run_now_spends_its_whole_budget(tmp_path):
+    """The old guard stopped the run after `extinction_patience` empty
+    segments. A world that dies is reset instead and the run continues to
+    the last world step."""
+    trainer = make_trainer(tmp_path, worlds=2, warmup_steps=2, extinction_patience=1,
+                           total_world_steps=16, segment_steps=4)
+    trainer._init_wandb = lambda: None
+    original_collect = trainer.collect
+    killed = {"done": False}
+
+    def collect_then_kill(steps):
+        rollout, stats = original_collect(steps)
+        if not killed["done"]:
+            trainer.env.entity.biomass.data[0].zero_()
+            trainer.env.entity.energy.data[0].zero_()
+            killed["done"] = True
+        return rollout, stats
+
+    trainer.collect = collect_then_kill
+    record = trainer.train(verbose=False)
+    assert trainer.world_steps == 16, "the run reached its budget"
+    assert record["world_resets"] >= 1
+    assert "extinct" not in record
+
+
+def test_evaluation_warms_the_worlds_up_under_the_rules_before_scoring(tmp_path):
+    trainer = make_trainer(tmp_path, eval_seeds=2, eval_steps=3, eval_warmup_steps=5)
+    trainer.env.reset(seed=0)
+    trainer.evaluate()
+    env = trainer._eval_env(2)
+    assert env.world.step == 5 + 3, "warmup steps precede the scored steps"
+
+    plain = make_trainer(tmp_path / "plain", eval_seeds=2, eval_steps=3, eval_warmup_steps=0)
+    plain.env.reset(seed=0)
+    plain.evaluate()
+    assert plain._eval_env(2).world.step == 3

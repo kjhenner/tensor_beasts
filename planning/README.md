@@ -16,6 +16,7 @@ This directory contains planning and status documents for major feature developm
 | Batched worlds | In progress | [07-batched-worlds.md](./07-batched-worlds.md) |
 | Next sweep | Planned | [08-next-sweep.md](./08-next-sweep.md) |
 | Metabolic sweep | In progress | [09-metabolic-sweep.md](./09-metabolic-sweep.md) |
+| Extinction is not a verdict | In progress | [10-extinction-is-not-a-verdict.md](./10-extinction-is-not-a-verdict.md) |
 
 ## Overview
 

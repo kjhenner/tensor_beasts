@@ -1,0 +1,79 @@
+# Overnight, 17 September 2026, second wave: twice the budget at the
+# best-guess cell of overnight2, chosen before its results were in.
+#
+# 4 trials, about an hour and a half with two agents. The question is
+# exposure: with extinct worlds reset rather than terminal, a policy sees
+# several busts per run, and this asks whether seeing twice as many changes
+# how often it dies in them. Compare world_resets per world-step between the
+# first and second halves of each run, and against overnight2's matching
+# cell (release 100, lr 3e-4).
+
+program: train_rl.py
+method: grid
+metric:
+  name: eval/score_mean_late
+  goal: maximize
+
+parameters:
+  metabolic:
+    values: [true, false]
+  seed:
+    values: [0, 1]
+
+  imitation-release-updates:
+    value: 100
+  lr:
+    value: 0.0003
+  steps:
+    value: 11520
+
+  arch:
+    value: conv
+  reward-mode:
+    value: biomass
+  imitation-coef:
+    value: 1.0
+  warmup-steps:
+    value: 1200
+  extinction-patience:
+    value: 1
+  worlds:
+    value: 4
+  segment-steps:
+    value: 32
+  minibatch-steps:
+    value: 2
+  gamma:
+    value: 0.997
+  entropy-coef:
+    value: 0.002
+  target-kl:
+    value: 0.02
+  epochs:
+    value: 2
+  pretrain-updates:
+    value: 10
+  entity:
+    value: Predator
+  size:
+    value: 512
+  device:
+    value: cuda
+  eval-seeds:
+    value: 8
+  eval-warmup-steps:
+    value: 600
+  eval-steps:
+    value: 800
+  eval-interval:
+    value: 1440
+  checkpoint-interval:
+    value: 2880
+  film-interval:
+    value: 11520
+
+command:
+  - ${env}
+  - venv/bin/python
+  - ${program}
+  - ${args}
