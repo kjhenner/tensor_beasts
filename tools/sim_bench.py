@@ -147,8 +147,13 @@ def main() -> int:
         results = golden(configs, steps=args.steps or 60, size=(args.size or [64])[0], seed=args.seed)
         print(json.dumps(results, indent=2))
         if args.save:
+            # Merge before opening for write: opening truncates the file, and
+            # the merge used to read it afterwards, so every save silently
+            # dropped the other devices' baselines.
+            merged = merge_baseline(args.save, device, results)
             with open(args.save, "w") as handle:
-                json.dump(merge_baseline(args.save, device, results), handle, indent=2)
+                json.dump(merged, handle, indent=2)
+                handle.write("\n")
             print(f"\nsaved -> {args.save} (device {device})", file=sys.stderr)
         if args.check:
             with open(args.check) as handle:
