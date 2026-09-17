@@ -933,6 +933,12 @@ class Trainer:
             spread.update(scored.per_world(policy))
         self.network.train()
         torch.set_rng_state(rng_state)
+        # Evaluation is the run's allocation peak, and the caching allocator
+        # would otherwise hold that peak for the rest of the run. Two agents
+        # sharing one card each hoarding an evaluation's worth is what stops
+        # the second from fitting.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         # The spread across seeds is the quantity every claim in this project is
         # hedged against, so it is reported rather than averaged away.
@@ -1423,6 +1429,9 @@ class Trainer:
                     f"population {last['population']:.0f}"
                 )
 
+        # Pretraining's stacked segment is a transient peak; give it back.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return last
 
     def train(self, verbose: bool = True) -> Dict[str, object]:
