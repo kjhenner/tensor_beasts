@@ -336,36 +336,40 @@ def _rollout_with_rule_units(seed=0, steps=6, size=8, channels=10):
     )
 
 
-def test_metabolic_imitation_pulls_the_throttle_toward_the_rule():
-    """Zero advantages, so imitation is the only signal: the throttle's error
-    against the rule must fall and the chosen-unit diagnostic be reported."""
+def test_throttle_distillation_pulls_the_throttle_toward_the_rule():
+    """The pretraining loss for the throttle, optimised directly: the mean's
+    error against the rule must fall, and the policy's std must not move, since
+    the fit is at a fixed scale and the std is exploration."""
+    from tensor_beasts.rl.ppo import throttle_distillation
+
     torch.manual_seed(0)
     rollout = _rollout_with_rule_units()
     network = build_network("linear", 10, metabolic=True)
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_release_updates=1000,
-                        epochs=1, minibatch_steps=6, entropy_coef=0.0, value_coef=0.0))
     optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
+    std_before = float(network.metabolic_log_std.exp())
 
-    first = ppo.update(network, rollout, optimizer)
+    def fit():
+        out = network.forward_all(rollout.observation.float())
+        return throttle_distillation(out["metabolic_mean"], rollout.rule_metabolic_unit, rollout.acted)
+
+    _, first_error = fit()
     for _ in range(40):
-        last = ppo.update(network, rollout, optimizer)
+        loss, _ = fit()
+        optimizer.zero_grad(); loss.backward(); optimizer.step()
+    _, last_error = fit()
+    assert float(last_error) < float(first_error) - 0.05
+    assert float(network.metabolic_log_std.exp()) == pytest.approx(std_before)
 
-    assert last["metabolic_error"] < first["metabolic_error"] - 0.05
-    assert last["metabolic_imitation_loss"] < first["metabolic_imitation_loss"]
-    assert 0.0 <= last["metabolic_unit_mean"] <= 1.0
-    assert 0.0 <= last["metabolic_head_mean"] <= 1.0
-    assert 0.0 <= last["metabolic_rule_mean"] <= 1.0
-    # The rule's throttle here is a function of the observation, so a head
-    # that has fitted it varies across cells the way the rule does.
-    assert last["metabolic_head_spread"] > first["metabolic_head_spread"]
-    assert last["metabolic_rule_corr"] > 0.5
-    # The anchor judges disagreement at a fixed scale and fits the mean only.
-    # With no policy gradient (zero advantages) and no entropy bonus, the
-    # policy's own spread is untouched: it is exploration, not something the
-    # rule has an opinion about. Under the learned-std likelihood it used to
-    # shrink here, and in training that made the anchor strengthen itself.
-    assert last["metabolic_std"] == pytest.approx(math.exp(-3.0), rel=1e-6)
-    assert last["metabolic_entropy"] == pytest.approx(first["metabolic_entropy"], rel=1e-6)
+    # And during RL the same distance is logged, alongside the head's spread
+    # and its correlation with the rule, without entering the loss.
+    ppo = PPO(PPOConfig(epochs=1, minibatch_steps=6, entropy_coef=0.0, value_coef=0.0))
+    result = ppo.update(network, rollout, torch.optim.Adam(network.parameters(), lr=0.0))
+    assert result["metabolic_error"] == pytest.approx(float(last_error), abs=1e-4)
+    assert 0.0 <= result["metabolic_head_mean"] <= 1.0
+    assert 0.0 <= result["metabolic_rule_mean"] <= 1.0
+    assert result["metabolic_head_spread"] > 0.0
+    assert result["metabolic_rule_corr"] > 0.5
+    assert result["metabolic_std"] == pytest.approx(math.exp(-3.0), rel=1e-6)
 
 
 def test_evaluation_scores_the_throttle_at_the_heads_mean(tmp_path):
@@ -399,55 +403,25 @@ def test_masked_correlation_and_spread_read_zero_on_a_flat_field():
     assert float(masked_corr(varied, -varied, mask)) == pytest.approx(-1.0, abs=1e-5)
 
 
-def test_metabolic_imitation_is_masked_to_acting_cells():
+def test_throttle_distillation_is_masked_to_acting_cells():
+    from tensor_beasts.rl.ppo import throttle_distillation
+
     rollout = _rollout_with_rule_units()
     network = build_network("linear", 10, metabolic=True)
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0))
-    batch = list(next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False)))
-    before = float(ppo.minibatch_loss(network, tuple(batch)))
-    _, clean = ppo._losses(network, *batch)
-
-    idle = ~batch[1]
-    rule_units = batch[10].clone()
-    rule_units[idle] = 1.0 - rule_units[idle]
-    batch[10] = rule_units
-    chosen = batch[9].clone()
-    chosen[idle] = 1.0 - chosen[idle]
-    batch[9] = chosen
-    after = float(ppo.minibatch_loss(network, tuple(batch)))
-    _, dirty = ppo._losses(network, *batch)
-
-    assert before == pytest.approx(after)
-    for key in ("metabolic_error", "metabolic_unit_mean", "metabolic_imitation_loss"):
-        assert clean[key] == pytest.approx(dirty[key], abs=1e-6), key
-
-
-def test_both_levers_share_one_cross_fade_weight():
-    """One anchor, two levers: the metabolic term is scaled by the same weight
-    as the direction term, and both vanish together when the anchor releases."""
-    rollout = _rollout_with_rule_units()
-    network = build_network("linear", 10, metabolic=True)
-    batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
-
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_release_updates=10,
-                        entropy_coef=0.0, value_coef=0.0))
-    ppo.rl_updates = 0
-    _, engaged = ppo._losses(network, *batch)
-    ppo.rl_updates = 10
-    _, released = ppo._losses(network, *batch)
-
-    assert engaged["imitation_weight"] == 1.0 and released["imitation_weight"] == 0.0
-    # With zero advantages the policy loss is zero, so the engaged loss is
-    # exactly the two imitation terms and the released loss is nothing.
-    assert engaged["loss"] == pytest.approx(engaged["imitation_loss"] + engaged["metabolic_imitation_loss"], abs=1e-5)
-    assert released["loss"] == pytest.approx(0.0, abs=1e-6)
+    mean = network.forward_all(rollout.observation.float())["metabolic_mean"]
+    loss, error = throttle_distillation(mean, rollout.rule_metabolic_unit, rollout.acted)
+    idle = ~rollout.acted
+    scrambled = torch.where(idle, 1.0 - rollout.rule_metabolic_unit, rollout.rule_metabolic_unit)
+    loss2, error2 = throttle_distillation(mean, scrambled, rollout.acted)
+    assert float(loss) == pytest.approx(float(loss2))
+    assert float(error) == pytest.approx(float(error2))
 
 
 # ----------------------------------------------------------------------
 # Trainer, checkpoint, controller
 # ----------------------------------------------------------------------
 def make_trainer(tmp_path, ppo=None, **overrides):
-    ppo = ppo or PPOConfig(epochs=1, minibatch_steps=2, imitation_coef=1.0)
+    ppo = ppo or PPOConfig(epochs=1, minibatch_steps=2)
     defaults = dict(
         size=SIZE, arch="conv", arch_kwargs={"hidden_channels": 8, "depth": 1},
         metabolic=True, device="cpu", seed=0,
@@ -464,7 +438,7 @@ def test_ratio_is_one_on_a_fresh_two_lever_segment(tmp_path):
 
     One minibatch covering the whole segment, as in test_trainer: a second
     minibatch would see a network that had already taken a step."""
-    trainer = make_trainer(tmp_path, ppo=PPOConfig(epochs=1, minibatch_steps=4, imitation_coef=1.0))
+    trainer = make_trainer(tmp_path, ppo=PPOConfig(epochs=1, minibatch_steps=4))
     trainer.env.reset(seed=0)
     rollout, _ = trainer.collect(4)
     assert rollout.metabolic_unit is not None and rollout.rule_metabolic_unit is not None
@@ -476,7 +450,7 @@ def test_ratio_is_one_on_a_fresh_two_lever_segment(tmp_path):
 def test_two_lever_training_runs_evaluates_and_the_controller_drives_it(tmp_path):
     trainer = make_trainer(tmp_path)
     record = trainer.train(verbose=False)
-    for key in ("metabolic_error", "metabolic_unit_mean", "metabolic_imitation_loss"):
+    for key in ("metabolic_error", "metabolic_unit_mean", "metabolic_head_mean"):
         assert key in record and record[key] == record[key], key
     summary = trainer.evaluate()
     assert "learned_over_rule_based" in summary

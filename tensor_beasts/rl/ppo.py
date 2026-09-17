@@ -18,19 +18,28 @@ entropy bonus, which is defined at every cell whether or not anybody is standing
 there; masking it is what keeps the entropy number interpretable as
 "entropy of a real agent's action distribution".
 
-Two levers, one anchor
-----------------------
+Two levers
+----------
 
 When the network carries a metabolic head (see
 :class:`~tensor_beasts.rl.networks.ActorCritic`) the per-cell policy is the
-product of two independent categoricals, one over directions and one over
-a continuous throttle. The joint log-probability is the sum of the two, the entropy
-bonus is the sum of the two entropies, and the clipped ratio is taken over the
+product of a categorical over directions and a Gaussian over a continuous
+throttle. The joint log-probability is the sum of the two, the entropy bonus
+is the sum of the two entropies, and the clipped ratio is taken over the
 joint, so ``rollout.log_prob`` must hold the joint log-prob at collection
-time. The imitation anchor gains a second term, a fixed-scale Gaussian
-log-likelihood of the rule's own throttle on the same observation, weighted
-by the *same* fade weight as the direction term: there is one anchor with two
-levers, and it fades to zero as a whole on one schedule of updates.
+time.
+
+The rule-based policy and the learner
+-------------------------------------
+
+The rules are the learner's initialisation and its yardstick, nothing more.
+:func:`rule_distillation` and :func:`throttle_distillation` are the losses
+pretraining fits both heads with; during RL the same functions run without
+gradient so the log shows how far the policy has drifted from the rules
+(``conformance``, ``argmax_agreement``, ``metabolic_error``), and nothing
+pulls it back. An anchor that kept pulling during RL, in three versions,
+was what kept every predator run alive and what hid that RL was degrading
+the policy (planning/10). It is gone rather than tuned.
 
 Slotting in other algorithms
 ----------------------------
@@ -69,13 +78,12 @@ NUM_ACTIONS = 5
 MIN_LOG_STD = -4.0
 MAX_LOG_STD = 1.0
 
-# The scale the throttle anchor judges disagreement at, in normalised throttle
-# units, so a tenth of the basal-to-max range costs half a nat. Fixed rather
-# than the policy's own learned std, and the reason is in the record: under
-# the learned std the anchor's pull on the mean scales as 1/std^2 while the
-# same term shrinks the std, so the anchor strengthened itself until the
-# throttle was pinned to the rule (planning/09). The policy's std is now
-# exploration only, set by its initialisation, PPO and the entropy bonus.
+# The scale pretraining judges throttle disagreement at, in normalised
+# throttle units, so a tenth of the basal-to-max range costs half a nat.
+# Fixed rather than the policy's own learned std: under the learned std the
+# pull on the mean scaled as 1/std^2 while the same term shrank the std, so
+# the fit strengthened itself until the throttle was pinned (planning/09).
+# The policy's std is exploration only, set by its initialisation and PPO.
 METABOLIC_ANCHOR_STD = 0.1
 
 
@@ -150,6 +158,76 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / count
 
 
+def rule_distillation(
+    log_probs: torch.Tensor,
+    rule_action: torch.Tensor,
+    rule_scores: Optional[torch.Tensor],
+    temperature: float,
+    mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """How far a direction policy is from the rule, as a loss and two readings.
+
+    Args:
+        log_probs: (B, 5, H, W) log-probabilities over directions.
+        rule_action: (B, H, W) the rule's direction.
+        rule_scores: (B, 5, H, W) the rule's per-direction scores, or None.
+        temperature: Softmax temperature over the scores. Positive with
+            scores present is soft distillation toward softmax(scores / T);
+            otherwise hard cross-entropy to the rule's direction.
+        mask: (B, H, W) acting cells.
+
+    Returns:
+        (loss, conformance, argmax_agreement), each a scalar tensor. Loss is
+        the masked mean KL (soft) or negative log-likelihood (hard).
+        Conformance is progress from a uniform policy (0) to an exact match
+        (1) under the soft target, or argmax agreement under the hard one.
+
+    Soft, because the rule's decisions are knife-edge: its absolute score
+    gaps have a median near 0.01, so hard argmax imitation spends its
+    gradient on coin-flips. At a temperature of that order a typical
+    decision is a mild preference, a clear one is sharp, and a near-tie is
+    near-uniform and costs nothing to disagree with.
+    """
+    with torch.no_grad():
+        argmax_agreement = masked_mean((log_probs.argmax(dim=1) == rule_action).float(), mask)
+    if rule_scores is not None and temperature > 0.0:
+        target = F.softmax(rule_scores / temperature, dim=1)
+        kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
+        loss = masked_mean(kl, mask)
+        with torch.no_grad():
+            # Progress from a uniform policy toward an exact match. The raw
+            # Bhattacharyya overlap with a diffuse target is already about
+            # 0.77 for a uniform policy, so it is rescaled: uniform sits at 0,
+            # an exact match at 1, comparable with argmax agreement.
+            overlap = (target * log_probs.exp()).sqrt().sum(dim=1)
+            uniform_overlap = (target / NUM_ACTIONS).sqrt().sum(dim=1)
+            progress = (overlap - uniform_overlap) / (1.0 - uniform_overlap).clamp(min=1e-6)
+            conformance = masked_mean(progress.clamp(-1.0, 1.0), mask)
+    else:
+        rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
+        loss = -masked_mean(rule_log_prob, mask)
+        conformance = argmax_agreement
+    return loss, conformance, argmax_agreement
+
+
+def throttle_distillation(
+    mean: torch.Tensor, rule_unit: torch.Tensor, mask: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """How far a throttle head's mean is from the rule's throttle.
+
+    Returns (loss, error): the masked Gaussian negative log-likelihood of the
+    rule's unit around the mean at METABOLIC_ANCHOR_STD, up to a constant,
+    and the masked mean absolute distance in normalised units, so 0.1 is a
+    tenth of the range from basal to maximum. Fits the mean only; the
+    policy's std is exploration and is not the rule's to set.
+    """
+    rule_unit = rule_unit.float()
+    loss = masked_mean(0.5 * ((rule_unit - mean) / METABOLIC_ANCHOR_STD) ** 2, mask)
+    with torch.no_grad():
+        error = masked_mean((mean - rule_unit).abs(), mask)
+    return loss, error
+
+
 def masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """Population standard deviation of ``values`` over the True entries of ``mask``."""
     mean = masked_mean(values, mask)
@@ -217,34 +295,13 @@ class PPOConfig:
     learning_rate: float = 3e-4
     clip_range: float = 0.2
     value_clip_range: Optional[float] = None
-    entropy_coef: float = 0.01
-    # Imitation of the simulation's rule-based policy, faded out over a fixed
-    # number of RL updates. The weight applied at RL update k (counting from
-    # zero) is
-    #     imitation_coef * max(0, 1 - k / imitation_release_updates)
-    # so the anchor is at full strength on the first update and gone for good
-    # once the schedule runs out. Pretraining uses the full coefficient
-    # throughout, since its only job is to fit the rule. Zero disables it.
-    #
-    # It used to be a controller on measured agreement,
-    #     imitation_coef * max(floor, 1 - conformance / target),
-    # which never released: agreement plateaus near 0.87 and a target above
-    # that held the anchor at a tenth of its strength for the whole run, while
-    # a target below it re-engaged whenever agreement dipped. The intent was
-    # always a full release, so the schedule is now a schedule (planning/09).
-    imitation_coef: float = 0.0
-    # RL updates over which the anchor fades to zero. Zero means the anchor is
-    # off during RL, and only pretraining fits the rule.
-    imitation_release_updates: int = 0
-    # Soft distillation. When the rollout carries the rule's per-action scores,
-    # the imitation target is softmax(scores / temperature) and the loss is the
-    # KL from that target to the policy. The temperature sets what counts as a
-    # confident rule decision: the rule's absolute score gaps have a median
-    # near 0.01, so 0.01 makes a typical decision a mild preference and a
-    # clear one sharp, while a near-tie becomes near-uniform and costs nothing
-    # to disagree with. That is the point: the rules are knife-edge, and hard
-    # argmax imitation spends its gradient on coin-flips. Set to 0 to fall back
-    # to hard imitation of the argmax.
+    # Zero: thousands of sampled individuals explore already, and in the runs
+    # that collapsed the direction entropy rose on its own as the policy
+    # diffused. A bonus for that is a bonus for the failure.
+    entropy_coef: float = 0.0
+    # Pretraining only: the temperature of the soft target softmax(rule scores
+    # / T) the direction head is distilled toward. See rule_distillation for
+    # why it is soft and why 0.01. Zero falls back to hard imitation.
     imitation_temperature: float = 0.01
     # Recurrent training of the memory write. Zero is off: the memory read at
     # each step is the stored one and the write is a fixed function of the
@@ -316,18 +373,6 @@ class PPO:
         # global clipping leaves the policy with a thousandth of its intended
         # step. See tensor_beasts/rl/normalization.py for the measurement.
         self.value_normalizer = value_normalizer or ValueNormalizer(enabled=False)
-        # RL updates completed so far, which is what the anchor's fade runs on.
-        # The trainer restores it from a checkpoint so a resumed run does not
-        # re-anchor.
-        self.rl_updates = 0
-
-    def imitation_weight(self) -> float:
-        """Current fade weight on the imitation term. See PPOConfig."""
-        config = self.config
-        if config.imitation_coef <= 0.0 or config.imitation_release_updates <= 0:
-            return 0.0
-        remaining = 1.0 - self.rl_updates / float(config.imitation_release_updates)
-        return config.imitation_coef * max(0.0, remaining)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
@@ -473,49 +518,18 @@ class PPO:
         entropy_mean = masked_mean(entropy, mask)
         loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_mean
 
-        # Imitation of the rule-based policy: cross-entropy to its action,
-        # weighted by the fade. Conformance is measured whether or not the
-        # term is active, so the log shows how far from the rules the policy
-        # has drifted even when nothing is pulling it back; it no longer
-        # drives anything.
-        imitation_loss = torch.zeros((), device=loss.device)
+        # Distance from the rules, logged and nothing else: how far the
+        # policy has drifted from its initialisation, and whether its throttle
+        # runs hot or cold and varies across the field at all.
         conformance = float("nan")
         argmax_agreement = float("nan")
-        soft = rule_scores is not None and config.imitation_temperature > 0.0
-        if soft:
-            # Distill toward the rule's scoring regime rather than its outcome.
-            target = F.softmax(rule_scores / config.imitation_temperature, dim=1)
-            kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
-            imitation_loss = masked_mean(kl, mask)
-            with torch.no_grad():
-                # Conformance to the scoring regime, as progress from a uniform
-                # policy toward an exact match. The raw Bhattacharyya coefficient
-                # between the policy and the target is 1 at an exact match, but
-                # because the targets are themselves diffuse a uniform policy
-                # already scores about 0.77 against them; a cross-fade keyed on
-                # the raw value let go of the anchor within two updates while
-                # argmax agreement was still at chance. Rescaling so that the
-                # uniform policy sits at 0 and an exact match at 1 makes the
-                # target comparable to the hard-imitation scale it replaced.
-                overlap = (target * log_probs.exp()).sqrt().sum(dim=1)
-                uniform_overlap = (target / NUM_ACTIONS).sqrt().sum(dim=1)
-                progress = (overlap - uniform_overlap) / (1.0 - uniform_overlap).clamp(min=1e-6)
-                conformance = float(masked_mean(progress.clamp(-1.0, 1.0), mask))
-        elif rule_action is not None:
-            rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
-            imitation_loss = -masked_mean(rule_log_prob, mask)
-            with torch.no_grad():
-                conformance = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
         if rule_action is not None:
             with torch.no_grad():
-                argmax_agreement = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
-        # The metabolic lever's anchor: the Gaussian log-likelihood of the
-        # rule's own throttle around the head's mean, at the fixed scale
-        # METABOLIC_ANCHOR_STD, under the same fade weight as the direction.
-        # The throttle statistics are logged whether or not the term is active,
-        # so the log shows whether the learner runs hot or cold, and whether
-        # its throttle varies across the field at all.
-        metabolic_imitation_loss = torch.zeros((), device=loss.device)
+                _, conformance_t, agreement_t = rule_distillation(
+                    log_probs, rule_action, rule_scores, config.imitation_temperature, mask
+                )
+                conformance = float(conformance_t)
+                argmax_agreement = float(agreement_t)
         metabolic_error = float("nan")
         metabolic_unit_mean = float("nan")
         metabolic_head_mean = float("nan")
@@ -538,29 +552,14 @@ class PPO:
                 # throttle that has learned nothing is flat; one that moves
                 # with the hunt has spread.
                 metabolic_head_spread = float(masked_std(mean, mask))
-            if rule_metabolic_unit is not None:
-                rule_unit = rule_metabolic_unit.float()
-                metabolic_imitation_loss = masked_mean(
-                    0.5 * ((rule_unit - mean) / METABOLIC_ANCHOR_STD) ** 2, mask
-                )
-                with torch.no_grad():
-                    metabolic_error = float(masked_mean((mean - rule_unit).abs(), mask))
+                if rule_metabolic_unit is not None:
+                    rule_unit = rule_metabolic_unit.float()
+                    _, error_t = throttle_distillation(mean, rule_unit, mask)
+                    metabolic_error = float(error_t)
                     metabolic_rule_mean = float(masked_mean(rule_unit, mask))
-                    # Does the policy sprint where the rule would? Zero says the
-                    # policy's variation, if any, is not the rule's.
+                    # Does the policy sprint where the rule would? Zero says
+                    # the policy's variation, if any, is not the rule's.
                     metabolic_rule_corr = float(masked_corr(mean, rule_unit, mask))
-
-        if soft or rule_action is not None:
-            weight = self.imitation_weight()
-            if weight > 0.0:
-                # One weight for both heads, on one schedule. Direction and
-                # throttle are two outputs of one policy imitating one rule, so
-                # there is no principled reason to trust the rule's throttle
-                # differently from its direction, and a separate scale was a
-                # knob with no argument behind it. It also made the throttle's
-                # anchor outlive the direction's, which is how the herbivore run
-                # ended up pinned to a rule that rests near basal.
-                loss = loss + weight * (imitation_loss + metabolic_imitation_loss)
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
@@ -578,11 +577,8 @@ class PPO:
             "approx_kl": float(approx_kl),
             "clip_fraction": float(clip_fraction),
             "ratio_max_deviation": float(ratio_deviation),
-            "imitation_loss": float(imitation_loss.detach()),
-            "imitation_weight": self.imitation_weight(),
             "conformance": conformance,
             "argmax_agreement": argmax_agreement,
-            "metabolic_imitation_loss": float(metabolic_imitation_loss.detach()),
             # Mean absolute error between the policy's throttle and the
             # rule's, in normalised units, so 0.1 is a tenth of the range from
             # basal to maximum. Replaces an argmax agreement, which a
@@ -676,7 +672,6 @@ class PPO:
                     break
 
         result = accumulator.mean()
-        self.rl_updates += 1
         result["explained_variance"] = explained_variance(
             rollout.value, rollout.ret, rollout.acted
         )
@@ -787,7 +782,6 @@ class PPO:
 
         result = accumulator.mean()
         result.update(gradient_accumulator.mean())
-        self.rl_updates += 1
         result["explained_variance"] = explained_variance(rollout.value, rollout.ret, rollout.acted)
         result["epochs_run"] = float(epochs_run)
         result["agent_steps"] = float(rollout.num_agent_steps)

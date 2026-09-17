@@ -131,3 +131,29 @@ exposure remain, and they are what overnight2 varies.
 Every earlier evaluation, being of a fresh world's first 400 steps, ranked
 policies by how they handle a startup transient the training worlds are
 never in. That is now a settled point, not a hypothesis.
+
+## Decisions after the overnight grid (17 September)
+
+The grid answered its question the hard way: every cell collapsed, the
+anchor's fade only set how long the collapse took, and the frozen policy
+beat every RL run. A thorough re-evaluation of the inherited settings
+returns to parsimonious options unless a strong justification says
+otherwise, and these are the results of that re-evaluation:
+
+- **The RL-time anchor is removed**, in all its forms: the coefficient, the
+  conformance controller, the floor, the fade. The rules are the learner's
+  initialisation and its yardstick, nothing more. Distance from them is still
+  logged (`conformance`, `argmax_agreement`, `metabolic_error`) and pulls
+  nothing. Reimplement if a reason ever appears; do not keep it around.
+- **Pretraining runs to convergence.** `pretrain_updates` is a ceiling; the
+  loop stops when a window of ten updates no longer improves mean agreement
+  by half a percent over the window before. The 0.88 the record kept quoting
+  was where ten updates happened to land, not a property of anything.
+- **The entropy bonus is zero.** Thousands of sampled individuals explore
+  already, and entropy rose on its own in every run that collapsed.
+- **lr 3e-4 and conv are defaults, not findings.** The measurements that
+  preferred 1e-3 and conv over dilated were made on the ghost ecology
+  through an anchor that never released, on a transient-window metric.
+
+The reward, the metric and the lineage bootstrap are the next phase and are
+laid out in planning/11.

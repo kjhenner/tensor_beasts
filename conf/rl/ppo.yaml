@@ -32,7 +32,8 @@ trainer:
   metabolic: false
   # Learned memory channels per individual. 0 disables. See planning/04.
   memory_size: 0
-  # Supervised updates on rule-based rollouts before RL. 0 = off.
+  # Ceiling on supervised updates fitting the rule-based policy before RL;
+  # stops early once agreement plateaus. 0 = off.
   pretrain_updates: 0
   device: auto
   seed: 0
@@ -68,7 +69,9 @@ ppo:
   # Null disables value clipping. Worth trying here because returns drift with
   # the population, which is exactly the case value clipping is meant for.
   value_clip_range: null
-  entropy_coef: 0.01
+  # Zero: thousands of sampled individuals explore already, and entropy rose on
+  # its own in every run that collapsed.
+  entropy_coef: 0.0
   value_coef: 0.5
   epochs: 4
   minibatch_steps: 16
@@ -78,15 +81,9 @@ ppo:
   normalize_advantage: true
   # Null disables the early stop. Set to ~0.02 if updates start diverging.
   target_kl: null
-  # Imitation of the rule-based policy, faded out over a fixed number of RL
-  # updates. Weight at RL update k = imitation_coef * max(0, 1 - k / release).
-  # Off by default so the plain-PPO result stays reproducible; 1.0 is a
-  # sensible strength when turning it on.
-  imitation_coef: 0.0
-  # RL updates the fade lasts. 0 anchors in pretraining only. It was a
-  # controller on measured agreement, which never released; see planning/09.
-  imitation_release_updates: 0
-  # Soft distillation toward softmax(rule scores / temperature). 0 = hard argmax.
+  # Pretraining only: soft distillation toward softmax(rule scores /
+  # temperature). 0 = hard argmax. Nothing pulls the policy toward the rules
+  # once RL starts; the record of why is planning/10.
   imitation_temperature: 0.01
   # Backpropagate memory writes through this many steps of the individual's
   # own trajectory. 0 = off (stage 1). See planning/04.

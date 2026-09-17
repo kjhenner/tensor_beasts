@@ -41,13 +41,24 @@ import torch
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
 from tensor_beasts.rl.networks import ActorCritic, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
-from tensor_beasts.rl.ppo import MAX_LOG_STD, METABOLIC_ANCHOR_STD, MIN_LOG_STD, PPO, PPOConfig
+from tensor_beasts.rl.ppo import (
+    MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig, rule_distillation, throttle_distillation,
+)
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 
 # The project's default W&B server. A different value on TrainerConfig is taken
 # as an explicit choice; this one defers to the user's own wandb settings, since
 # that is the host their API key is stored against. See resolve_wandb_host.
 DEFAULT_WANDB_HOST = "http://localhost:8080"
+
+# Pretraining runs until the mean argmax agreement over the latest
+# PRETRAIN_WINDOW updates is no more than PRETRAIN_MIN_DELTA above the mean
+# over the window before it, or until the configured ceiling. Window means
+# rather than a best-so-far comparison: a single update's agreement is noisy
+# (on a small population it swung by 0.2 while the loss was still falling
+# fast), and a best-so-far rule stops on the first lucky spike.
+PRETRAIN_WINDOW = 10
+PRETRAIN_MIN_DELTA = 0.005
 
 
 @dataclass
@@ -137,8 +148,8 @@ class TrainerConfig:
     # disables the reset and an extinct world simply stays empty.
     extinction_patience: int = 3
     # Supervised updates on rule-based rollouts before RL starts, each over one
-    # segment of world steps. Zero skips it. See Trainer.pretrain for why a
-    # small population needs it.
+    # segment of world steps, at most: pretraining stops early once agreement
+    # with the rule has plateaued (see Trainer.pretrain). Zero skips it.
     pretrain_updates: int = 0
     # Evaluation only. Hold the learned policy's throttle fixed at this unit in
     # [0, 1], where 0 is the basal rate and 1 the configured maximum, so the
@@ -1173,9 +1184,6 @@ class Trainer:
         self.world_steps = int(payload.get("world_steps", 0))
         self.agent_steps = int(payload.get("agent_steps", 0))
         self.updates = int(payload.get("updates", 0))
-        # The anchor's fade counts RL updates; a resumed run must not re-anchor.
-        if hasattr(self.algorithm, "rl_updates"):
-            self.algorithm.rl_updates = self.updates
         self._next_eval = self.world_steps
         self._next_checkpoint = self.world_steps + self.config.checkpoint_interval
 
@@ -1278,24 +1286,27 @@ class Trainer:
         return len(due)
 
     def pretrain(self, verbose: bool = True) -> Dict[str, float]:
-        """Supervised pretraining on the rule-based policy before any RL.
+        """Fit the network to the rule-based policy before any RL.
 
         The world runs under its own rules while the network learns to
-        reproduce the rule's choices: soft distillation toward the rule's
-        per-action scores when the imitation temperature is positive, hard
-        cross-entropy to the rule's direction otherwise, plus the rule's
-        metabolic throttle when the network has that head.
+        reproduce the rule's choices: the direction head by soft distillation
+        toward the rule's per-action scores (hard cross-entropy at zero
+        temperature), the throttle head by a fixed-scale fit to the rule's
+        own rate. See rule_distillation and throttle_distillation.
+
+        This is the learner's initialisation and it is run to convergence:
+        ``pretrain_updates`` is a ceiling, and the loop stops once the mean
+        argmax agreement over the latest PRETRAIN_WINDOW updates has stopped
+        improving by PRETRAIN_MIN_DELTA. It used to be a fixed ten updates, which left the
+        conv network at whatever agreement ten updates reached, 0.88, and that
+        number was then mistaken for a property of the network.
 
         Exists because a near-random initial policy is fatal to a small
-        population. Twice, a learned predator took its population from 486 to
-        zero within 200 steps at 512, before the imitation anchor could pull the
-        policy toward anything that hunts. Herbivores survived the same start
-        only because there are thousands of them. Starting RL from a policy
-        that already behaves like the rule removes that cliff.
-
-        The anchor's fade during RL is a schedule of updates (see PPOConfig),
-        so it starts at full weight on the first RL update regardless of what
-        pretraining reached, and is gone once the schedule runs out.
+        population: twice, a learned predator took its population from 486 to
+        zero within 200 steps at 512. And it turned out to matter more than
+        that. Frozen after pretraining, the policy carried 1.8 times the
+        rules' biomass on the settled ecology (planning/10), so what
+        pretraining reaches is the bar every RL result is read against.
         """
         import torch.nn.functional as F
 
@@ -1306,6 +1317,7 @@ class Trainer:
         temperature = ppo.imitation_temperature
         steps = self.config.segment_steps
         last: Dict[str, float] = {}
+        agreements: List[float] = []
 
         for update in range(updates):
             # Each step's fields are moved off the device as it is taken.
@@ -1383,29 +1395,24 @@ class Trainer:
                         observations[index].to(self.device).float()
                     )
                     log_probs = F.log_softmax(out["logits"], dim=1)
-                    if rule_scores is not None and temperature > 0:
-                        target = F.softmax(rule_scores[index].to(self.device).float() / temperature, dim=1)
-                        per_cell = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
-                    else:
-                        per_cell = -log_probs.gather(1, rule_action[index].to(self.device).unsqueeze(1)).squeeze(1)
-                    loss = (per_cell * mask).sum() / count
+                    scores = rule_scores[index].to(self.device).float() if rule_scores is not None else None
+                    loss, _, agreement_t = rule_distillation(
+                        log_probs, rule_action[index].to(self.device), scores, temperature, mask
+                    )
+                    agreement = float(agreement_t)
                     metabolic_error = float("nan")
                     if "metabolic_mean" in out and rule_unit is not None:
-                        # The same fixed-scale anchor PPO applies, at the same
-                        # weight as the direction term: the two heads imitate
-                        # one rule on one schedule. Only the mean is fitted;
-                        # the policy's std is exploration and keeps its
-                        # initialisation.
-                        target = rule_unit[index].to(self.device).float()
-                        mean = out["metabolic_mean"]
-                        met = 0.5 * ((target - mean) / METABOLIC_ANCHOR_STD) ** 2
-                        loss = loss + (met * mask).sum() / count
-                        metabolic_error = float(((mean - target).abs() * mask).sum() / count)
+                        # Both heads fit one rule at equal weight; only the
+                        # throttle's mean is fitted, its std is exploration.
+                        throttle_loss, error_t = throttle_distillation(
+                            out["metabolic_mean"], rule_unit[index].to(self.device), mask
+                        )
+                        loss = loss + throttle_loss
+                        metabolic_error = float(error_t)
                     self.optimizer.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(self.network.parameters(), ppo.max_grad_norm)
                     self.optimizer.step()
-                    agreement = float(((out["logits"].argmax(1) == rule_action[index].to(self.device)) & mask).sum() / count)
                     totals["loss"] += float(loss) * count
                     totals["argmax_agreement"] += agreement * count
                     if metabolic_error == metabolic_error:
@@ -1428,6 +1435,17 @@ class Trainer:
                     f"agreement {last['argmax_agreement']:.3f}  metabolic err {last['metabolic_error']:.3f}  "
                     f"population {last['population']:.0f}"
                 )
+            # Convergence: stop once a window of updates no longer beats the
+            # window before it.
+            agreements.append(last["argmax_agreement"])
+            if len(agreements) >= 2 * PRETRAIN_WINDOW:
+                latest = sum(agreements[-PRETRAIN_WINDOW:]) / PRETRAIN_WINDOW
+                previous = sum(agreements[-2 * PRETRAIN_WINDOW:-PRETRAIN_WINDOW]) / PRETRAIN_WINDOW
+                if latest - previous < PRETRAIN_MIN_DELTA:
+                    if verbose:
+                        print(f"pretraining converged: agreement {latest:.3f} over the last "
+                              f"{PRETRAIN_WINDOW} updates, {previous:.3f} over the {PRETRAIN_WINDOW} before")
+                    break
 
         # Pretraining's stacked segment is a transient peak; give it back.
         if torch.cuda.is_available():

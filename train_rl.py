@@ -211,24 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
     hyper.add_argument("--gamma", type=float, default=None)
     hyper.add_argument("--gae-lambda", type=float, default=None)
     hyper.add_argument("--target-kl", type=float, default=None)
-    hyper.add_argument(
-        "--imitation-coef",
-        type=float,
-        default=None,
-        help=(
-            "Anchor to the rule-based policy: cross-entropy to its action, faded "
-            "to zero over --imitation-release-updates RL updates. Starts the "
-            "learner near the baseline instead of at random."
-        ),
-    )
-    hyper.add_argument("--imitation-temperature", type=float, default=None,
-                       help="softmax temperature over the rule's scores for soft distillation; 0 = hard argmax (default 0.01)")
-    hyper.add_argument("--imitation-release-updates", type=int, default=None,
-                       help="RL updates over which the anchor fades linearly to zero, after which it is gone for good "
-                            "(default 0: no anchor during RL, only in pretraining)")
     hyper.add_argument("--pretrain-updates", type=int, default=None,
-                       help="supervised updates on rule-based rollouts before RL, one segment each (0 = off). "
-                            "Needed for small populations such as predators, which a near-random start starves.")
+                       help="ceiling on supervised updates fitting the rule-based policy before RL, one segment "
+                            "each; stops early once agreement plateaus (0 = off). The learner's initialisation, "
+                            "and the bar its results are read against.")
+    hyper.add_argument("--imitation-temperature", type=float, default=None,
+                       help="pretraining: softmax temperature over the rule's scores for soft distillation; "
+                            "0 = hard argmax (default 0.01)")
     hyper.add_argument("--recurrent-window", type=int, default=None,
                        help="with --memory-size, backpropagate through this many steps of the individual's own memory writes (0 = off, stage 1)")
 
@@ -353,8 +342,6 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "gamma": args.gamma,
         "gae_lambda": args.gae_lambda,
         "target_kl": args.target_kl,
-        "imitation_coef": args.imitation_coef,
-        "imitation_release_updates": args.imitation_release_updates,
         "imitation_temperature": args.imitation_temperature,
         "recurrent_window": args.recurrent_window,
     }

@@ -178,24 +178,49 @@ def test_a_task_that_needs_memory_is_only_learned_recurrently():
         carried = propagate_memory(observation[t - 1, :5], successor[t - 1], acted[t - 1], reproduced[t - 1])
         rule_action[t] = carried.argmax(dim=0)
 
-    def make_rollout():
+    def make_rollout(network, recompute_reads):
+        """Roll the current policy over the fixed observations, sampling its
+        actions, so the stored log-probabilities are the policy's own and the
+        PPO ratio starts at one. The training signal is the policy gradient
+        with an advantage of +1 where the sampled action matched the target
+        and -1 where it did not: REINFORCE through the PPO surrogate, since
+        nothing in the RL loss imitates the rule any more. With
+        ``recompute_reads`` the memory channels hold the network's own
+        carried writes, as collection stores them; without it they stay
+        blank, which is all stage one ever sees."""
+        with torch.no_grad():
+            stored = observation.clone()
+            read_prev = None
+            actions, log_probs = [], []
+            for t in range(T):
+                obs = stored[t]
+                if recompute_reads and read_prev is not None:
+                    obs[obs_channels:] = read_prev
+                out = network.forward_all(obs.unsqueeze(0))
+                log_p = torch.log_softmax(out["logits"], dim=1)[0]
+                action = torch.multinomial(log_p.exp().permute(1, 2, 0).reshape(-1, 5), 1).reshape(size, size)
+                actions.append(action)
+                log_probs.append(log_p.gather(0, action.unsqueeze(0)).squeeze(0))
+                read_prev = propagate_memory(out["memory"][0], successor[t], acted[t], reproduced[t])
+            action = torch.stack(actions)
+            advantage = torch.where(action == rule_action, 1.0, -1.0)
+            advantage[0] = 0.0  # nothing to remember yet at the first step
         return Rollout(
-            observation=observation.half(), acted=acted, action=torch.randint(0, 5, (T, size, size)),
-            log_prob=torch.full((T, size, size), -1.6094), value=torch.zeros(T, size, size),
+            observation=stored.half(), acted=acted, action=action,
+            log_prob=torch.stack(log_probs), value=torch.zeros(T, size, size),
             reward=torch.zeros(T, size, size), done=done, successor=successor,
-            advantage=torch.zeros(T, size, size), ret=torch.zeros(T, size, size),
+            advantage=advantage, ret=advantage.clone(),
             rule_action=rule_action, reproduced=reproduced,
         )
 
     def agreement_after_training(window):
         torch.manual_seed(1)
         network = build_network("linear", obs_channels + K, memory_size=K)
-        ppo = PPO(PPOConfig(recurrent_window=window, epochs=1, minibatch_steps=T, imitation_coef=1.0,
-                            imitation_temperature=0.0, imitation_release_updates=1000, entropy_coef=0.0,
-                            value_coef=0.0, learning_rate=0.05))
+        ppo = PPO(PPOConfig(recurrent_window=window, epochs=1, minibatch_steps=T,
+                            entropy_coef=0.0, value_coef=0.0, learning_rate=0.05))
         optimizer = torch.optim.Adam(network.parameters(), lr=0.05)
-        for _ in range(120):
-            result = ppo.update(network, make_rollout(), optimizer)
+        for _ in range(200):
+            ppo.update(network, make_rollout(network, recompute_reads=window > 0), optimizer)
         # Score agreement at steps >= 1 with the recomputed reads, as deployment would see them.
         with torch.no_grad():
             read_prev, agree, count = None, 0, 0
@@ -222,8 +247,8 @@ def test_recurrent_diagnostics_are_not_diluted_by_window_gradient_norms():
     recurrent path must report the same diagnostics as the plain path on the
     same rollout with the same weights. The bug this pins: the per-window
     gradient norm was added to the shared accumulator with the window's whole
-    weight, which halved every other diagnostic, including the conformance the
-    anchor's cross-fade is keyed on."""
+    weight, which halved every other diagnostic, including the conformance a
+    controller was once keyed on."""
     import math
     from tensor_beasts.rl.ppo import PPO, PPOConfig
 

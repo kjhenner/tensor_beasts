@@ -226,7 +226,6 @@ def test_resume_restores_weights_counters_and_optimizer(tmp_path):
         assert torch.equal(value, weights[key]), key
     assert resumed.world_steps == 8
     assert resumed.updates == 2
-    assert resumed.algorithm.rl_updates == 2, "the anchor's fade resumes where it was, it does not re-anchor"
     assert resumed.optimizer.state_dict()["state"]
 
     resumed.train(verbose=False)
@@ -288,11 +287,11 @@ def test_headline_ratio_is_survival_not_shaped_reward():
 
 
 
-def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_path):
+def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
     """A near-random start starved a learned predator population to zero within
     200 steps. Pretraining on rule-based rollouts must raise agreement with the
-    rule well above chance and hand that agreement to the anchor's cross-fade.
-    Tiny world for speed; this checks plumbing, not the ecology."""
+    rule well above chance. Tiny world for speed; this checks plumbing, not
+    the ecology."""
     from tensor_beasts.rl.ppo import PPOConfig
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
@@ -301,7 +300,7 @@ def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_
         TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic=True,
                       warmup_steps=5, segment_steps=16, pretrain_updates=6, total_world_steps=0,
                       eval_interval=0, checkpoint_interval=0, device="cpu", output_dir=str(tmp_path)),
-        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3, imitation_coef=1.0),
+        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3),
     )
     trainer.env.reset(seed=0)
     trainer.warmup()
@@ -312,8 +311,29 @@ def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_
     # it picks the same bin. A fifth of the basal-to-max range is loose, and
     # deliberately: this checks that the anchor pulls, not how far.
     assert result["metabolic_error"] < 0.2
-    assert trainer.algorithm.rl_updates == 0, "pretraining is not an RL update; the fade has not started"
     assert trainer.world_steps == 6 * 16
+
+
+def test_pretraining_stops_once_agreement_plateaus(tmp_path):
+    """pretrain_updates is a ceiling. A linear network fits the rule exactly
+    and plateaus quickly, so it must stop well short of a generous ceiling and
+    report how many updates it took."""
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import PRETRAIN_WINDOW, Trainer, TrainerConfig
+
+    torch.manual_seed(0)
+    trainer = Trainer(
+        TrainerConfig(size=64, arch="linear", warmup_steps=5, segment_steps=8, pretrain_updates=200,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
+                      output_dir=str(tmp_path)),
+        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=1e-2),
+    )
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+    result = trainer.pretrain(verbose=False)
+    assert result["pretrain_update"] < 200
+    assert result["pretrain_update"] >= 2 * PRETRAIN_WINDOW
+    assert trainer.world_steps == result["pretrain_update"] * 8
 
 
 def test_pretraining_off_does_nothing(tmp_path):

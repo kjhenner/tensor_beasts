@@ -35,7 +35,7 @@ def test_predator_trains_evaluates_and_checkpoints(tmp_path):
                       metabolic=True, warmup_steps=3, total_world_steps=8, segment_steps=4, eval_interval=0,
                       eval_steps=4, eval_seeds=1, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
-        PPOConfig(epochs=1, minibatch_steps=2, imitation_coef=1.0),
+        PPOConfig(epochs=1, minibatch_steps=2),
     )
     trainer.train(verbose=False)
     summary = trainer.evaluate()

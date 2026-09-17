@@ -126,12 +126,14 @@ Algorithms are `ppo`, `vtrace` and `awr`; architectures are `linear`, `conv`,
 `residual` and `dilated`. Three flags extend what the learner controls:
 
 ```bash
-python train_rl.py --imitation-coef 1.0                  # anchor to the rule-based policy, fading out
+python train_rl.py --pretrain-updates 40                 # start from the rule-based policy, to convergence
 python train_rl.py --metabolic                           # learn the metabolic rate as well as direction
 python train_rl.py --memory-size 4 --recurrent-window 8  # a per-individual memory, trained recurrently
 ```
 
-The anchor is what first beat the baseline. The metabolic lever and the
+Pretraining on the rules is what first beat the baseline, and frozen after
+pretraining the predator policy carries 1.8 times the rules' biomass; every
+RL result is read against that bar (`planning/10`). The metabolic lever and the
 memory are newer and their results are recorded honestly, including the
 reward artefact that neutered the first metabolic run, in
 `planning/04-reinforcement-learning.md`. `linear` is a diagnostic rather than a contender: it
