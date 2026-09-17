@@ -32,9 +32,12 @@ trainer:
   metabolic: false
   # Learned memory channels per individual. 0 disables. See planning/04.
   memory_size: 0
-  # Ceiling on supervised updates fitting the rule-based policy before RL;
-  # stops early once agreement plateaus. 0 = off.
-  pretrain_updates: 0
+  # Offline distillation of the rule-based policy before RL: pretrain_grids
+  # labelled grids from a rule-based run, fitted for at most pretrain_epochs,
+  # stopping once held-out agreement plateaus. 0 epochs = off.
+  pretrain_epochs: 0
+  pretrain_grids: 128
+  pretrain_stride: 25
   device: auto
   seed: 0
 

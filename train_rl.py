@@ -211,10 +211,14 @@ def build_parser() -> argparse.ArgumentParser:
     hyper.add_argument("--gamma", type=float, default=None)
     hyper.add_argument("--gae-lambda", type=float, default=None)
     hyper.add_argument("--target-kl", type=float, default=None)
-    hyper.add_argument("--pretrain-updates", type=int, default=None,
-                       help="ceiling on supervised updates fitting the rule-based policy before RL, one segment "
-                            "each; stops early once agreement plateaus (0 = off). The learner's initialisation, "
-                            "and the bar its results are read against.")
+    hyper.add_argument("--pretrain-epochs", type=int, default=None,
+                       help="ceiling on epochs of offline distillation of the rule-based policy before RL; "
+                            "stops early once held-out agreement plateaus (0 = off). The learner's "
+                            "initialisation, and the bar its results are read against.")
+    hyper.add_argument("--pretrain-grids", type=int, default=None,
+                       help="labelled observation grids sampled from a rule-based run for that distillation (default 128)")
+    hyper.add_argument("--pretrain-stride", type=int, default=None,
+                       help="world steps between sampled grids (default 25)")
     hyper.add_argument("--imitation-temperature", type=float, default=None,
                        help="pretraining: softmax temperature over the rule's scores for soft distillation; "
                             "0 = hard argmax (default 0.01)")
@@ -306,7 +310,9 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "arch": args.arch,
         "metabolic": args.metabolic,
         "memory_size": args.memory_size,
-        "pretrain_updates": args.pretrain_updates,
+        "pretrain_epochs": args.pretrain_epochs,
+        "pretrain_grids": args.pretrain_grids,
+        "pretrain_stride": args.pretrain_stride,
         "eval_pin_metabolic": args.pin_metabolic,
         "device": args.device,
         "seed": args.seed,

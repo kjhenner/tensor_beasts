@@ -289,51 +289,56 @@ def test_headline_ratio_is_survival_not_shaped_reward():
 
 def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
     """A near-random start starved a learned predator population to zero within
-    200 steps. Pretraining on rule-based rollouts must raise agreement with the
-    rule well above chance. Tiny world for speed; this checks plumbing, not
-    the ecology."""
+    200 steps. Distilling the rules must raise held-out agreement well above
+    chance, fit the throttle, and leave the training world and the RNG stream
+    exactly where they were. Tiny world for speed; plumbing, not ecology."""
     from tensor_beasts.rl.ppo import PPOConfig
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     torch.manual_seed(0)
     trainer = Trainer(
         TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic=True,
-                      warmup_steps=5, segment_steps=16, pretrain_updates=6, total_world_steps=0,
-                      eval_interval=0, checkpoint_interval=0, device="cpu", output_dir=str(tmp_path)),
+                      warmup_steps=5, segment_steps=16, pretrain_epochs=60, pretrain_grids=32, pretrain_stride=3,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
+                      output_dir=str(tmp_path)),
         PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3),
     )
     trainer.env.reset(seed=0)
     trainer.warmup()
+    step_before = trainer.env.world.step
+    rng_before = torch.get_rng_state()
     result = trainer.pretrain(verbose=False)
     assert result["argmax_agreement"] > 0.5, f"agreement after pretraining {result['argmax_agreement']:.3f}"
-    # The throttle is continuous now, so pretraining is scored by how far the
-    # policy's mean sits from the rule's own throttle rather than by how often
-    # it picks the same bin. A fifth of the basal-to-max range is loose, and
-    # deliberately: this checks that the anchor pulls, not how far.
+    # The throttle is continuous, so it is scored by how far the policy's
+    # mean sits from the rule's own throttle. A fifth of the basal-to-max
+    # range is loose, and deliberately: this checks that the fit pulls.
     assert result["metabolic_error"] < 0.2
-    assert trainer.world_steps == 6 * 16
+    assert result["pretrain_epoch"] <= 60
+    assert trainer.env.world.step == step_before, "the training world is not stepped by pretraining"
+    assert trainer.world_steps == 0
+    assert torch.equal(torch.get_rng_state(), rng_before)
 
 
 def test_pretraining_stops_once_agreement_plateaus(tmp_path):
-    """pretrain_updates is a ceiling. A linear network fits the rule exactly
-    and plateaus quickly, so it must stop well short of a generous ceiling and
-    report how many updates it took."""
+    """pretrain_epochs is a ceiling. A linear network fits the rule exactly
+    and plateaus quickly, so it must stop well short of a generous ceiling."""
+    from tensor_beasts.rl.distill import WINDOW
     from tensor_beasts.rl.ppo import PPOConfig
-    from tensor_beasts.rl.trainer import PRETRAIN_WINDOW, Trainer, TrainerConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     torch.manual_seed(0)
     trainer = Trainer(
-        TrainerConfig(size=64, arch="linear", warmup_steps=5, segment_steps=8, pretrain_updates=200,
-                      total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
-                      output_dir=str(tmp_path)),
+        TrainerConfig(size=64, arch="linear", warmup_steps=5, segment_steps=8, pretrain_epochs=200,
+                      pretrain_grids=32, pretrain_stride=2, total_world_steps=0, eval_interval=0, checkpoint_interval=0,
+                      device="cpu", output_dir=str(tmp_path)),
         PPOConfig(epochs=2, minibatch_steps=4, learning_rate=1e-2),
     )
     trainer.env.reset(seed=0)
     trainer.warmup()
     result = trainer.pretrain(verbose=False)
-    assert result["pretrain_update"] < 200
-    assert result["pretrain_update"] >= 2 * PRETRAIN_WINDOW
-    assert trainer.world_steps == result["pretrain_update"] * 8
+    assert result.get("converged") == 1.0
+    assert result["pretrain_epoch"] < 200
+    assert result["pretrain_epoch"] >= 2 * WINDOW
 
 
 def test_pretraining_off_does_nothing(tmp_path):

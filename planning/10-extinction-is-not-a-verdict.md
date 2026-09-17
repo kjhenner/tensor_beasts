@@ -145,10 +145,12 @@ otherwise, and these are the results of that re-evaluation:
   initialisation and its yardstick, nothing more. Distance from them is still
   logged (`conformance`, `argmax_agreement`, `metabolic_error`) and pulls
   nothing. Reimplement if a reason ever appears; do not keep it around.
-- **Pretraining runs to convergence.** `pretrain_updates` is a ceiling; the
-  loop stops when a window of ten updates no longer improves mean agreement
-  by half a percent over the window before. The 0.88 the record kept quoting
-  was where ten updates happened to land, not a property of anything.
+- **Pretraining is offline distillation, run to convergence.** Labelled
+  observation grids are sampled from a rule-based run across the cycle,
+  augmented by the eight symmetries of the grid, and fitted until agreement
+  on a held-out split plateaus; `pretrain_epochs` is a ceiling. The
+  simulation is only the sampler. The 0.88 the record kept quoting was where
+  ten live updates happened to land, not a property of anything.
 - **The entropy bonus is zero.** Thousands of sampled individuals explore
   already, and entropy rose on its own in every run that collapsed.
 - **lr 3e-4 and conv are defaults, not findings.** The measurements that

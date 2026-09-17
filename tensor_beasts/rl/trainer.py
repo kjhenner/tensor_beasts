@@ -41,9 +41,7 @@ import torch
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
 from tensor_beasts.rl.networks import ActorCritic, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
-from tensor_beasts.rl.ppo import (
-    MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig, rule_distillation, throttle_distillation,
-)
+from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 
 # The project's default W&B server. A different value on TrainerConfig is taken
@@ -51,14 +49,6 @@ from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 # that is the host their API key is stored against. See resolve_wandb_host.
 DEFAULT_WANDB_HOST = "http://localhost:8080"
 
-# Pretraining runs until the mean argmax agreement over the latest
-# PRETRAIN_WINDOW updates is no more than PRETRAIN_MIN_DELTA above the mean
-# over the window before it, or until the configured ceiling. Window means
-# rather than a best-so-far comparison: a single update's agreement is noisy
-# (on a small population it swung by 0.2 while the loss was still falling
-# fast), and a best-so-far rule stops on the first lucky spike.
-PRETRAIN_WINDOW = 10
-PRETRAIN_MIN_DELTA = 0.005
 
 
 @dataclass
@@ -147,10 +137,17 @@ class TrainerConfig:
     # budget. Extinction stays visible as `world_resets` in the log. 0
     # disables the reset and an extinct world simply stays empty.
     extinction_patience: int = 3
-    # Supervised updates on rule-based rollouts before RL starts, each over one
-    # segment of world steps, at most: pretraining stops early once agreement
-    # with the rule has plateaued (see Trainer.pretrain). Zero skips it.
-    pretrain_updates: int = 0
+    # Offline distillation of the rule-based policy before RL starts, the
+    # learner's initialisation: pretrain_grids labelled observation grids are
+    # sampled from a rule-based run, and the network is fitted to them for at
+    # most pretrain_epochs, stopping once agreement on a held-out split has
+    # plateaued. Zero epochs skips it. See tensor_beasts/rl/distill.py.
+    pretrain_epochs: int = 0
+    pretrain_grids: int = 128
+    # World steps between sampled grids, so consecutive samples are not
+    # near-duplicates. 25 is a quarter of a predator's life at 512; a small
+    # test world dies within that, so tests set it low.
+    pretrain_stride: int = 25
     # Evaluation only. Hold the learned policy's throttle fixed at this unit in
     # [0, 1], where 0 is the basal rate and 1 the configured maximum, so the
     # throttle's contribution can be separated from movement's. None leaves the
@@ -1288,18 +1285,20 @@ class Trainer:
     def pretrain(self, verbose: bool = True) -> Dict[str, float]:
         """Fit the network to the rule-based policy before any RL.
 
-        The world runs under its own rules while the network learns to
-        reproduce the rule's choices: the direction head by soft distillation
-        toward the rule's per-action scores (hard cross-entropy at zero
-        temperature), the throttle head by a fixed-scale fit to the rule's
-        own rate. See rule_distillation and throttle_distillation.
+        Offline: a separate batched world runs under the rules, and every
+        ``pretrain_stride`` steps its observations are kept with the
+        rule's own labels, until ``pretrain_grids`` grids span the cycle
+        phases the run passes through. The network is then fitted to them,
+        the direction head by soft distillation toward the rule's per-action
+        scores and the throttle head by a fixed-scale fit to the rule's rate,
+        under the eight symmetries of the grid, until agreement on a held-out
+        split plateaus or ``pretrain_epochs`` is reached. See
+        tensor_beasts/rl/distill.py.
 
-        This is the learner's initialisation and it is run to convergence:
-        ``pretrain_updates`` is a ceiling, and the loop stops once the mean
-        argmax agreement over the latest PRETRAIN_WINDOW updates has stopped
-        improving by PRETRAIN_MIN_DELTA. It used to be a fixed ten updates, which left the
-        conv network at whatever agreement ten updates reached, 0.88, and that
-        number was then mistaken for a property of the network.
+        This is the learner's initialisation and it is run to convergence. It
+        used to run in lockstep with the training world, a fixed ten
+        segments, which left the conv network at whatever agreement ten
+        updates reached and made 0.88 look like a property of the network.
 
         Exists because a near-random initial policy is fatal to a small
         population: twice, a learned predator took its population from 486 to
@@ -1307,147 +1306,53 @@ class Trainer:
         that. Frozen after pretraining, the policy carried 1.8 times the
         rules' biomass on the settled ecology (planning/10), so what
         pretraining reaches is the bar every RL result is read against.
-        """
-        import torch.nn.functional as F
 
-        updates = int(self.config.pretrain_updates)
-        if updates <= 0:
+        The training world is untouched, and the global RNG is restored, so
+        the RL stream does not depend on how long the fit took.
+        """
+        from tensor_beasts.rl.distill import collect_labelled_grids, distill
+
+        epochs = int(self.config.pretrain_epochs)
+        if epochs <= 0:
             return {}
         ppo = self.ppo_config
-        temperature = ppo.imitation_temperature
-        steps = self.config.segment_steps
-        last: Dict[str, float] = {}
-        agreements: List[float] = []
+        rng_state = torch.get_rng_state()
 
-        for update in range(updates):
-            # Each step's fields are moved off the device as it is taken.
-            # Holding the whole segment's AgentBatch objects on the GPU, which
-            # is what this used to do, keeps every observation resident: at 512
-            # with four worlds that is 3.88 GB of observations before anything
-            # is stacked, and pretraining peaked at 16 GB against the 3.8 GB
-            # that collection and the update need together. That made it the
-            # most memory-hungry phase of a run, and the one the memory estimate
-            # did not model at all.
-            batches = []
-            for _ in range(steps):
-                batch = self.env.rule_based_step()
-                for name in ("observation", "acted", "rule_action", "rule_scores",
-                             "rule_metabolic_unit"):
-                    field = getattr(batch, name, None)
-                    if field is not None:
-                        setattr(batch, name, field.detach().to("cpu", non_blocking=True))
-                batches.append(batch)
+        sampler = self._make_env(worlds=self.config.worlds)
+        sampler.reset(seed=self.config.seed + 30_000)
+        grids = collect_labelled_grids(
+            sampler, int(self.config.pretrain_grids), int(self.config.pretrain_stride), self.config.warmup_steps
+        )
+        del sampler
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if verbose:
+            print(f"distilling the rules from {len(grids)} labelled grids", flush=True)
 
-            def stacked(select, half: bool = False):
-                """Stack a field over the segment, folding worlds into the batch.
-
-                Each field is (H, W) or (B, H, W), so stacking gives (T, H, W)
-                or (T, B, H, W). The convolution wants one batch axis, and a
-                timestep and a world are both just independent samples for a
-                supervised fit, so the two fold together. Same rule as the RL
-                minibatch iterator in ppo.py.
-
-                The stack is held on the CPU and each minibatch is moved to the
-                device as it is used. Measured at 512 with four worlds, holding
-                it on the device made pretraining peak at 16 GB while collection
-                and the update together needed 3.8 GB, so pretraining was by far
-                the most memory-hungry phase of a run and the one the memory
-                estimate did not model at all. It is a supervised pass over
-                stored data, so the transfer is not on any critical path.
-
-                ``half`` stores it as float16, as RolloutBuffer already does for
-                the same tensors, which halves it again at no cost in fidelity:
-                policy_input has already round-tripped the observation through
-                float16 by this point.
-                """
-                stack = torch.stack([select(b) for b in batches])
-                if half:
-                    stack = stack.to(torch.float16)
-                if self.env.num_worlds > 1:
-                    stack = stack.reshape(
-                        stack.shape[0] * self.env.num_worlds, *stack.shape[2:]
-                    )
-                return stack.to("cpu", non_blocking=True)
-
-            observations = stacked(lambda b: policy_input(b.observation), half=True)
-            acted = stacked(lambda b: b.acted)
-            rule_action = stacked(lambda b: b.rule_action)
-            rule_scores = stacked(lambda b: b.rule_scores, half=True) if batches[0].rule_scores is not None else None
-            rule_unit = (
-                stacked(lambda b: b.rule_metabolic_unit)
-                if batches[0].rule_metabolic_unit is not None else None
-            )
-            self.world_steps += steps
-
-            totals = {"loss": 0.0, "argmax_agreement": 0.0, "metabolic_error": 0.0}
-            weight = 0.0
-            for _ in range(max(ppo.epochs, 1)):
-                # On CPU because the stacked segment is: an index tensor has to
-                # live on the same device as the tensor it indexes.
-                order = torch.randperm(steps, device="cpu")
-                for start in range(0, steps, ppo.minibatch_steps):
-                    index = order[start : start + ppo.minibatch_steps]
-                    mask = acted[index].to(self.device)
-                    count = float(mask.sum())
-                    if count == 0:
-                        continue
-                    out = self.network.forward_all(
-                        observations[index].to(self.device).float()
-                    )
-                    log_probs = F.log_softmax(out["logits"], dim=1)
-                    scores = rule_scores[index].to(self.device).float() if rule_scores is not None else None
-                    loss, _, agreement_t = rule_distillation(
-                        log_probs, rule_action[index].to(self.device), scores, temperature, mask
-                    )
-                    agreement = float(agreement_t)
-                    metabolic_error = float("nan")
-                    if "metabolic_mean" in out and rule_unit is not None:
-                        # Both heads fit one rule at equal weight; only the
-                        # throttle's mean is fitted, its std is exploration.
-                        throttle_loss, error_t = throttle_distillation(
-                            out["metabolic_mean"], rule_unit[index].to(self.device), mask
-                        )
-                        loss = loss + throttle_loss
-                        metabolic_error = float(error_t)
-                    self.optimizer.zero_grad(set_to_none=True)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(self.network.parameters(), ppo.max_grad_norm)
-                    self.optimizer.step()
-                    totals["loss"] += float(loss) * count
-                    totals["argmax_agreement"] += agreement * count
-                    if metabolic_error == metabolic_error:
-                        totals["metabolic_error"] += metabolic_error * count
-                    weight += count
-
-            if weight == 0:
-                # No living individuals in this segment, which happens when a
-                # small world's population dies out. There is nothing to
-                # measure; keep the last real measurement rather than report
-                # zeros that would then seed the anchor.
-                continue
-            last = {key: value / weight for key, value in totals.items()}
-            last["pretrain_update"] = float(update + 1)
-            last["population"] = float(self.env.population())
-            self.log({"phase": "pretrain", "world_steps": self.world_steps, **last})
+        def on_epoch(record: Dict[str, float]) -> None:
+            self.log({"phase": "pretrain", "world_steps": self.world_steps, **record})
             if verbose:
                 print(
-                    f"pretrain {update + 1}/{updates}  loss {last['loss']:.3f}  "
-                    f"agreement {last['argmax_agreement']:.3f}  metabolic err {last['metabolic_error']:.3f}  "
-                    f"population {last['population']:.0f}"
+                    f"pretrain epoch {record['pretrain_epoch']:.0f}/{epochs}  loss {record['loss']:.3f}  "
+                    f"agreement {record['argmax_agreement']:.3f} (train {record['train_agreement']:.3f})  "
+                    f"metabolic err {record['metabolic_error']:.3f}",
+                    flush=True,
                 )
-            # Convergence: stop once a window of updates no longer beats the
-            # window before it.
-            agreements.append(last["argmax_agreement"])
-            if len(agreements) >= 2 * PRETRAIN_WINDOW:
-                latest = sum(agreements[-PRETRAIN_WINDOW:]) / PRETRAIN_WINDOW
-                previous = sum(agreements[-2 * PRETRAIN_WINDOW:-PRETRAIN_WINDOW]) / PRETRAIN_WINDOW
-                if latest - previous < PRETRAIN_MIN_DELTA:
-                    if verbose:
-                        print(f"pretraining converged: agreement {latest:.3f} over the last "
-                              f"{PRETRAIN_WINDOW} updates, {previous:.3f} over the {PRETRAIN_WINDOW} before")
-                    break
 
-        # Pretraining's stacked segment is a transient peak; give it back.
+        last = distill(
+            self.network, self.optimizer, grids,
+            epochs=epochs,
+            minibatch=max(1, int(ppo.minibatch_steps) * int(self.config.worlds)),
+            temperature=ppo.imitation_temperature,
+            max_grad_norm=ppo.max_grad_norm,
+            device=self.device,
+            on_epoch=on_epoch,
+            generator=torch.Generator().manual_seed(self.config.seed),
+        )
+        if verbose and last.get("converged"):
+            print(f"pretraining converged at epoch {last['pretrain_epoch']:.0f}: agreement {last['argmax_agreement']:.3f}", flush=True)
+        del grids
+        torch.set_rng_state(rng_state)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return last

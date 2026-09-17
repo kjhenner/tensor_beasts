@@ -126,7 +126,7 @@ Algorithms are `ppo`, `vtrace` and `awr`; architectures are `linear`, `conv`,
 `residual` and `dilated`. Three flags extend what the learner controls:
 
 ```bash
-python train_rl.py --pretrain-updates 40                 # start from the rule-based policy, to convergence
+python train_rl.py --pretrain-epochs 40                  # start from the rule-based policy, distilled offline
 python train_rl.py --metabolic                           # learn the metabolic rate as well as direction
 python train_rl.py --memory-size 4 --recurrent-window 8  # a per-individual memory, trained recurrently
 ```
