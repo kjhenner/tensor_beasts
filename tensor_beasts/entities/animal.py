@@ -294,17 +294,20 @@ class Animal(Entity):
     def _handle_death(self, dead: torch.Tensor):
         """Handle death: transfer biomass to carrion, zero all features.
 
-        Note: Only processes positions where an entity actually existed (biomass > 0).
-        Empty positions (biomass=0) are not "dead" - they never had an entity.
-        SharedFeatures (like scent) are NOT zeroed because they represent a field
-        that persists independently of entity presence.
+        Every per-animal feature is zeroed wherever ``dead`` is true, energy
+        included; scent is the one field that persists, because it is a
+        diffusing trace rather than a property of the animal.
         """
-        # Only consider positions with actual entities, not empty cells
+        # Every cell that is not alive is cleaned, not only cells that still
+        # hold biomass. The guard used to be `dead & (biomass > 0)`, and it had
+        # a hole: a predator bite that takes the last unit leaves biomass at
+        # exactly zero, so the prey never counted as dead and its id, gradient
+        # EMA, offspring count, slot and memory sat on an empty cell until the
+        # next arrival was summed into them (perform_move adds arrivals).
+        # Cleaning empty cells is a no-op on their zeros, so the cheap and
+        # correct rule is the same one: nothing but a living animal holds
+        # per-cell state.
         biomass = self.biomass.data
-        actually_dead = dead & (biomass > 0)
-
-        if not actually_dead.any():
-            return
 
         # Transfer biomass to carrion layer
         if self.config.carrion_key is not None:
@@ -312,21 +315,28 @@ class Animal(Entity):
                 carrion = self.td.get(self.config.carrion_key)
                 if carrion is not None:
                     # Add dead animal's biomass to carrion, exactly.
-                    carrion += biomass * actually_dead
+                    carrion += biomass * dead
                     carrion.clamp_(max=ENERGY_MAX)
             except KeyError:
                 pass  # No carrion feature, biomass just disappears
 
-        # Zero non-shared features at dead positions
-        # SharedFeatures (like scent) represent fields that persist independently
-        from tensor_beasts.features.feature import SharedFeature
-        alive = ~actually_dead
+        # Zero every per-animal feature at dead positions. Scent is the one
+        # field that persists after death: it is a diffusing trace, not a
+        # property of the animal. Energy is stored as a SharedFeature for
+        # tensor-layout reasons only; the slice is this entity's own, and
+        # leaving it on a dead cell made a ghost that kept moving, paid move
+        # costs, and blocked living animals through the clearance kernel until
+        # dissipation drained it, 35 steps for a herbivore and over 200 for a
+        # predator. The energy of a dead animal is destroyed; its biomass is
+        # what becomes carrion.
+        alive = ~dead
         for feature in self.features():
-            if not isinstance(feature, SharedFeature):
-                # Trailing channel axes (memory is (H, W, K)) broadcast against
-                # the 2-D mask only if the mask gains matching trailing dims.
-                extra = feature.data.ndim - alive.ndim
-                feature.data *= alive.reshape(*alive.shape, *([1] * extra)) if extra > 0 else alive
+            if feature is self.scent:
+                continue
+            # Trailing channel axes (memory is (H, W, K)) broadcast against
+            # the 2-D mask only if the mask gains matching trailing dims.
+            extra = feature.data.ndim - alive.ndim
+            feature.data *= alive.reshape(*alive.shape, *([1] * extra)) if extra > 0 else alive
 
     def _log_metabolism(self, positions, label, **values):
         """Log metabolism values for entities at given positions."""
@@ -639,8 +649,12 @@ class Animal(Entity):
                 lambda x: x,  # slot_id unchanged for parent
                 *([lambda x: x] * len(memory_slices)),  # memory travels unchanged
             ],
-            carried_features_offspring=[id_feature, biomass, gradient_ema, slot_id, *memory_slices],
+            carried_features_offspring=[offspring_count, id_feature, biomass, gradient_ema, slot_id, *memory_slices],
             carried_feature_fns_offspring=[
+                # A newborn has no offspring. The origin cell is not vacated
+                # on division, so without this the offspring kept the parent's
+                # count as it stood before the parent's own increment.
+                lambda x: torch.zeros_like(x),
                 lambda x: random,
                 lambda x: x * 0.5,
                 lambda x: x * 0.5,
@@ -649,6 +663,12 @@ class Animal(Entity):
             ],
             agent_action=direction,
             move_mask=move_mask,
+            # Presence for the clearance check is anything that carries
+            # biomass, not only anything with energy. The two agree for every
+            # living animal in the shipped configs, but energy is the mobile
+            # currency and can in principle reach zero on a living cell, and
+            # a mover landing on such a cell would merge the two animals.
+            obstacle_mask=(biomass > 0).to(torch.uint8),
             move_cost=movement_cost,
         )
         # Several movers can land on one cell; perform_move saturates energy

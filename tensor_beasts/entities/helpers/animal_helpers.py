@@ -201,9 +201,17 @@ def perform_move(
     # After this operation, each origin position where an offspring will be left will be adjusted by corresponding
     # feature functions
     for feature, fn in [(entity_energy, divide_fn_offspring)] + list(zip(carried_features_offspring or [], carried_feature_fns_offspring or [])):
+        # The offspring's share of energy is taken from the same post-cost
+        # energy the parent's share was, so a division costs exactly one move.
+        # It used to be taken from the pre-cost energy, and a reproducing
+        # animal paid half the cost of a plain move.
+        if move_cost is not None and feature is entity_energy:
+            source = (feature - move_cost).clamp(min=0)
+        else:
+            source = feature
         feature[:] = torch.where(
             offspring_mask,
-            fn(feature),
+            fn(source),
             feature
         )
 
