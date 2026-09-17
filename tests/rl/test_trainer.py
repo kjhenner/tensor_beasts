@@ -320,8 +320,9 @@ def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
 
 
 def test_pretraining_stops_once_agreement_plateaus(tmp_path):
-    """pretrain_epochs is a ceiling. A linear network fits the rule exactly
-    and plateaus quickly, so it must stop well short of a generous ceiling."""
+    """pretrain_epochs is a ceiling. A linear network starts as the rule and
+    has little left to fit, so it must stop well short of a generous ceiling
+    and hold the rule's agreement."""
     from tensor_beasts.rl.distill import WINDOW
     from tensor_beasts.rl.ppo import PPOConfig
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
@@ -339,6 +340,7 @@ def test_pretraining_stops_once_agreement_plateaus(tmp_path):
     assert result.get("converged") == 1.0
     assert result["pretrain_epoch"] < 200
     assert result["pretrain_epoch"] >= 2 * WINDOW
+    assert result["argmax_agreement"] > 0.9, "the linear network starts as the rule and stays there"
 
 
 def test_pretraining_off_does_nothing(tmp_path):

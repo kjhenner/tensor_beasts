@@ -171,6 +171,34 @@ class LinearPolicy(ActorCritic):
     def features(self, observation: torch.Tensor) -> torch.Tensor:
         return observation
 
+    @torch.no_grad()
+    def initialise_from_rule(self, channel_names, navigation_weights, scale: float) -> None:
+        """Set the direction head to the rule itself.
+
+        The rule's score for a direction is the navigation weight of each
+        perceived feature times that feature's value in that direction, and
+        the input channels are those values divided by one constant, so the
+        head is the weights times ``scale``. Distilling this by gradient
+        descent does not get there: a soft target at temperature 0.01 wants
+        logits of scores over 0.01, weights a thousand times the rule's, and
+        Adam at 3e-4 stalls near 0.47 agreement long before that. A network
+        that exists to represent the rule should start as the rule and be
+        refined from there.
+
+        ``scale`` is what the fit's target implies: the perceived scale over
+        the distillation temperature, or any large number at zero
+        temperature, where only the argmax matters.
+        """
+        names = list(channel_names)
+        self.policy_head.weight.zero_()
+        self.policy_head.bias.zero_()
+        for key, weight in dict(navigation_weights).items():
+            label = ":".join(key) if isinstance(key, (tuple, list)) else str(key)
+            for action, direction in enumerate(("here", "up", "down", "left", "right")):
+                name = f"{label}/{direction}"
+                if name in names:
+                    self.policy_head.weight[action, names.index(name), 0, 0] = float(weight) * scale
+
 
 class ConvActorCritic(ActorCritic):
     """Small convolutional trunk. The default workhorse.

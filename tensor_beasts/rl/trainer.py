@@ -39,7 +39,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
-from tensor_beasts.rl.networks import ActorCritic, build_network
+from tensor_beasts.rl.networks import ActorCritic, LinearPolicy, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
@@ -1329,13 +1329,24 @@ class Trainer:
         if verbose:
             print(f"distilling the rules from {len(grids)} labelled grids", flush=True)
 
+        if isinstance(self.network, LinearPolicy):
+            # The linear network is the rule by construction; start it there
+            # and let the fit refine the throttle and the rest.
+            perceived_scale = float(torch.log1p(torch.tensor(255.0 * self.env.entity.config.log_scale)))
+            temperature = float(ppo.imitation_temperature)
+            self.network.initialise_from_rule(
+                self.env.channel_names, self.env.entity.config.navigation_weights,
+                scale=perceived_scale / temperature if temperature > 0 else 100.0,
+            )
+
         def on_epoch(record: Dict[str, float]) -> None:
             self.log({"phase": "pretrain", "world_steps": self.world_steps, **record})
             if verbose:
+                error = record["metabolic_error"]
+                throttle = f"  metabolic err {error:.3f}" if error == error else ""
                 print(
                     f"pretrain epoch {record['pretrain_epoch']:.0f}/{epochs}  loss {record['loss']:.3f}  "
-                    f"agreement {record['argmax_agreement']:.3f} (train {record['train_agreement']:.3f})  "
-                    f"metabolic err {record['metabolic_error']:.3f}",
+                    f"agreement {record['argmax_agreement']:.3f} (train {record['train_agreement']:.3f}){throttle}",
                     flush=True,
                 )
 

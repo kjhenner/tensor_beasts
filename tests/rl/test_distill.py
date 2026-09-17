@@ -83,19 +83,9 @@ def test_channel_permutation_leaves_non_directional_channels_alone():
 
 
 def exact_rule_network(env):
-    """A linear network whose policy head IS the rule: the rule's score for
-    each direction is navigation weight times the perceived value in that
-    direction, and the input channels are those values up to one scale."""
+    """A linear network whose policy head IS the rule."""
     network = build_network("linear", env.observation_channels)
-    names = env.channel_names
-    with torch.no_grad():
-        network.policy_head.weight.zero_()
-        network.policy_head.bias.zero_()
-        for key, weight in env.entity.config.navigation_weights.items():
-            for action, direction in enumerate(("here", "up", "down", "left", "right")):
-                name = f"{':'.join(key)}/{direction}"
-                if name in names:
-                    network.policy_head.weight[action, names.index(name)] = float(weight)
+    network.initialise_from_rule(env.channel_names, env.entity.config.navigation_weights, scale=100.0)
     return network
 
 
