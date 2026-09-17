@@ -215,22 +215,21 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help=(
-            "Anchor to the rule-based policy: cross-entropy to its action, cross-"
-            "faded to zero as conformance rises to --imitation-target. Starts the "
+            "Anchor to the rule-based policy: cross-entropy to its action, faded "
+            "to zero over --imitation-release-updates RL updates. Starts the "
             "learner near the baseline instead of at random."
         ),
     )
     hyper.add_argument("--imitation-temperature", type=float, default=None,
                        help="softmax temperature over the rule's scores for soft distillation; 0 = hard argmax (default 0.01)")
-    hyper.add_argument("--imitation-floor", type=float, default=None,
-                       help="minimum anchor weight as a fraction of --imitation-coef, so the rules never fully let go (default 0)")
+    hyper.add_argument("--imitation-release-updates", type=int, default=None,
+                       help="RL updates over which the anchor fades linearly to zero, after which it is gone for good "
+                            "(default 0: no anchor during RL, only in pretraining)")
     hyper.add_argument("--pretrain-updates", type=int, default=None,
                        help="supervised updates on rule-based rollouts before RL, one segment each (0 = off). "
                             "Needed for small populations such as predators, which a near-random start starves.")
     hyper.add_argument("--recurrent-window", type=int, default=None,
                        help="with --memory-size, backpropagate through this many steps of the individual's own memory writes (0 = off, stage 1)")
-    hyper.add_argument("--imitation-target", type=float, default=None,
-                       help="conformance at which the imitation weight reaches zero (default 0.8)")
 
     evaluation = parser.add_argument_group("evaluation")
     evaluation.add_argument(
@@ -350,9 +349,8 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "gae_lambda": args.gae_lambda,
         "target_kl": args.target_kl,
         "imitation_coef": args.imitation_coef,
-        "imitation_target_conformance": args.imitation_target,
+        "imitation_release_updates": args.imitation_release_updates,
         "imitation_temperature": args.imitation_temperature,
-        "imitation_floor": args.imitation_floor,
         "recurrent_window": args.recurrent_window,
     }
 

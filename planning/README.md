@@ -15,6 +15,7 @@ This directory contains planning and status documents for major feature developm
 | Predator sweep | In progress | [06-predator-sweep.md](./06-predator-sweep.md) |
 | Batched worlds | In progress | [07-batched-worlds.md](./07-batched-worlds.md) |
 | Next sweep | Planned | [08-next-sweep.md](./08-next-sweep.md) |
+| Metabolic sweep | In progress | [09-metabolic-sweep.md](./09-metabolic-sweep.md) |
 
 ## Overview
 

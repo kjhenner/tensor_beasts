@@ -432,20 +432,26 @@ def _rollout_with_rule_actions(seed=0, steps=6, size=8, channels=6):
     return rollout
 
 
-def test_imitation_weight_cross_fades_to_zero_at_target_conformance():
+def test_imitation_weight_fades_to_zero_on_a_schedule_of_updates():
+    """The anchor is a schedule, not a controller on agreement. It used to be
+    imitation_coef * max(floor, 1 - conformance / target), and it never let
+    go: agreement plateaus near 0.87, so a target above that held a tenth of
+    the weight for the whole run and one below it re-engaged on every dip."""
     from tensor_beasts.rl.ppo import PPO, PPOConfig
 
-    ppo = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8))
-    ppo.conformance = 0.0
-    assert ppo.imitation_weight() == pytest.approx(2.0), "full strength from a random start"
-    ppo.conformance = 0.4
-    assert ppo.imitation_weight() == pytest.approx(1.0), "halfway to target, half strength"
-    ppo.conformance = 0.8
-    assert ppo.imitation_weight() == 0.0, "at target the rules let go"
-    ppo.conformance = 0.95
-    assert ppo.imitation_weight() == 0.0, "and never pull backwards"
+    ppo = PPO(PPOConfig(imitation_coef=2.0, imitation_release_updates=10))
+    ppo.rl_updates = 0
+    assert ppo.imitation_weight() == pytest.approx(2.0), "full strength on the first RL update"
+    ppo.rl_updates = 5
+    assert ppo.imitation_weight() == pytest.approx(1.0), "halfway through, half strength"
+    ppo.rl_updates = 10
+    assert ppo.imitation_weight() == 0.0, "at the end of the schedule the rules let go"
+    ppo.rl_updates = 500
+    assert ppo.imitation_weight() == 0.0, "and never come back, whatever agreement does"
 
     assert PPO(PPOConfig(imitation_coef=0.0)).imitation_weight() == 0.0, "off means off"
+    assert PPO(PPOConfig(imitation_coef=2.0, imitation_release_updates=0)).imitation_weight() == 0.0, \
+        "no schedule means no anchor during RL"
 
 
 def test_imitation_pulls_the_policy_toward_the_rules_and_conformance_rises():
@@ -458,7 +464,7 @@ def test_imitation_pulls_the_policy_toward_the_rules_and_conformance_rises():
     torch.manual_seed(0)
     rollout = _rollout_with_rule_actions()
     network = build_network("linear", 6)
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_target_conformance=0.9,
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_release_updates=200,
                         learning_rate=0.1, epochs=1, minibatch_steps=6,
                         entropy_coef=0.0, value_coef=0.0))
     optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
@@ -536,7 +542,7 @@ def test_soft_distillation_raises_scoring_conformance():
     torch.manual_seed(0)
     rollout = _rollout_with_rule_scores(gap=1.0)
     network = build_network("linear", 6)
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1, imitation_target_conformance=0.99,
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.1, imitation_release_updates=1000,
                         learning_rate=0.1, epochs=1, minibatch_steps=6, entropy_coef=0.0, value_coef=0.0))
     optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
     first = ppo.update(network, rollout, optimizer)
@@ -653,22 +659,25 @@ def test_uniform_policy_has_zero_soft_conformance():
 
 
 
-def test_imitation_floor_keeps_a_permanent_pull():
-    """Releasing fully at the target was seen to oscillate: the RL gradient
-    lowers conformance, the anchor re-engages, repeat. A floor keeps a light
-    pull on however far conformance climbs, and zero preserves the old rule."""
+def test_the_update_advances_the_fade_and_the_rules_let_go_for_good():
+    """Each update() moves the schedule on by one, and once it has run out the
+    anchor contributes nothing however far the policy then drifts."""
+    import torch
+    from tensor_beasts.rl.networks import build_network
     from tensor_beasts.rl.ppo import PPO, PPOConfig
 
-    floored = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8, imitation_floor=0.25))
-    for conformance in (0.0, 0.5, 0.8, 0.95):
-        floored.conformance = conformance
-        assert floored.imitation_weight() >= 0.5
-    floored.conformance = 0.0
-    assert floored.imitation_weight() == pytest.approx(2.0), "the floor never raises the weight above full strength"
+    torch.manual_seed(0)
+    rollout = _rollout_with_rule_actions()
+    network = build_network("linear", 6)
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_release_updates=3, epochs=1, minibatch_steps=6,
+                        entropy_coef=0.0, value_coef=0.0, learning_rate=0.0))
+    optimizer = torch.optim.SGD(network.parameters(), lr=0.0)
 
-    released = PPO(PPOConfig(imitation_coef=2.0, imitation_target_conformance=0.8, imitation_floor=0.0))
-    released.conformance = 0.9
-    assert released.imitation_weight() == 0.0
+    weights = [ppo.update(network, rollout, optimizer)["imitation_weight"] for _ in range(5)]
+    assert weights == pytest.approx([1.0, 2 / 3, 1 / 3, 0.0, 0.0])
+    assert ppo.rl_updates == 5
+    assert ppo.update(network, rollout, optimizer)["loss"] == pytest.approx(0.0, abs=1e-6), \
+        "with zero advantages and the anchor gone there is nothing left to minimise"
 
 
 
@@ -691,19 +700,19 @@ def test_the_throttle_anchor_shares_the_direction_anchors_weight():
     network = build_network("linear", 6, metabolic=True)
     batch = list(next(iter_minibatches_with_value(rollout, steps, shuffle=False)))
 
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0))
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_release_updates=10))
     with_rule = tuple(batch)
     flipped = list(batch)
     flipped[-1] = flipped[-1] + 1.0  # a different rule throttle everywhere
     flipped = tuple(flipped)
 
-    ppo.conformance = 0.0
+    ppo.rl_updates = 0
     assert ppo.imitation_weight() > 0.0
     assert float(ppo.minibatch_loss(network, with_rule)) != pytest.approx(
         float(ppo.minibatch_loss(network, flipped)), abs=1e-6
     ), "with the anchor on, the rule throttle must matter"
 
-    ppo.conformance = 1.0
+    ppo.rl_updates = 10
     assert ppo.imitation_weight() == 0.0
     assert float(ppo.minibatch_loss(network, with_rule)) == pytest.approx(
         float(ppo.minibatch_loss(network, flipped)), abs=1e-6

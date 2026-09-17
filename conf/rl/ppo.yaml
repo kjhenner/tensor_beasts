@@ -78,18 +78,16 @@ ppo:
   normalize_advantage: true
   # Null disables the early stop. Set to ~0.02 if updates start diverging.
   target_kl: null
-  # Imitation of the rule-based policy, cross-faded out as agreement rises.
-  # Weight each update = imitation_coef * max(0, 1 - conformance / target).
+  # Imitation of the rule-based policy, faded out over a fixed number of RL
+  # updates. Weight at RL update k = imitation_coef * max(0, 1 - k / release).
   # Off by default so the plain-PPO result stays reproducible; 1.0 is a
   # sensible strength when turning it on.
   imitation_coef: 0.0
-  # Below the ~0.9 practical ceiling; the rule's decisions are knife-edge.
-  imitation_target_conformance: 0.8
+  # RL updates the fade lasts. 0 anchors in pretraining only. It was a
+  # controller on measured agreement, which never released; see planning/09.
+  imitation_release_updates: 0
   # Soft distillation toward softmax(rule scores / temperature). 0 = hard argmax.
   imitation_temperature: 0.01
-  # Minimum anchor weight as a fraction of imitation_coef. 0 releases fully at
-  # the target, which was seen to oscillate; 0.2 keeps a permanent light pull.
-  imitation_floor: 0.0
   # Backpropagate memory writes through this many steps of the individual's
   # own trajectory. 0 = off (stage 1). See planning/04.
   recurrent_window: 0

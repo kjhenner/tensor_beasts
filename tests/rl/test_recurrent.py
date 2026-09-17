@@ -191,7 +191,7 @@ def test_a_task_that_needs_memory_is_only_learned_recurrently():
         torch.manual_seed(1)
         network = build_network("linear", obs_channels + K, memory_size=K)
         ppo = PPO(PPOConfig(recurrent_window=window, epochs=1, minibatch_steps=T, imitation_coef=1.0,
-                            imitation_temperature=0.0, imitation_target_conformance=1.01, entropy_coef=0.0,
+                            imitation_temperature=0.0, imitation_release_updates=1000, entropy_coef=0.0,
                             value_coef=0.0, learning_rate=0.05))
         optimizer = torch.optim.Adam(network.parameters(), lr=0.05)
         for _ in range(120):

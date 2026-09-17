@@ -342,7 +342,7 @@ def test_metabolic_imitation_pulls_the_throttle_toward_the_rule():
     torch.manual_seed(0)
     rollout = _rollout_with_rule_units()
     network = build_network("linear", 10, metabolic=True)
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_target_conformance=0.99,
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_release_updates=1000,
                         epochs=1, minibatch_steps=6, entropy_coef=0.0, value_coef=0.0))
     optimizer = torch.optim.Adam(network.parameters(), lr=0.1)
 
@@ -353,8 +353,50 @@ def test_metabolic_imitation_pulls_the_throttle_toward_the_rule():
     assert last["metabolic_error"] < first["metabolic_error"] - 0.05
     assert last["metabolic_imitation_loss"] < first["metabolic_imitation_loss"]
     assert 0.0 <= last["metabolic_unit_mean"] <= 1.0
-    assert last["metabolic_std"] > 0.0
-    assert last["metabolic_entropy"] < first["metabolic_entropy"]
+    assert 0.0 <= last["metabolic_head_mean"] <= 1.0
+    assert 0.0 <= last["metabolic_rule_mean"] <= 1.0
+    # The rule's throttle here is a function of the observation, so a head
+    # that has fitted it varies across cells the way the rule does.
+    assert last["metabolic_head_spread"] > first["metabolic_head_spread"]
+    assert last["metabolic_rule_corr"] > 0.5
+    # The anchor judges disagreement at a fixed scale and fits the mean only.
+    # With no policy gradient (zero advantages) and no entropy bonus, the
+    # policy's own spread is untouched: it is exploration, not something the
+    # rule has an opinion about. Under the learned-std likelihood it used to
+    # shrink here, and in training that made the anchor strengthen itself.
+    assert last["metabolic_std"] == pytest.approx(math.exp(-3.0), rel=1e-6)
+    assert last["metabolic_entropy"] == pytest.approx(first["metabolic_entropy"], rel=1e-6)
+
+
+def test_evaluation_scores_the_throttle_at_the_heads_mean(tmp_path):
+    """The Gaussian's spread is exploration. Sampled and clamped to [0, 1] it
+    is a bias rather than a variance: with the mean near the rule's 0.08 and
+    the old std of 0.6, samples averaged 0.22. Evaluation takes the mean."""
+    trainer = make_trainer(tmp_path)
+    trainer.env.reset(seed=0)
+    trainer.warmup()
+    batch = trainer.env.rule_based_step()
+    observation = batch.observation.float()
+    out = trainer.network.forward_all(observation.unsqueeze(0) if observation.dim() == 3 else observation)
+
+    _, _, _, unit, _ = trainer.act(observation, deterministic=False, deterministic_metabolic=True)
+    assert torch.allclose(unit, out["metabolic_mean"].reshape(unit.shape))
+
+    torch.manual_seed(0)
+    _, _, _, sampled, _ = trainer.act(observation, deterministic=False)
+    assert not torch.allclose(sampled, unit), "sampling still samples when asked to"
+
+
+def test_masked_correlation_and_spread_read_zero_on_a_flat_field():
+    from tensor_beasts.rl.ppo import masked_corr, masked_std
+
+    mask = torch.ones(4, 4, dtype=torch.bool)
+    flat = torch.full((4, 4), 0.3)
+    varied = torch.rand(4, 4)
+    assert float(masked_std(flat, mask)) == pytest.approx(0.0, abs=1e-6)
+    assert float(masked_corr(flat, varied, mask)) == 0.0
+    assert float(masked_corr(varied, varied, mask)) == pytest.approx(1.0, abs=1e-5)
+    assert float(masked_corr(varied, -varied, mask)) == pytest.approx(-1.0, abs=1e-5)
 
 
 def test_metabolic_imitation_is_masked_to_acting_cells():
@@ -387,10 +429,11 @@ def test_both_levers_share_one_cross_fade_weight():
     network = build_network("linear", 10, metabolic=True)
     batch = next(iter_minibatches_with_value(rollout, rollout.steps, shuffle=False))
 
-    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, entropy_coef=0.0, value_coef=0.0))
-    ppo.conformance = 0.0
+    ppo = PPO(PPOConfig(imitation_coef=1.0, imitation_temperature=0.0, imitation_release_updates=10,
+                        entropy_coef=0.0, value_coef=0.0))
+    ppo.rl_updates = 0
     _, engaged = ppo._losses(network, *batch)
-    ppo.conformance = 1.0
+    ppo.rl_updates = 10
     _, released = ppo._losses(network, *batch)
 
     assert engaged["imitation_weight"] == 1.0 and released["imitation_weight"] == 0.0

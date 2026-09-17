@@ -226,6 +226,7 @@ def test_resume_restores_weights_counters_and_optimizer(tmp_path):
         assert torch.equal(value, weights[key]), key
     assert resumed.world_steps == 8
     assert resumed.updates == 2
+    assert resumed.algorithm.rl_updates == 2, "the anchor's fade resumes where it was, it does not re-anchor"
     assert resumed.optimizer.state_dict()["state"]
 
     resumed.train(verbose=False)
@@ -311,7 +312,7 @@ def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_
     # it picks the same bin. A fifth of the basal-to-max range is loose, and
     # deliberately: this checks that the anchor pulls, not how far.
     assert result["metabolic_error"] < 0.2
-    assert trainer.algorithm.conformance == pytest.approx(result["argmax_agreement"])
+    assert trainer.algorithm.rl_updates == 0, "pretraining is not an RL update; the fade has not started"
     assert trainer.world_steps == 6 * 16
 
 

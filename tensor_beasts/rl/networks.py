@@ -86,7 +86,14 @@ class ActorCritic(nn.Module):
             # a per-cell one. The spread is exploration policy, not something an
             # individual should condition on, and a state-dependent sigma is a
             # well-known way to collapse a continuous policy early.
-            self.metabolic_log_std = nn.Parameter(torch.full((1,), -0.5))
+            #
+            # exp(-3) is a std of 0.05, about the rule's own spread across
+            # individuals. It started at exp(-0.5) = 0.6 on a unit interval
+            # where the rule sits near 0.08, and the clamp to [0, 1] turned
+            # that noise into a bias: samples averaged 0.22, a quarter more
+            # burn than the rule, for as long as it took the std to anneal,
+            # which was the whole run (planning/09).
+            self.metabolic_log_std = nn.Parameter(torch.full((1,), -3.0))
         else:
             self.metabolic_head = None
             self.metabolic_log_std = None

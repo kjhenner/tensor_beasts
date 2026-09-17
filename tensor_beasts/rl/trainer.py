@@ -41,7 +41,7 @@ import torch
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
 from tensor_beasts.rl.networks import ActorCritic, build_network
 from tensor_beasts.rl.normalization import ValueNormalizer
-from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig
+from tensor_beasts.rl.ppo import MAX_LOG_STD, METABOLIC_ANCHOR_STD, MIN_LOG_STD, PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
 
 # The project's default W&B server. A different value on TrainerConfig is taken
@@ -644,7 +644,10 @@ class Trainer:
 
     @torch.no_grad()
     def act(
-        self, observation: torch.Tensor, deterministic: bool = False
+        self,
+        observation: torch.Tensor,
+        deterministic: bool = False,
+        deterministic_metabolic: Optional[bool] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Sample an action for every cell.
 
@@ -653,6 +656,9 @@ class Trainer:
         which case it is a continuous throttle in [0, 1] sampled from a
         Gaussian around the head's mean and ``log_prob`` is the joint
         log-probability, the quantity the PPO ratio is defined over.
+        ``deterministic_metabolic`` takes the head's mean as the throttle
+        while leaving the direction as ``deterministic`` says; None follows
+        ``deterministic`` for both.
 
         Actions are produced for the whole grid, empty cells included. The
         simulation ignores directions at cells with nobody in them, and the loss
@@ -673,8 +679,10 @@ class Trainer:
         action, log_prob = self._sample(out["logits"], deterministic)
         metabolic_unit = None
         if "metabolic_mean" in out:
+            if deterministic_metabolic is None:
+                deterministic_metabolic = deterministic
             metabolic_unit, metabolic_log_prob = self._sample_metabolic(
-                out["metabolic_mean"], out["metabolic_log_std"], deterministic
+                out["metabolic_mean"], out["metabolic_log_std"], deterministic_metabolic
             )
             log_prob = log_prob + metabolic_log_prob
             metabolic_unit = unwrap(metabolic_unit)
@@ -800,8 +808,15 @@ class Trainer:
                 # rather than the policy. See multiagent.step_with_policy.
                 def decide(observation, env=env):
                     observation = policy_input(observation)
+                    # The throttle is scored at the head's mean whatever the
+                    # direction does. Its Gaussian spread is exploration, and
+                    # sampling it is not merely noisy: the clamp to [0, 1]
+                    # rectifies the noise into a hotter throttle than the
+                    # policy chose, which is a bias, not a variance.
                     action, _, _, metabolic_unit, memory = self.act(
-                        observation, deterministic=self.config.eval_deterministic
+                        observation,
+                        deterministic=self.config.eval_deterministic,
+                        deterministic_metabolic=True,
                     )
                     if self.config.eval_pin_metabolic is not None:
                         # Evaluation-only: hold the throttle at a fixed unit so
@@ -1125,6 +1140,9 @@ class Trainer:
         self.world_steps = int(payload.get("world_steps", 0))
         self.agent_steps = int(payload.get("agent_steps", 0))
         self.updates = int(payload.get("updates", 0))
+        # The anchor's fade counts RL updates; a resumed run must not re-anchor.
+        if hasattr(self.algorithm, "rl_updates"):
+            self.algorithm.rl_updates = self.updates
         self._next_eval = self.world_steps
         self._next_checkpoint = self.world_steps + self.config.checkpoint_interval
 
@@ -1149,7 +1167,9 @@ class Trainer:
             ("explained_variance", "ev"),
             ("argmax_agreement", "agree"),
             ("metabolic_error", "m_err"),
-            ("metabolic_unit_mean", "m_rate"),
+            ("metabolic_head_mean", "m_rate"),
+            ("metabolic_rule_mean", "m_rule"),
+            ("metabolic_head_spread", "m_spread"),
             ("metabolic_std", "m_std"),
             ("world_steps_per_sec", "w/s"),
             ("agent_steps_per_sec", "a/s"),
@@ -1183,8 +1203,9 @@ class Trainer:
         only because there are thousands of them. Starting RL from a policy
         that already behaves like the rule removes that cliff.
 
-        The anchor's conformance is seeded from the measured agreement, so the
-        cross-fade starts where pretraining left off instead of at full weight.
+        The anchor's fade during RL is a schedule of updates (see PPOConfig),
+        so it starts at full weight on the first RL update regardless of what
+        pretraining reached, and is gone once the schedule runs out.
         """
         import torch.nn.functional as F
 
@@ -1280,19 +1301,14 @@ class Trainer:
                     loss = (per_cell * mask).sum() / count
                     metabolic_error = float("nan")
                     if "metabolic_mean" in out and rule_unit is not None:
-                        # Gaussian log-likelihood of the rule's own throttle,
-                        # added at the same weight as the direction term. The
-                        # two heads imitate one rule on one schedule; a separate
-                        # multiplier here was a knob with no argument behind it.
+                        # The same fixed-scale anchor PPO applies, at the same
+                        # weight as the direction term: the two heads imitate
+                        # one rule on one schedule. Only the mean is fitted;
+                        # the policy's std is exploration and keeps its
+                        # initialisation.
                         target = rule_unit[index].to(self.device).float()
                         mean = out["metabolic_mean"]
-                        log_std = out["metabolic_log_std"].clamp(MIN_LOG_STD, MAX_LOG_STD)
-                        std = log_std.exp()
-                        met = (
-                            0.5 * ((target - mean) / std) ** 2
-                            + log_std
-                            + 0.5 * math.log(2 * math.pi)
-                        )
+                        met = 0.5 * ((target - mean) / METABOLIC_ANCHOR_STD) ** 2
                         loss = loss + (met * mask).sum() / count
                         metabolic_error = float(((mean - target).abs() * mask).sum() / count)
                     self.optimizer.zero_grad(set_to_none=True)
@@ -1323,9 +1339,6 @@ class Trainer:
                     f"population {last['population']:.0f}"
                 )
 
-        # Seed the anchor's cross-fade from what pretraining achieved.
-        if hasattr(self.algorithm, "conformance") and last:
-            self.algorithm.conformance = last["argmax_agreement"]
         return last
 
     def train(self, verbose: bool = True) -> Dict[str, object]:

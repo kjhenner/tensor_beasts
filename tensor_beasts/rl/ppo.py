@@ -27,11 +27,10 @@ product of two independent categoricals, one over directions and one over
 a continuous throttle. The joint log-probability is the sum of the two, the entropy
 bonus is the sum of the two entropies, and the clipped ratio is taken over the
 joint, so ``rollout.log_prob`` must hold the joint log-prob at collection
-time. The imitation anchor gains a second term, hard cross-entropy of the
-throttle toward the rule's own rate on the same observation, weighted
-by the *same* cross-fade weight as the direction term: there is one anchor
-with two levers, and it releases as a whole when direction conformance
-reaches the target.
+time. The imitation anchor gains a second term, a fixed-scale Gaussian
+log-likelihood of the rule's own throttle on the same observation, weighted
+by the *same* fade weight as the direction term: there is one anchor with two
+levers, and it fades to zero as a whole on one schedule of updates.
 
 Slotting in other algorithms
 ----------------------------
@@ -69,6 +68,15 @@ NUM_ACTIONS = 5
 # range, which is the other degenerate solution and costs nothing to rule out.
 MIN_LOG_STD = -4.0
 MAX_LOG_STD = 1.0
+
+# The scale the throttle anchor judges disagreement at, in normalised throttle
+# units, so a tenth of the basal-to-max range costs half a nat. Fixed rather
+# than the policy's own learned std, and the reason is in the record: under
+# the learned std the anchor's pull on the mean scales as 1/std^2 while the
+# same term shrinks the std, so the anchor strengthened itself until the
+# throttle was pinned to the rule (planning/09). The policy's std is now
+# exploration only, set by its initialisation, PPO and the entropy bonus.
+METABOLIC_ANCHOR_STD = 0.1
 
 
 def iter_minibatches_with_value(
@@ -142,6 +150,27 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (values * mask).sum() / count
 
 
+def masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Population standard deviation of ``values`` over the True entries of ``mask``."""
+    mean = masked_mean(values, mask)
+    return masked_mean((values - mean) ** 2, mask).clamp(min=0.0).sqrt()
+
+
+def masked_corr(a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Pearson correlation of ``a`` and ``b`` over the True entries of ``mask``.
+
+    Zero when either side is constant, which is the honest reading: a flat
+    throttle is not correlated with anything.
+    """
+    a_std = masked_std(a, mask)
+    b_std = masked_std(b, mask)
+    if float(a_std) <= 1e-6 or float(b_std) <= 1e-6:
+        return torch.zeros((), device=a.device)
+    a_centred = a - masked_mean(a, mask)
+    b_centred = b - masked_mean(b, mask)
+    return masked_mean(a_centred * b_centred, mask) / (a_std * b_std)
+
+
 def explained_variance(value: torch.Tensor, ret: torch.Tensor, mask: torch.Tensor) -> float:
     """1 - Var(ret - value) / Var(ret), over acting cells only.
 
@@ -189,19 +218,24 @@ class PPOConfig:
     clip_range: float = 0.2
     value_clip_range: Optional[float] = None
     entropy_coef: float = 0.01
-    # Imitation of the simulation's rule-based policy, cross-faded out as the
-    # learned policy comes to agree with it. The weight applied each update is
-    #     imitation_coef * max(0, 1 - conformance / imitation_target_conformance)
-    # where conformance is the fraction of acting cells whose most likely
-    # action matched the rule-based action during the previous update. So it
-    # starts at full strength, anchoring a random policy to the baseline, and
-    # reaches zero once agreement hits the target, leaving only the real
-    # rewards. Zero disables it.
+    # Imitation of the simulation's rule-based policy, faded out over a fixed
+    # number of RL updates. The weight applied at RL update k (counting from
+    # zero) is
+    #     imitation_coef * max(0, 1 - k / imitation_release_updates)
+    # so the anchor is at full strength on the first update and gone for good
+    # once the schedule runs out. Pretraining uses the full coefficient
+    # throughout, since its only job is to fit the rule. Zero disables it.
+    #
+    # It used to be a controller on measured agreement,
+    #     imitation_coef * max(floor, 1 - conformance / target),
+    # which never released: agreement plateaus near 0.87 and a target above
+    # that held the anchor at a tenth of its strength for the whole run, while
+    # a target below it re-engaged whenever agreement dipped. The intent was
+    # always a full release, so the schedule is now a schedule (planning/09).
     imitation_coef: float = 0.0
-    # 0.8, not higher: the rule's decisions are knife-edge (see multiagent.py),
-    # so roughly 0.9 argmax agreement is the practical ceiling and a target
-    # above it would keep the anchor engaged forever.
-    imitation_target_conformance: float = 0.8
+    # RL updates over which the anchor fades to zero. Zero means the anchor is
+    # off during RL, and only pretraining fits the rule.
+    imitation_release_updates: int = 0
     # Soft distillation. When the rollout carries the rule's per-action scores,
     # the imitation target is softmax(scores / temperature) and the loss is the
     # KL from that target to the policy. The temperature sets what counts as a
@@ -212,15 +246,6 @@ class PPOConfig:
     # argmax imitation spends its gradient on coin-flips. Set to 0 to fall back
     # to hard imitation of the argmax.
     imitation_temperature: float = 0.01
-    # Floor on the cross-fade, as a fraction of imitation_coef. With a floor of
-    # zero the anchor releases fully once conformance reaches the target, and
-    # the first soft-distillation run showed what happens next: the RL gradient
-    # immediately pulls the policy away from the rules, conformance falls, the
-    # anchor re-engages, and the two oscillate for the rest of training. A
-    # small permanent pull keeps the policy in the neighbourhood the rules
-    # already know is good while leaving RL free to improve on it. Zero
-    # preserves the earlier behaviour exactly.
-    imitation_floor: float = 0.0
     # Recurrent training of the memory write. Zero is off: the memory read at
     # each step is the stored one and the write is a fixed function of the
     # observation (stage 1 of planning/04). Positive N replays each segment in
@@ -291,17 +316,18 @@ class PPO:
         # global clipping leaves the policy with a thousandth of its intended
         # step. See tensor_beasts/rl/normalization.py for the measurement.
         self.value_normalizer = value_normalizer or ValueNormalizer(enabled=False)
-        # Agreement with the rule-based policy measured during the last update.
-        # Starts at zero so the first update imitates at full strength.
-        self.conformance = 0.0
+        # RL updates completed so far, which is what the anchor's fade runs on.
+        # The trainer restores it from a checkpoint so a resumed run does not
+        # re-anchor.
+        self.rl_updates = 0
 
     def imitation_weight(self) -> float:
-        """Current cross-fade weight on the imitation term. See PPOConfig."""
+        """Current fade weight on the imitation term. See PPOConfig."""
         config = self.config
-        if config.imitation_coef <= 0.0:
+        if config.imitation_coef <= 0.0 or config.imitation_release_updates <= 0:
             return 0.0
-        remaining = 1.0 - self.conformance / max(config.imitation_target_conformance, 1e-8)
-        return config.imitation_coef * max(config.imitation_floor, remaining)
+        remaining = 1.0 - self.rl_updates / float(config.imitation_release_updates)
+        return config.imitation_coef * max(0.0, remaining)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
@@ -448,9 +474,10 @@ class PPO:
         loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_mean
 
         # Imitation of the rule-based policy: cross-entropy to its action,
-        # weighted by the cross-fade. Conformance is measured whether or not
-        # the term is active, so the log shows how far from the rules the
-        # policy has drifted even when nothing is pulling it back.
+        # weighted by the fade. Conformance is measured whether or not the
+        # term is active, so the log shows how far from the rules the policy
+        # has drifted even when nothing is pulling it back; it no longer
+        # drives anything.
         imitation_loss = torch.zeros((), device=loss.device)
         conformance = float("nan")
         argmax_agreement = float("nan")
@@ -482,41 +509,46 @@ class PPO:
         if rule_action is not None:
             with torch.no_grad():
                 argmax_agreement = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
-        # The metabolic lever's anchor: hard cross-entropy toward the level the
-        # rule would have chosen, under the same cross-fade weight. Agreement
-        # and the mean chosen level are logged whether or not the term is
-        # active, so the log shows whether the learner runs hot or cold.
+        # The metabolic lever's anchor: the Gaussian log-likelihood of the
+        # rule's own throttle around the head's mean, at the fixed scale
+        # METABOLIC_ANCHOR_STD, under the same fade weight as the direction.
+        # The throttle statistics are logged whether or not the term is active,
+        # so the log shows whether the learner runs hot or cold, and whether
+        # its throttle varies across the field at all.
         metabolic_imitation_loss = torch.zeros((), device=loss.device)
         metabolic_error = float("nan")
         metabolic_unit_mean = float("nan")
+        metabolic_head_mean = float("nan")
+        metabolic_head_spread = float("nan")
+        metabolic_rule_mean = float("nan")
+        metabolic_rule_corr = float("nan")
         metabolic_entropy = float("nan")
         metabolic_std = float("nan")
         if "metabolic_mean" in heads:
+            mean = heads["metabolic_mean"]
             with torch.no_grad():
                 metabolic_unit_mean = float(masked_mean(metabolic_unit.float(), mask))
                 metabolic_entropy = float(masked_mean(heads["metabolic_entropy"], mask))
                 metabolic_std = float(heads["metabolic_log_std"].exp())
+                # The head's mean, as distinct from the sampled unit: with a
+                # wide Gaussian clamped to [0, 1] the two differ by a lot, and
+                # it was the sampled one that ran hot in the first sweep.
+                metabolic_head_mean = float(masked_mean(mean, mask))
+                # How much the throttle varies across acting individuals. A
+                # throttle that has learned nothing is flat; one that moves
+                # with the hunt has spread.
+                metabolic_head_spread = float(masked_std(mean, mask))
             if rule_metabolic_unit is not None:
-                # The anchor is the Gaussian log-likelihood of the rule's own
-                # throttle under the policy's throttle distribution: the
-                # continuous analogue of the cross-entropy that anchors the
-                # direction. Regressing the mean with a squared error would be
-                # the obvious alternative and is worse, because it ignores the
-                # spread and so cannot be traded off against the entropy term
-                # on the same footing as the direction's anchor.
-                mean = heads["metabolic_mean"]
-                log_std = heads["metabolic_log_std"]
-                std = log_std.exp()
-                rule_log_prob = (
-                    -0.5 * ((rule_metabolic_unit - mean) / std) ** 2
-                    - log_std
-                    - 0.5 * math.log(2 * math.pi)
+                rule_unit = rule_metabolic_unit.float()
+                metabolic_imitation_loss = masked_mean(
+                    0.5 * ((rule_unit - mean) / METABOLIC_ANCHOR_STD) ** 2, mask
                 )
-                metabolic_imitation_loss = -masked_mean(rule_log_prob, mask)
                 with torch.no_grad():
-                    metabolic_error = float(
-                        masked_mean((mean - rule_metabolic_unit).abs(), mask)
-                    )
+                    metabolic_error = float(masked_mean((mean - rule_unit).abs(), mask))
+                    metabolic_rule_mean = float(masked_mean(rule_unit, mask))
+                    # Does the policy sprint where the rule would? Zero says the
+                    # policy's variation, if any, is not the rule's.
+                    metabolic_rule_corr = float(masked_corr(mean, rule_unit, mask))
 
         if soft or rule_action is not None:
             weight = self.imitation_weight()
@@ -557,6 +589,10 @@ class PPO:
             # continuous action has no equivalent of.
             "metabolic_error": metabolic_error,
             "metabolic_unit_mean": metabolic_unit_mean,
+            "metabolic_head_mean": metabolic_head_mean,
+            "metabolic_head_spread": metabolic_head_spread,
+            "metabolic_rule_mean": metabolic_rule_mean,
+            "metabolic_rule_corr": metabolic_rule_corr,
             "metabolic_entropy": metabolic_entropy,
             "metabolic_std": metabolic_std,
         }
@@ -640,9 +676,7 @@ class PPO:
                     break
 
         result = accumulator.mean()
-        measured = result.get("conformance", float("nan"))
-        if measured == measured:  # not NaN: the rollout carried rule actions
-            self.conformance = measured
+        self.rl_updates += 1
         result["explained_variance"] = explained_variance(
             rollout.value, rollout.ret, rollout.acted
         )
@@ -687,8 +721,8 @@ class PPO:
         accumulator = _Accumulator()
         # Gradient norms arrive once per window, not once per step. Feeding them
         # into the same accumulator added the window's whole weight to the
-        # shared denominator and halved every other diagnostic, including the
-        # conformance that drives the anchor's cross-fade. They get their own.
+        # shared denominator and halved every other diagnostic. They get
+        # their own.
         gradient_accumulator = _Accumulator()
         epochs_run = 0
         write_magnitudes: List[float] = []
@@ -753,9 +787,7 @@ class PPO:
 
         result = accumulator.mean()
         result.update(gradient_accumulator.mean())
-        measured = result.get("conformance", float("nan"))
-        if measured == measured:
-            self.conformance = measured
+        self.rl_updates += 1
         result["explained_variance"] = explained_variance(rollout.value, rollout.ret, rollout.acted)
         result["epochs_run"] = float(epochs_run)
         result["agent_steps"] = float(rollout.num_agent_steps)
