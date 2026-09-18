@@ -17,6 +17,7 @@ This directory contains planning and status documents for major feature developm
 | Next sweep | Planned | [08-next-sweep.md](./08-next-sweep.md) |
 | Metabolic sweep | In progress | [09-metabolic-sweep.md](./09-metabolic-sweep.md) |
 | Extinction is not a verdict | In progress | [10-extinction-is-not-a-verdict.md](./10-extinction-is-not-a-verdict.md) |
+| The metric, the reward, and the rule with free values | Current | [11-metric-reward-and-the-rule-with-free-values.md](./11-metric-reward-and-the-rule-with-free-values.md) |
 
 ## Overview
 
