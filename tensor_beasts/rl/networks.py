@@ -29,13 +29,15 @@ so a learner that controls both levers asks for everything and one that
 controls only movement keeps calling the network as before.
 """
 
-from typing import Dict, Tuple
+import math
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 NUM_ACTIONS = 5
+RULE_ARCHITECTURE = "rule"
 
 
 def orthogonal_init(module: nn.Module, gain: float = 1.0) -> nn.Module:
@@ -200,6 +202,203 @@ class LinearPolicy(ActorCritic):
                     self.policy_head.weight[action, names.index(name), 0, 0] = float(weight) * scale
 
 
+def conv_trunk(in_channels: int, hidden_channels: int, depth: int) -> nn.Sequential:
+    """``depth`` 3x3 convolutions with ReLU, the trunk :class:`ConvActorCritic`
+    and the rule actor's critic share."""
+    layers = []
+    channels = in_channels
+    for _ in range(depth):
+        layers.append(orthogonal_init(nn.Conv2d(channels, hidden_channels, 3, padding=1), gain=2.0**0.5))
+        layers.append(nn.ReLU(inplace=True))
+        channels = hidden_channels
+    return nn.Sequential(*layers)
+
+
+class RulePolicy(nn.Module):
+    """The rule with free values: one weight per perceived feature, a sharpness
+    and a throttle sensitivity, all starting at the rule's own values.
+
+    The general linear head has five weights per channel and has to sit at
+    weights near a thousand to reproduce a soft target at temperature 0.01,
+    which is why Adam at 3e-4 froze it. The rule has one weight per feature,
+    shared across the five directions::
+
+        score_a = sum_k w_k * x_{k,a}          (k over perceived features)
+        logits_a = beta * score_a
+        rate = basal + s * gradient_ema, capped by biomass as the rule caps it
+
+    Symmetric by construction, so no augmentation is needed; readable, so a
+    drift is a sentence; at natural scale, so the learning rate means what it
+    says; and ``beta`` makes "how stochastic should a shared policy be" a
+    number the policy finds rather than an entropy bonus we set. The scores
+    are in the rule's own units (the channels are the log-compressed values
+    divided by ``perceived_scale``, which is undone here), so ``beta`` starts
+    at one over the distillation temperature and the weights at the config's
+    navigation weights. The one thing the rule does that this does not is
+    clamp the combined score at zero before the argmax, which only matters
+    where every direction is repulsive; the linear control never had it
+    either. See planning/11.
+
+    The critic is separate, and its depth is chosen separately: ``critic`` is
+    ``"conv"`` (a small trunk with a value head) or ``"linear"`` (a 1x1
+    convolution). A deeper critic does not change what the policy can express.
+
+    Args:
+        in_channels: Observation channels, which must match ``rule``.
+        rule: What :meth:`MultiAgentWorldEnv.rule_spec` returns: channel
+            names, the perceived features in order, the navigation weights
+            and the throttle constants.
+        metabolic: Add the throttle, the Gaussian policy over a unit in
+            [0, 1] whose mean is the rule's own rate with ``s`` free.
+        temperature: Distillation temperature the sharpness starts at the
+            inverse of. Zero means a large fixed sharpness.
+        critic: ``"conv"`` or ``"linear"``.
+        hidden_channels, depth: The conv critic's trunk.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        rule: Dict[str, object],
+        metabolic: bool = False,
+        memory_size: int = 0,
+        temperature: float = 0.01,
+        critic: str = "conv",
+        hidden_channels: int = 64,
+        depth: int = 3,
+    ):
+        super().__init__()
+        if memory_size:
+            raise ValueError("The rule-parametrised actor has no memory head.")
+        names = list(rule["channel_names"])
+        if len(names) != in_channels:
+            raise ValueError(f"rule spec names {len(names)} channels, the observation has {in_channels}")
+        self.in_channels = in_channels
+        self.memory_size = 0
+        self.metabolic = bool(metabolic)
+        self.features = list(rule["features"])
+        index = [
+            [names.index(f"{label}/{direction}") for direction in ("here", "up", "down", "left", "right")]
+            for label in self.features
+        ]
+        self.register_buffer("channel_index", torch.tensor(index, dtype=torch.long))
+        self.ema_channel = names.index("self/gradient_ema")
+        self.biomass_channel = names.index("self/biomass")
+        self.perceived_scale = float(rule["perceived_scale"])
+        self.alpha = float(rule["gradient_ema_alpha"])
+        self.basal_rate = float(rule["basal_rate"])
+        self.max_rate = float(rule["max_metabolic_rate"])
+        self.survival_threshold = float(rule["survival_threshold"])
+
+        weights = dict(rule["navigation_weights"])
+        self.weight = nn.Parameter(torch.tensor([float(weights.get(label, 0.0)) for label in self.features]))
+        sharpness = 1.0 / temperature if temperature > 0 else 100.0
+        # Log-parametrised: the sharpness is a scale, and a step of the
+        # learning rate should move it by a fraction rather than by a unit.
+        self.log_sharpness = nn.Parameter(torch.tensor(math.log(sharpness)))
+        if self.metabolic:
+            self.sensitivity = nn.Parameter(torch.tensor(float(rule["metabolic_sensitivity"])))
+            # exp(-3), about the rule's own spread across individuals; see
+            # ActorCritic for the record.
+            self.metabolic_log_std = nn.Parameter(torch.full((1,), -3.0))
+        else:
+            self.sensitivity = None
+            self.metabolic_log_std = None
+
+        if critic == "conv":
+            self.critic = nn.Sequential(
+                conv_trunk(in_channels, hidden_channels, depth),
+                orthogonal_init(nn.Conv2d(hidden_channels, 1, 1), gain=1.0),
+            )
+        elif critic == "linear":
+            self.critic = orthogonal_init(nn.Conv2d(in_channels, 1, 1), gain=1.0)
+        else:
+            raise ValueError(f"Unknown critic {critic!r}; options are 'conv' and 'linear'")
+        self.critic_kind = critic
+
+    @property
+    def has_metabolic_head(self) -> bool:
+        return self.metabolic
+
+    @property
+    def sharpness(self) -> torch.Tensor:
+        return self.log_sharpness.exp()
+
+    def _scores(self, observation: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Signed and absolute-weighted scores, each ``(B, 5, H, W)``, in the
+        rule's own units."""
+        x = observation[:, self.channel_index] * self.perceived_scale  # (B, K, 5, H, W)
+        signed = torch.einsum("k,bkahw->bahw", self.weight, x)
+        absolute = torch.einsum("k,bkahw->bahw", self.weight.abs(), x)
+        return signed, absolute
+
+    def forward(self, observation: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        out = self.forward_all(observation)
+        return out["logits"], out["value"]
+
+    def forward_all(self, observation: torch.Tensor) -> Dict[str, torch.Tensor]:
+        signed, absolute = self._scores(observation)
+        out = {
+            "logits": self.sharpness * signed,
+            "value": self.critic(observation).squeeze(1),
+        }
+        if self.metabolic:
+            # The rule's throttle: the stimulus is the best neighbour's
+            # absolute-weighted score over the cell's own, smoothed into the
+            # EMA the observation carries, times the sensitivity, as a unit of
+            # the basal-to-max range, capped by what the biomass allows.
+            gradient = (absolute[:, 1:].max(dim=1).values - absolute[:, 0]).clamp(min=0)
+            ema = self.alpha * gradient + (1.0 - self.alpha) * observation[:, self.ema_channel]
+            unit = self.sensitivity * ema / max(self.max_rate - self.basal_rate, 1e-6)
+            biomass = observation[:, self.biomass_channel] * 255.0
+            cap = ((biomass - self.survival_threshold) / (255.0 - self.survival_threshold)).clamp(0.0, 1.0)
+            out["metabolic_mean"] = torch.minimum(unit.clamp(0.0, 1.0), cap)
+            out["metabolic_log_std"] = self.metabolic_log_std
+        return out
+
+    @property
+    def receptive_field(self) -> int:
+        """The actor reads one cell and its four neighbours; the critic may
+        see further, and the larger of the two is reported."""
+        field = 3
+        critic_field = 1
+        for module in self.critic.modules():
+            if isinstance(module, nn.Conv2d):
+                critic_field += (module.kernel_size[0] - 1) * module.dilation[0]
+        return max(field, critic_field)
+
+    def num_parameters(self) -> int:
+        return sum(p.numel() for p in self.parameters())
+
+    # The five values, by name, for logging, for the direct search and for
+    # reading a drift as a sentence.
+    def values(self) -> Dict[str, float]:
+        out = {f"w:{label}": float(w) for label, w in zip(self.features, self.weight.detach().tolist())}
+        out["sharpness"] = float(self.sharpness.detach())
+        if self.metabolic:
+            out["sensitivity"] = float(self.sensitivity.detach())
+        return out
+
+    @torch.no_grad()
+    def set_values(self, values: Dict[str, float]) -> None:
+        for key, value in values.items():
+            if key.startswith("w:"):
+                if key[2:] not in self.features:
+                    raise KeyError(f"{key!r} is not one of the rule's values; the features are {self.features}")
+                self.weight[self.features.index(key[2:])] = float(value)
+            elif key == "sharpness":
+                self.log_sharpness.fill_(math.log(max(float(value), 1e-8)))
+            elif key == "sensitivity":
+                if not self.metabolic:
+                    raise ValueError("sensitivity belongs to the throttle, and this actor has none")
+                self.sensitivity.fill_(float(value))
+            else:
+                raise KeyError(f"{key!r} is not one of the rule's values")
+
+    def describe(self) -> str:
+        return "  ".join(f"{key}={value:.4g}" for key, value in self.values().items())
+
+
 class ConvActorCritic(ActorCritic):
     """Small convolutional trunk. The default workhorse.
 
@@ -214,13 +413,7 @@ class ConvActorCritic(ActorCritic):
         memory_size: int = 0,
     ):
         super().__init__(in_channels, hidden_channels, metabolic, memory_size)
-        layers = []
-        channels = in_channels
-        for _ in range(depth):
-            layers.append(orthogonal_init(nn.Conv2d(channels, hidden_channels, 3, padding=1), gain=2.0**0.5))
-            layers.append(nn.ReLU(inplace=True))
-            channels = hidden_channels
-        self.trunk = nn.Sequential(*layers)
+        self.trunk = conv_trunk(in_channels, hidden_channels, depth)
 
     def features(self, observation: torch.Tensor) -> torch.Tensor:
         return self.trunk(observation)
@@ -334,13 +527,18 @@ ARCHITECTURES = {
 }
 
 
+def architecture_names() -> Tuple[str, ...]:
+    return tuple(sorted(ARCHITECTURES)) + (RULE_ARCHITECTURE,)
+
+
 def build_network(
     name: str, in_channels: int, metabolic: bool = False, **kwargs
-) -> ActorCritic:
+) -> nn.Module:
     """Construct a network by name. See ARCHITECTURES for the options.
 
     ``metabolic`` adds the metabolic head (see :class:`ActorCritic`)
-    and is passed through to every architecture.
+    and is passed through to every architecture. ``"rule"`` builds the
+    :class:`RulePolicy` and needs a ``rule`` spec among the kwargs.
 
     Always built on the CPU, whatever the default device is, and moved by the
     caller. Orthogonal initialization needs a QR decomposition, which Metal does
@@ -348,7 +546,12 @@ def build_network(
     crashed here the first time it loaded a checkpoint. Building on the CPU
     costs one small transfer and removes the trap for every caller.
     """
+    if name == RULE_ARCHITECTURE:
+        if "rule" not in kwargs:
+            raise ValueError("The rule architecture needs a rule spec; see MultiAgentWorldEnv.rule_spec.")
+        with torch.device("cpu"):
+            return RulePolicy(in_channels, metabolic=metabolic, **kwargs)
     if name not in ARCHITECTURES:
-        raise ValueError(f"Unknown architecture {name!r}. Options: {sorted(ARCHITECTURES)}")
+        raise ValueError(f"Unknown architecture {name!r}. Options: {list(architecture_names())}")
     with torch.device("cpu"):
         return ARCHITECTURES[name](in_channels, metabolic=metabolic, **kwargs)

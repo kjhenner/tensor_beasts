@@ -20,12 +20,14 @@ it is standing somewhere else, so the accumulator is scattered through the same
 successor map that :func:`~tensor_beasts.rl.rollout.compute_gae` uses. See
 :class:`EpisodeTracker`.
 
-Resuming restores the network, the optimizer and the step counters, but not the
-world. The ecology restarts from a fresh initialization, which is the honest
-thing to say about it: world state is a large tensordict and the simulation
-offers no serialization for it. For a persistent-world task that is a real
-discontinuity in the data distribution at every resume, and it is a reason to
-prefer one long run over several resumed ones.
+**Every world starts from the bank.** A run's first act is a batched run
+under the rules whose states are banked (:mod:`tensor_beasts.rl.bank`).
+Training worlds, the replacement for an extinct world, the film world and
+the evaluation worlds all start from bank states, and evaluation uses a
+fixed seeded subset of them, so every evaluation scores the same starts.
+Resuming restores the network, the optimizer and the counters; the worlds
+start again from the bank, which is a discontinuity in the data at every
+resume and a reason to prefer one long run over several resumed ones.
 """
 
 import configparser
@@ -38,8 +40,10 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
+from tensor_beasts.rl.bank import StartBank, cached_bank
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv, NUM_ACTIONS
-from tensor_beasts.rl.networks import ActorCritic, LinearPolicy, build_network
+from tensor_beasts.rl.networks import RULE_ARCHITECTURE, LinearPolicy, RulePolicy, build_network
+from tensor_beasts.rl.memory import format_bytes
 from tensor_beasts.rl.normalization import ValueNormalizer
 from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD, PPO, PPOConfig
 from tensor_beasts.rl.rollout import RolloutBuffer, compute_gae
@@ -62,16 +66,14 @@ class TrainerConfig:
             collapses and the three-species dynamic degenerates, so 256 is for
             iteration and 512 is for results.
         entity: Which entity the policy controls.
-        survival_reward: Reward per step an individual stays alive. Leave at 1
-            so that the summed reward is literally herbivore-steps survived,
-            the number ``tools/evaluate_policy.py`` reports.
-        reproduction_reward: Reward for dividing.
-        foraging_reward: Reward per unit of biomass an individual gains in a
-            step. Dense and action-dependent, unlike survival, which is nearly
-            constant at 99.4% per step. Zero by default because it is reward
-            shaping; evaluation stays herbivore-steps survived either way.
-        arch: Network name from ``tensor_beasts.rl.networks.ARCHITECTURES``.
-        arch_kwargs: Extra constructor arguments for that network.
+        reward_radius: Radius in cells of the box each individual's stock
+            reward is pooled over, around its new cell. 0 pays each individual
+            its own stock change. See tensor_beasts/rl/multiagent.py.
+        arch: Network name: one of ``tensor_beasts.rl.networks.ARCHITECTURES``
+            or ``"rule"``, the rule with free values (planning/11).
+        arch_kwargs: Extra constructor arguments for that network. For
+            ``"rule"``: ``critic`` ("conv" or "linear"), ``hidden_channels``
+            and ``depth`` of the conv critic.
         metabolic: Let the policy set its own metabolic rate through a second
             network head. The throttle is a continuous rate the policy emits,
             learned alongside movement and anchored on the same schedule, not a
@@ -82,13 +84,22 @@ class TrainerConfig:
         seed: Seed for the training world and the torch RNG.
         total_world_steps: Length of the run, in world steps.
         segment_steps: World steps per collected segment, i.e. the PPO batch.
-        warmup_steps: World steps to run under the rule-based policy before
-            training starts, so learning does not begin on a just-seeded world
-            that has not settled into its ecology yet.
+        bank_worlds, bank_steps, bank_warmup, bank_stride: The start bank, a
+            rule-based run of ``bank_worlds`` worlds for ``bank_steps`` steps
+            whose state is banked every ``bank_stride`` steps once
+            ``bank_warmup`` steps are past. Every world the run touches
+            starts from a bank state. See tensor_beasts/rl/bank.py.
+        bank_cache: Directory the bank is written to under a key made from
+            everything that shapes it, and read back from by the next
+            process that asks for the same bank. None, the default here,
+            builds it every time; conf/rl/ppo.yaml sets outputs/bank.
         eval_interval: World steps between evaluations. 0 disables.
-        eval_steps: World steps per evaluation run.
-        eval_seeds: Number of paired evaluation worlds, each with its own seed.
-            The learned and rule-based policies are scored on the same seeds.
+        eval_steps: The metric's window T: world steps each evaluation world
+            runs for, scored as the mean stock over the window. At least
+            4,000, longer than a collapse (planning/11).
+        eval_seeds: Number of evaluation worlds, a fixed seeded subset of the
+            bank. The learned and rule-based policies are scored from the
+            same states.
         eval_deterministic: Take the argmax action at evaluation instead of
             sampling.
         checkpoint_interval: World steps between checkpoints. 0 disables.
@@ -105,14 +116,8 @@ class TrainerConfig:
     config_path: str = "conf/basic_config.yaml"
     size: int = 256
     entity: str = "Herbivore"
-    survival_reward: float = 1.0
-    reproduction_reward: float = 10.0
-    foraging_reward: float = 0.0
-    # Fraction of an offspring's biomass at birth credited back to its parent.
-    # Division halves the parent's biomass, so a reward in biomass alone is
-    # maximized by never dividing; this makes it an investment. First
-    # generation only, for bounded variance. 0 disables. See planning/06.
-    offspring_credit: float = 0.0
+    # The one reward knob: how far each individual's stock reward is pooled.
+    reward_radius: int = 0
     # Independent worlds stepped together, so each update's batch is drawn
     # across decorrelated ecologies rather than through one world's timeline.
     # Measured at 512 on a 3090: four worlds cost 5% more wall-clock than one,
@@ -138,16 +143,11 @@ class TrainerConfig:
     # disables the reset and an extinct world simply stays empty.
     extinction_patience: int = 3
     # Offline distillation of the rule-based policy before RL starts, the
-    # learner's initialisation: pretrain_grids labelled observation grids are
-    # sampled from a rule-based run, and the network is fitted to them for at
-    # most pretrain_epochs, stopping once agreement on a held-out split has
-    # plateaued. Zero epochs skips it. See tensor_beasts/rl/distill.py.
+    # learner's initialisation: the network is fitted to the bank's labelled
+    # grids for at most pretrain_epochs, stopping once agreement on a
+    # held-out split has plateaued. Zero epochs skips it. See
+    # tensor_beasts/rl/distill.py.
     pretrain_epochs: int = 0
-    pretrain_grids: int = 128
-    # World steps between sampled grids, so consecutive samples are not
-    # near-duplicates. 25 is a quarter of a predator's life at 512; a small
-    # test world dies within that, so tests set it low.
-    pretrain_stride: int = 25
     # Evaluation only. Hold the learned policy's throttle fixed at this unit in
     # [0, 1], where 0 is the basal rate and 1 the configured maximum, so the
     # throttle's contribution can be separated from movement's. None leaves the
@@ -159,21 +159,23 @@ class TrainerConfig:
 
     total_world_steps: int = 20_000
     segment_steps: int = 64
-    warmup_steps: int = 100
 
-    eval_interval: int = 2_000
-    eval_steps: int = 500
-    eval_seeds: int = 2
+    # The start bank. Eight worlds for 3,000 rule steps, banked every 100
+    # steps after the first thousand: 160 states from the settled cycles, out
+    # of phase with each other. A fresh world spends its first several
+    # hundred steps in a startup transient, and everything scored inside it
+    # was a score of the transient (planning/10).
+    bank_worlds: int = 8
+    bank_steps: int = 3_000
+    bank_warmup: int = 1_000
+    bank_stride: int = 100
+    bank_cache: Optional[str] = None
+
+    # Two evaluations per run plus the final one, at the default budget.
+    eval_interval: int = 10_000
+    eval_steps: int = 4_000
+    eval_seeds: int = 8
     eval_deterministic: bool = False
-    # World steps each evaluation world runs under the rules, from its reset,
-    # before either policy is scored on it. A fresh world spends its first
-    # several hundred steps in a startup transient (predators dip to a third
-    # of their starting count and recover), and a 400-step evaluation from the
-    # reset measured that transient rather than the settled cycles training
-    # happens in: the rules' smoothed biomass at step 400 was a fifth of their
-    # steady-state level. Both policies start from the same warmed state, so
-    # the comparison stays paired. 0 reproduces the old behaviour.
-    eval_warmup_steps: int = 0
 
     checkpoint_interval: int = 2_000
     output_dir: str = "outputs/rl"
@@ -210,7 +212,7 @@ class TrainerConfig:
 # Metrics that are only produced on an evaluation step, grouped so they form
 # their own sparse series instead of gaps in a dense one.
 _EVAL_PREFIXES = ("learned_", "rule_based_")
-_EVAL_KEYS = frozenset({"learned_over_rule_based", "biomass_over_rule_based", "score"})
+_EVAL_KEYS = frozenset({"score", "score_spread", "score_min", "score_max"})
 # Run-level summaries of the ratio, computed across evaluations. A sweep should
 # optimise eval/ratio_mean_late rather than the last value; see
 # Trainer._record_eval_summary.
@@ -232,8 +234,8 @@ def wandb_record(record: Dict[str, object]) -> Dict[str, object]:
     there. Phase goes in a ``phase`` metric, never in the metric names.
 
     **Sparse metrics must be separated from dense ones.** Evaluation runs every
-    few thousand world steps, so ``learned_over_rule_based`` has a value on two
-    rows out of a hundred and fifty. Mixed in with per-segment metrics that is
+    few thousand world steps, so ``score`` has a value on two rows out of a
+    hundred and fifty. Mixed in with per-segment metrics that is
     read as a line with enormous gaps, and W&B's step interpolation fills the
     space between two distant points as though the value held there. Putting
     them under ``eval/`` keeps them a series of their own, plotted as the
@@ -418,38 +420,26 @@ class EpisodeTracker:
 class EvalResult:
     """What one scored run of a policy produced.
 
-    The headline is ``biomass_ema``: the controlled entity's total carried
-    biomass, exponentially smoothed over the run. It is a physical quantity
-    with a unit, measurable without reference to any other policy.
-
-    What it replaced was a ratio against the hand-written rule-based policy,
-    and the reason is that the denominator was arbitrary. That policy's
-    navigation weights, metabolic sensitivity and log scale were all chosen by
-    hand, so dividing by its score made every result a statement about those
-    particular constants. This document's own record contains a case of that
-    going wrong: the throttle finding looked like a discovery about metabolism
-    and turned out to be integer truncation in the baseline. The ratio moved
-    because the denominator was broken.
-
-    Worse, the baseline is not a fixed reference. Predators and herbivores
-    share a world, so changing the learned predator changes the prey
-    population, which changes what the rule-based predator would have scored.
-    The denominator moved in response to the numerator.
+    The headline is ``mean_biomass``: the metric M_T of planning/11, the
+    stock of biomass carried by the controlled species' living individuals,
+    averaged over the T steps of the window, from a banked start. Extinction
+    is absorbing, so a world that dies contributes zeros for the rest of the
+    window, and ``extinct`` records that it did. Persistence and growth are
+    one quantity at a long horizon; every earlier tension between them was an
+    artefact of windows shorter than a collapse, which is why T is 4,000 and
+    why the smoothed headline this replaced is gone.
 
     Biomass rather than population count because it is what the ecology
-    actually conserves: an individual carries biomass, eats it, burns it and
-    halves it into its offspring. A population count weights a starving animal
-    about to die the same as a thriving one about to divide.
-
-    Smoothed rather than averaged because the predator-prey cycle swings by a
-    factor of four within a single run, so a plain mean is dominated by which
-    phase the window happened to catch. The EMA weights recent state more
-    heavily and settles toward the level the policy sustains.
+    conserves: an individual carries biomass, eats it, burns it and halves
+    it into its offspring. A population count weights a starving animal
+    about to die the same as a thriving one about to divide. Absolute rather
+    than a ratio against the rules: their constants were chosen by hand, and
+    the rules' own M_T on the same starts is reported beside it as a row.
     """
 
-    biomass_ema: List[float]
     mean_biomass: List[float]
     final_biomass: List[float]
+    extinct: List[float]
     mean_population: List[float]
     reproductions: List[float]
     survived_agent_steps: List[float]
@@ -459,13 +449,15 @@ class EvalResult:
     episodes_finished: float
 
     def to_dict(self, prefix: str) -> Dict[str, float]:
-        """Mean over worlds for each per-world field, scalars passed through."""
+        """Mean over worlds for each per-world field, scalars passed through.
+        The mean of ``extinct`` is the extinction fraction and is named so."""
         out: Dict[str, float] = {}
         for key, value in asdict(self).items():
+            name = "extinct_fraction" if key == "extinct" else key
             if isinstance(value, list):
-                out[f"{prefix}_{key}"] = sum(value) / len(value) if value else 0.0
+                out[f"{prefix}_{name}"] = sum(value) / len(value) if value else 0.0
             else:
-                out[f"{prefix}_{key}"] = value
+                out[f"{prefix}_{name}"] = value
         return out
 
     def per_world(self, prefix: str) -> Dict[str, List[float]]:
@@ -544,15 +536,22 @@ class Trainer:
         # Build on CPU and move: orthogonal init goes through torch.linalg.qr,
         # which MPS does not implement, and the global default device is now the
         # accelerator.
+        arch_kwargs = dict(self.config.arch_kwargs)
+        if self.config.arch == RULE_ARCHITECTURE:
+            # The rule with free values starts as the rule: the spec is read
+            # from the environment, not stored, so a checkpoint rebuilds it
+            # against any world with the same perception.
+            arch_kwargs.setdefault("rule", self.env.rule_spec())
+            arch_kwargs.setdefault("temperature", self.ppo_config.imitation_temperature)
         with torch.device("cpu"):
             network = build_network(
                 self.config.arch,
                 self.observation_channels,
                 metabolic=self.config.metabolic,
                 memory_size=self.config.memory_size,
-                **dict(self.config.arch_kwargs),
+                **arch_kwargs,
             )
-        self.network: ActorCritic = network.to(self.device)
+        self.network = network.to(self.device)
         self.optimizer = torch.optim.Adam(
             self.network.parameters(), lr=self.ppo_config.learning_rate
         )
@@ -581,6 +580,16 @@ class Trainer:
         self._eval_envs: Dict[int, MultiAgentWorldEnv] = {}
         self._eval_ratios: List[Tuple[int, float]] = []
         self._wandb = None
+        self.verbose = True
+
+        # The bank is built on first use, under its own seed, and every draw
+        # from it goes through one seeded generator so which state a world
+        # starts from never depends on anything else the run did.
+        self._bank: Optional[StartBank] = None
+        self._bank_generator = torch.Generator().manual_seed(self.config.seed + 50_000)
+        # The rules' score on the evaluation starts is a fixed reference,
+        # scored once per process.
+        self._rule_result: Optional[EvalResult] = None
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -591,10 +600,7 @@ class Trainer:
             config_path=config.config_path,
             size=(config.size, config.size),
             entity_name=config.entity,
-            survival_reward=config.survival_reward,
-            reproduction_reward=config.reproduction_reward,
-            foraging_reward=config.foraging_reward,
-            offspring_credit=config.offspring_credit,
+            reward_radius=config.reward_radius,
             worlds=config.worlds if worlds is None else worlds,
             device=str(self.device),
             # Pinning needs the unit-to-rate mapping even for a direction-only
@@ -602,6 +608,39 @@ class Trainer:
             metabolic=bool(config.metabolic) or config.eval_pin_metabolic is not None,
             memory_size=config.memory_size,
         )
+
+    @property
+    def bank(self) -> StartBank:
+        """The start bank, built on first use. See tensor_beasts/rl/bank.py."""
+        if self._bank is None:
+            config = self.config
+            # What shapes the bank beyond its own parameters: the simulation
+            # config, the world the environment builds and the device type.
+            # The reward radius is left out; it never reaches the state.
+            key_parts = {
+                "config_path": config.config_path, "size": int(config.size), "entity": config.entity,
+                "metabolic": bool(config.metabolic) or config.eval_pin_metabolic is not None,
+                "memory_size": int(config.memory_size), "device": self.device.type,
+            }
+            self._bank = cached_bank(
+                self._make_env, config.bank_cache, key_parts,
+                worlds=int(config.bank_worlds), steps=int(config.bank_steps),
+                warmup=int(config.bank_warmup), stride=int(config.bank_stride),
+                seed=config.seed + 40_000, verbose=self.verbose,
+            )
+            if self.verbose:
+                steps = self._bank.steps
+                print(
+                    f"bank: {len(self._bank)} states from steps {min(steps)} to {max(steps)}, "
+                    f"{format_bytes(self._bank.nbytes)} of host memory",
+                    flush=True,
+                )
+        return self._bank
+
+    def eval_indices(self) -> List[int]:
+        """The fixed subset of the bank every evaluation starts from."""
+        generator = torch.Generator().manual_seed(self.config.seed + 10_000)
+        return self.bank.draw(max(int(self.config.eval_seeds), 1), generator)
 
     def _init_wandb(self) -> None:
         if not self.config.wandb or self._wandb is not None:
@@ -820,14 +859,9 @@ class Trainer:
         total_reward = zeros.clone()
         survived = zeros.clone()
         reproductions = zeros.clone()
+        extinct = torch.zeros(worlds, dtype=torch.bool, device=self.device)
         populations: List[torch.Tensor] = []
-        biomasses: List[torch.Tensor] = []
-        # Smoothing constant for the headline. 2/(N+1) with N the window, so
-        # this is a 100-step window: long enough that a single boom or crash
-        # does not set the number, short enough that the last quarter of the
-        # run dominates it, which is the level the policy actually sustains.
-        ema_alpha = 2.0 / (100.0 + 1.0)
-        biomass_ema: Optional[torch.Tensor] = None
+        stocks: List[torch.Tensor] = []
 
         for _ in range(steps):
             if policy == "rule_based":
@@ -868,34 +902,32 @@ class Trainer:
 
             tracker.update(batch)
             # Summed over the grid but NOT over the batch: each world is an
-            # independent evaluation seed and must produce its own number, or
+            # independent evaluation start and must produce its own number, or
             # the batch silently averages worlds together before anyone can see
             # the spread between them.
             grid = (-2, -1)
             total_reward += batch.reward.sum(dim=grid).reshape(worlds)
             survived += (batch.acted & ~batch.done).sum(dim=grid).reshape(worlds).float()
             reproductions += batch.reproduced.sum(dim=grid).reshape(worlds).float()
-            populations.append(env.population_per_world())
-
-            # Total carried biomass, the quantity the ecology conserves.
-            carried = env.entity.biomass.data.sum(dim=grid).reshape(worlds)
-            biomasses.append(carried)
-            biomass_ema = carried if biomass_ema is None else (
-                ema_alpha * carried + (1.0 - ema_alpha) * biomass_ema
-            )
+            population = env.population_per_world()
+            populations.append(population)
+            extinct |= population <= 0
+            # The stock: biomass carried by living individuals, the quantity
+            # the metric integrates. Zero for good once a world is extinct,
+            # which the simulation guarantees, so extinction is absorbing.
+            stocks.append(env.stock_per_world())
 
         summary = tracker.summary()
         # Each field is one number per world, so the caller can average over
-        # seeds AND see the spread between them. Episode statistics are pooled
+        # starts AND see the spread between them. Episode statistics are pooled
         # across worlds on purpose: an episode is one individual's life, and
         # lives are comparable wherever they happened.
-        stacked_biomass = torch.stack(biomasses) if biomasses else zeros.unsqueeze(0)
+        stacked_stock = torch.stack(stocks) if stocks else zeros.unsqueeze(0)
         stacked_population = torch.stack(populations) if populations else zeros.unsqueeze(0)
-        ema = biomass_ema if biomass_ema is not None else zeros
         return EvalResult(
-            biomass_ema=ema.tolist(),
-            mean_biomass=stacked_biomass.mean(dim=0).tolist(),
-            final_biomass=stacked_biomass[-1].tolist(),
+            mean_biomass=stacked_stock.mean(dim=0).tolist(),
+            final_biomass=stacked_stock[-1].tolist(),
+            extinct=extinct.float().tolist(),
             mean_population=stacked_population.mean(dim=0).tolist(),
             reproductions=reproductions.tolist(),
             survived_agent_steps=survived.tolist(),
@@ -906,41 +938,44 @@ class Trainer:
         )
 
     def evaluate(self) -> Dict[str, float]:
-        """Score the learned policy and the rule-based baseline on the same worlds.
+        """Score the learned policy and the rule-based baseline on the same starts.
 
-        Each seed gets a freshly reset world, and both policies are run from the
-        same reset, so the comparison is paired. They diverge immediately
-        afterwards, of course, because the policies consume the shared RNG
-        differently and because the ecology is chaotic; the seeds control the
-        starting conditions, not the trajectory.
+        The evaluation worlds are a fixed seeded subset of the bank, loaded
+        afresh for each policy from the same RNG seed, so the comparison is
+        paired and every evaluation of the run, and every run with the same
+        seed, scores the same starts. The two runs diverge immediately, of
+        course, because the policies consume the RNG differently and the
+        ecology is chaotic; the starts are controlled, not the trajectories.
+
+        The rules are a fixed reference on those starts and are scored once
+        per process; every later evaluation reports that same number.
         """
-        # Evaluation reseeds the global torch RNG (MultiAgentWorldEnv.reset does,
-        # by design, so eval worlds are comparable), which would otherwise make
+        # Both policies start from a reseeded RNG, which would otherwise make
         # the training stream depend on the evaluation schedule.
         rng_state = torch.get_rng_state()
+        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
         self.network.eval()
         seeds = max(self.config.eval_seeds, 1)
         seed = self.config.seed + 10_000
+        indices = self.eval_indices()
+        env = self._eval_env(seeds)
 
         summary: Dict[str, float] = {}
         spread: Dict[str, List[float]] = {}
-        for policy in ("learned", "rule_based"):
-            # One batched world holding every evaluation seed, rather than one
-            # world per seed run in sequence. The seeds become the batch axis.
-            # Both policies are scored from the same reset, so the comparison
-            # stays paired exactly as it was when this was a loop.
-            env = self._eval_env(seeds)
-            env.reset(seed=seed)
-            # Past the startup transient before anything is scored. The
-            # reset seeded the RNG, so both policies see the same warmed
-            # worlds.
-            for _ in range(self.config.eval_warmup_steps):
-                env.rule_based_step()
-            scored = self._score(env, self.config.eval_steps, policy)
+        torch.manual_seed(seed)
+        self.bank.load(env, indices)
+        learned = self._score(env, self.config.eval_steps, "learned")
+        if self._rule_result is None:
+            torch.manual_seed(seed)
+            self.bank.load(env, indices)
+            self._rule_result = self._score(env, self.config.eval_steps, "rule_based")
+        for policy, scored in (("learned", learned), ("rule_based", self._rule_result)):
             summary.update(scored.to_dict(policy))
             spread.update(scored.per_world(policy))
         self.network.train()
         torch.set_rng_state(rng_state)
+        if cuda_state is not None:
+            torch.cuda.set_rng_state_all(cuda_state)
         # Evaluation is the run's allocation peak, and the caching allocator
         # would otherwise hold that peak for the rest of the run. Two agents
         # sharing one card each hoarding an evaluation's worth is what stops
@@ -948,34 +983,18 @@ class Trainer:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        # The spread across seeds is the quantity every claim in this project is
-        # hedged against, so it is reported rather than averaged away.
-        learned = spread.get("learned_biomass_ema") or []
-        if len(learned) > 1:
-            mean = sum(learned) / len(learned)
-            variance = sum((value - mean) ** 2 for value in learned) / (len(learned) - 1)
+        # The headline is the learned policy's own M_T, the mean stock over
+        # the window, averaged over starts; the spread across starts is the
+        # quantity every claim in this project is hedged against, so it is
+        # reported rather than averaged away. See EvalResult.
+        values = spread.get("learned_mean_biomass") or []
+        summary["score"] = summary.get("learned_mean_biomass", 0.0)
+        if len(values) > 1:
+            mean = sum(values) / len(values)
+            variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
             summary["score_spread"] = variance ** 0.5
-            summary["score_min"] = min(learned)
-            summary["score_max"] = max(learned)
-        # The headline is the learned policy's own smoothed biomass, an absolute
-        # quantity in the units the ecology conserves. It replaced a ratio
-        # against the rule-based policy, whose constants were hand-chosen, so
-        # every result was a statement about those constants rather than about
-        # the ecology; see EvalResult for the full argument.
-        summary["score"] = summary.get("learned_biomass_ema", 0.0)
-
-        # The baseline is still scored and reported, as context rather than as
-        # a divisor. The ratio is kept because it is what every result recorded
-        # before this change is quoted in, so the record stays readable, but it
-        # is no longer what a sweep optimises.
-        baseline = summary.get("rule_based_survived_agent_steps", 0.0)
-        summary["learned_over_rule_based"] = (
-            summary.get("learned_survived_agent_steps", 0.0) / baseline if baseline else float("nan")
-        )
-        biomass_baseline = summary.get("rule_based_biomass_ema", 0.0)
-        summary["biomass_over_rule_based"] = (
-            summary["score"] / biomass_baseline if biomass_baseline else float("nan")
-        )
+            summary["score_min"] = min(values)
+            summary["score_max"] = max(values)
         return summary
 
     # ------------------------------------------------------------------
@@ -1018,7 +1037,8 @@ class Trainer:
             # individual through one ecology, and the tracker, the snapshots and
             # the crop all address a single (H, W) grid.
             env = self._make_env(worlds=1)
-            env.reset(seed=self.config.seed + 20_000 if seed is None else seed)
+            generator = torch.Generator().manual_seed(self.config.seed + 20_000 if seed is None else seed)
+            self.bank.load(env, self.bank.draw(1, generator))
             tracker = IndividualTracker(env.size, self.device)
             tracker.begin(env._alive())
 
@@ -1142,6 +1162,8 @@ class Trainer:
             # trainer's field names.
             "metabolic": self.config.metabolic,
             "memory_size": self.config.memory_size,
+            # Readable beside the weights, for the rule with free values.
+            "rule_values": self.network.values() if isinstance(self.network, RulePolicy) else None,
             "world_steps": self.world_steps,
             "agent_steps": self.agent_steps,
             "updates": self.updates,
@@ -1217,29 +1239,49 @@ class Trainer:
                 parts.append(f"{label}={value:.3g}")
         return "  ".join(parts)
 
+    def format_evaluation(self, record: Dict[str, object]) -> str:
+        line = (
+            f"    eval  M_T={record['score']:.0f}  "
+            f"extinct={record.get('learned_extinct_fraction', 0):.2f}  "
+            f"pop={record.get('learned_mean_population', 0):.0f}  "
+            f"repro={record.get('learned_reproductions', 0):.0f}  "
+            f"lifespan={record.get('learned_episode_length', 0):.1f}  "
+            f"(rules M_T={record.get('rule_based_mean_biomass', 0):.0f} "
+            f"extinct={record.get('rule_based_extinct_fraction', 0):.2f})"
+        )
+        if isinstance(self.network, RulePolicy):
+            line += f"\n    rule  {self.network.describe()}"
+        return line
+
+    def _rule_values(self) -> Dict[str, float]:
+        """The rule actor's values, as metrics, so a drift is a sentence in
+        the log. Empty for every other architecture."""
+        if not isinstance(self.network, RulePolicy):
+            return {}
+        out = {}
+        for key, value in self.network.values().items():
+            name = key.replace("w:", "w_").replace(":", "_").replace("/", "_")
+            out[f"rule_{name}"] = value
+        return out
+
     # ------------------------------------------------------------------
     # The loop
     # ------------------------------------------------------------------
-    def warmup(self) -> None:
-        """Let the ecology settle under its own policy before learning starts."""
-        for _ in range(self.config.warmup_steps):
-            self.env.rule_based_step()
+    def start_worlds(self) -> None:
+        """Start every training world from a state drawn from the bank."""
+        self.bank.load(self.env, self.bank.draw(self.env.num_worlds, self._bank_generator))
+        self._extinct_segments = None
 
     def reset_extinct_worlds(self) -> int:
         """Replace every world whose controlled population has been extinct for
-        ``extinction_patience`` consecutive segments with a fresh one, warmed
-        up under the rules for ``warmup_steps``. Returns how many were reset.
+        ``extinction_patience`` consecutive segments with a state drawn from
+        the bank. Returns how many were reset.
 
-        The fresh world is built as its own unbatched environment, run under
-        the rules, and copied leaf by leaf into the extinct world's slice of
-        the batched TensorDict, so the other worlds are not touched. Every
-        batched leaf is the unbatched leaf with a leading world axis, which is
-        what makes the copy a slice assignment; the one scalar (the water
-        oscillator's phase) is shared by all worlds and is left alone.
-
-        The fresh world's seed comes from the trainer's, offset by the reset
-        count, and the global RNG is restored afterwards so the training
-        stream does not depend on when a world happened to die.
+        The state is copied leaf by leaf into the extinct world's slice of
+        the batched TensorDict, so the other worlds are not touched; the
+        world clock, shared by the batch, is left alone. The draw comes from
+        the bank's own generator, so the training stream does not depend on
+        when a world happened to die.
         """
         patience = int(self.config.extinction_patience)
         if patience <= 0:
@@ -1253,46 +1295,23 @@ class Trainer:
         due = torch.nonzero(self._extinct_segments >= patience).flatten().tolist()
         if not due:
             return 0
-
-        rng_state = torch.get_rng_state()
-        cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-        destination = self.env.world.td
-        batched = bool(self.env.world.batch_shape)
         for index in due:
             self.world_resets += 1
-            fresh = self._make_env(worlds=1)
-            fresh.reset(seed=self.config.seed + 20_000 + self.world_resets)
-            for _ in range(self.config.warmup_steps):
-                fresh.rule_based_step()
-            source = fresh.world.td
-            for key in source.keys(True, True):
-                value = source.get(key)
-                target = destination.get(key)
-                if value.dim() == 0 or target.shape != (
-                    (self.env.num_worlds,) + tuple(value.shape) if batched else tuple(value.shape)
-                ):
-                    continue
-                if batched:
-                    target[index].copy_(value)
-                else:
-                    target.copy_(value)
+            state = self.bank.draw(1, self._bank_generator)[0]
+            self.bank.load_into(self.env, state, index)
             self._extinct_segments[index] = 0
-        torch.set_rng_state(rng_state)
-        if cuda_state is not None:
-            torch.cuda.set_rng_state_all(cuda_state)
         return len(due)
 
     def pretrain(self, verbose: bool = True) -> Dict[str, float]:
         """Fit the network to the rule-based policy before any RL.
 
-        Offline: a separate batched world runs under the rules, and every
-        ``pretrain_stride`` steps its observations are kept with the
-        rule's own labels, until ``pretrain_grids`` grids span the cycle
-        phases the run passes through. The network is then fitted to them,
-        the direction head by soft distillation toward the rule's per-action
-        scores and the throttle head by a fixed-scale fit to the rule's rate,
-        under the eight symmetries of the grid, until agreement on a held-out
-        split plateaus or ``pretrain_epochs`` is reached. See
+        Offline, on the bank's labelled grids: the rule's own direction,
+        scores and throttle at every banked state, so the fit is on exactly
+        the states training and evaluation start from. The direction head is
+        fitted by soft distillation toward the rule's per-action scores and
+        the throttle head by a fixed-scale fit to the rule's rate, under the
+        eight symmetries of the grid, until agreement on a held-out split
+        plateaus or ``pretrain_epochs`` is reached. See
         tensor_beasts/rl/distill.py.
 
         This is the learner's initialisation and it is run to convergence. It
@@ -1310,7 +1329,7 @@ class Trainer:
         The training world is untouched, and the global RNG is restored, so
         the RL stream does not depend on how long the fit took.
         """
-        from tensor_beasts.rl.distill import collect_labelled_grids, distill
+        from tensor_beasts.rl.distill import distill
 
         epochs = int(self.config.pretrain_epochs)
         if epochs <= 0:
@@ -1318,14 +1337,7 @@ class Trainer:
         ppo = self.ppo_config
         rng_state = torch.get_rng_state()
 
-        sampler = self._make_env(worlds=self.config.worlds)
-        sampler.reset(seed=self.config.seed + 30_000)
-        grids = collect_labelled_grids(
-            sampler, int(self.config.pretrain_grids), int(self.config.pretrain_stride), self.config.warmup_steps
-        )
-        del sampler
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        grids = self.bank.grids
         if verbose:
             print(f"distilling the rules from {len(grids)} labelled grids", flush=True)
 
@@ -1362,7 +1374,6 @@ class Trainer:
         )
         if verbose and last.get("converged"):
             print(f"pretraining converged at epoch {last['pretrain_epoch']:.0f}: agreement {last['argmax_agreement']:.3f}", flush=True)
-        del grids
         torch.set_rng_state(rng_state)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1370,10 +1381,18 @@ class Trainer:
 
     def train(self, verbose: bool = True) -> Dict[str, object]:
         """Run until ``total_world_steps``. Returns the last logged record."""
+        self.verbose = verbose
         self._init_wandb()
-        self.env.reset(seed=self.config.seed)
-        self.warmup()
-        self.pretrain(verbose=verbose)
+        self.bank  # built first, so its cost is not charged to the first segment
+        torch.manual_seed(self.config.seed)
+        self.start_worlds()
+        if self.updates == 0:
+            # The learner's initialisation, kept beside the run so any drifted
+            # policy can be compared with its own start on the same worlds.
+            self.pretrain(verbose=verbose)
+            pretrained = self.save_checkpoint(self.output_dir / "pretrained.pt")
+            if verbose:
+                print(f"initial policy saved to {pretrained}", flush=True)
         self.start_time = time.time()
         # Throughput is measured over this process only. After a resume the
         # counters carry over from the previous run, so rates have to be taken
@@ -1408,6 +1427,7 @@ class Trainer:
                 "update_sec": update_time,
                 **collect_stats,
                 **diagnostics,
+                **self._rule_values(),
             }
 
             if self.config.eval_interval and self.world_steps >= self._next_eval:
@@ -1442,14 +1462,7 @@ class Trainer:
             if verbose:
                 print(self.format_record(record), flush=True)
                 if "score" in record:
-                    print(
-                        f"    eval  biomass={record['score']:.0f}  "
-                        f"pop={record.get('learned_mean_population', 0):.0f}  "
-                        f"repro={record.get('learned_reproductions', 0):.0f}  "
-                        f"lifespan={record.get('learned_episode_length', 0):.1f}  "
-                        f"(rules {record.get('rule_based_biomass_ema', 0):.0f})",
-                        flush=True,
-                    )
+                    print(self.format_evaluation(record), flush=True)
 
         # Always finish on an evaluation. Without this the returned record is
         # whatever the last segment happened to log, so a run whose final step
@@ -1463,13 +1476,7 @@ class Trainer:
             if verbose and "score" in record:
                 # Only the evaluation line: the step line was already printed
                 # for this segment by the loop above.
-                print(
-                    f"    eval  biomass={record['score']:.0f}  "
-                    f"pop={record.get('learned_mean_population', 0):.0f}  "
-                    f"repro={record.get('learned_reproductions', 0):.0f}  "
-                    f"(rules {record.get('rule_based_biomass_ema', 0):.0f})",
-                    flush=True,
-                )
+                print(self.format_evaluation(record), flush=True)
 
         if self.config.checkpoint_interval:
             self.save_checkpoint()

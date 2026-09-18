@@ -190,3 +190,117 @@ A thorough re-evaluation of inherited assumptions returns to the
 parsimonious option unless a strong justification says otherwise. Findings
 measured on the ghost ecology, through an anchor that never released, or on
 the transient window are void, not merely stale.
+
+## What was built (17 September, evening)
+
+Steps 1 to 4 of the order of work are code; nothing has been run at 512
+beyond timing checks. The commands are at the end.
+
+**The bank** (`tensor_beasts/rl/bank.py`). One batched rule-based run of
+`bank_worlds` worlds for `bank_steps` steps, every per-world leaf of the
+world's TensorDict cloned to the CPU every `bank_stride` steps after
+`bank_warmup`: 8, 3,000, 100, 1,000 by default, so 160 states from steps
+1,000 to 2,900. A state at 512 is 23 MB, and its labelled grid another 23.
+Training
+worlds, extinction resets, the film world and the evaluation worlds all
+start from bank states; evaluation from a fixed seeded subset of
+`eval_seeds` of them, loaded afresh for each policy from a reseeded RNG, so
+the comparison is paired and every evaluation of a run scores the same
+starts. Both warm-ups are gone. Two things not in the plan: the bank run is
+also the pretraining sampler, keeping the rule's labelled grid beside each
+state, so `pretrain_grids` and `pretrain_stride` are gone too and
+distillation fits on exactly the states training starts from; and the
+world clock, which is shared across a batch and enters the simulation only
+through the 20,000-step water oscillator, is set to the loaded state's step
+when a whole batch is loaded and left alone when one slot is.
+
+**The metric.** `score` is `learned_mean_biomass`, the stock carried by
+living individuals averaged over `eval_steps` (4,000) from `eval_seeds` (8)
+banked starts; `learned_extinct_fraction`, `rule_based_mean_biomass`,
+`score_spread`, `score_min` and `score_max` sit beside it. The smoothed
+headline and both ratios against the rules are gone. The rules are scored
+once per process on the evaluation starts and that number is reused. The
+stock counts living individuals only, so extinction is absorbing exactly
+and a dead animal's reserve, which becomes carrion at the next step, is
+not stock. `pretrained.pt` is written before the first update, whether or
+not distillation ran.
+
+**The reward** (`tensor_beasts/rl/multiagent.py`). `TransitionInfo.burned`
+was added; the reward is `eaten - burned - loss` with `loss` the reserve at
+the successor cell where `alive_after` is false, scattered to successors,
+box-summed over `reward_radius` and gathered back. Verified on a real
+predator world, batched and unbatched: the sum over acting individuals
+plus what newborns ate equals the change in living stock to 1e-4 every
+step, and no two individuals shared a successor. The four coefficients,
+the reward modes and the offspring credit are deleted. The plan's snag
+stands: newborns' eating in their birth step is paid to nobody, and the
+herbivore's bites are unaccounted, so the identity is the predator's.
+
+**The actor** (`RulePolicy` in `tensor_beasts/rl/networks.py`, `--arch
+rule`). Weights per perceived feature, a log-parametrised sharpness
+starting at one over the distillation temperature, and with `--metabolic` a
+sensitivity, with the rule's biomass cap applied inside the head so the
+throttle error reads zero at the start. Scores are in the rule's own units,
+so the values are the config's. Agreement with the rule at the start is
+0.95 for both species; the remainder is the rule's random tie-breaking and
+its clamp of all-repulsive scores to zero, which the linear control never
+had either. The critic is separate: `critic: conv` (default) or `linear`.
+The values are logged every update as `rule_*` and printed as a sentence
+under each evaluation, and the checkpoint carries them as `rule_values`.
+
+**The search** (`tools/search_rule.py`). Coordinate sweep over the values,
+each tried at a set of factors that are pulled toward 1 each round, one
+evaluation per setting, every result appended to `search.jsonl` and
+skipped on a rerun, `--report` to read it back. The tool scores the rules
+once on the same starts.
+
+**Measured on the 3090 at 512, before any run.** The bank builds at 38 ms
+per step for eight worlds, so the default bank takes about two minutes and
+7.4 GB of host memory, with a GPU peak of 1.7 GB. That two minutes is paid
+once per bank, not once per process: a built bank is written to
+`outputs/bank` under a key made from the simulation config's text, the
+world arguments, the bank parameters and seed, the device type and a digest
+of the source files the rule-based step runs through, and the next process
+asking for the same bank reads the file. Editing one of those files costs a
+rebuild; a stale bank is never read. `--no-bank-cache` builds in-process
+and writes nothing. An evaluation of eight
+starts over T = 4,000 is about 48 ms per step, so three minutes for the
+learned policy and six for the first evaluation in a process, which scores
+the rules too; the GPU peak is 3.2 GB. The plan's "about a minute" per
+search evaluation was optimistic by three: a few hundred evaluations is a
+night, or half that with four starts.
+
+### Commands
+
+The diagnostic, first, since it needs only a checkpoint: pretrain the
+linear network and score its start sampled and at the argmax on the same
+starts.
+
+    venv/bin/python train_rl.py --entity Predator --size 512 --arch linear --metabolic \
+        --pretrain-epochs 200 --steps 0 --worlds 4 --eval-seeds 8 --eval-steps 4000 \
+        --out outputs/rl/linear-start --no-wandb
+    venv/bin/python train_rl.py --eval-only outputs/rl/linear-start/pretrained.pt --size 512 \
+        --eval-seeds 8 --eval-steps 4000 --out outputs/rl/linear-start
+    venv/bin/python train_rl.py --eval-only outputs/rl/linear-start/pretrained.pt --size 512 \
+        --eval-seeds 8 --eval-steps 4000 --out outputs/rl/linear-start --eval-deterministic
+
+The architecture, entity and heads come from the checkpoint; the size, the
+bank and the window do not, since the network is the same at any size.
+
+The search, step 3, a few hundred evaluations at about three minutes each:
+
+    venv/bin/python tools/search_rule.py --entity Predator --size 512 --device cuda \
+        --eval-seeds 8 --eval-steps 4000 --rounds 3 --out outputs/search/predator
+
+The reward, step 4, radius 0 against a few cells on the rule actor:
+
+    venv/bin/python train_rl.py --entity Predator --size 512 --arch rule --metabolic \
+        --worlds 4 --steps 5760 --segment-steps 32 --minibatch-steps 2 --gamma 0.997 \
+        --epochs 2 --target-kl 0.02 --extinction-patience 1 \
+        --eval-seeds 8 --eval-steps 4000 --eval-interval 2880 \
+        --reward-radius 0 --out outputs/rl/rule-r0
+    venv/bin/python train_rl.py ... --reward-radius 3 --out outputs/rl/rule-r3
+
+Radius 0 should reproduce the linear control's near-immobility on the rule
+actor; the pooled arm either lands where the search did or the reward is
+wrong.

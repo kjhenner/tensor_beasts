@@ -83,28 +83,31 @@ def test_successor_of_a_survivor_is_an_occupied_cell():
         assert torch.all(biomass[batch.successor[survived]] > 0)
 
 
-def test_survival_and_reproduction_rewards_are_separable():
-    env = build(survival_reward=1.0, reproduction_reward=0.0)
+def test_reward_is_the_individuals_own_stock_change():
+    """Eat at the new cell, minus burn at the old one, minus the reserve left
+    behind at death. No coefficients; see test_stock_reward for the identity
+    with the species' stock."""
+    env = build()
     env.reset(seed=0)
-    total = 0.0
-    survivors = 0
+    seen = 0
     for _ in range(10):
         batch = env.step(torch.randint(0, 5, SIZE))
-        total += float(batch.reward.sum())
-        survivors += int((batch.acted & ~batch.done).sum())
-    assert abs(total - survivors) < 1e-4, "with no reproduction bonus, reward counts survivors"
+        transition = env.entity.last_transition
+        successor = batch.successor.clamp(min=0)
+        eaten = transition.eaten.reshape(-1)[successor]
+        reserve = env.entity.biomass.data.reshape(-1)[successor]
+        loss = torch.where(batch.done, reserve, torch.zeros_like(reserve))
+        expected = eaten - transition.burned - loss
+        assert torch.allclose(batch.reward[batch.acted], expected[batch.acted], atol=1e-4)
+        seen += int(batch.acted.sum())
+    assert seen > 0
 
 
-def test_reproduction_reward_is_added_on_top():
-    env = build(survival_reward=0.0, reproduction_reward=3.0)
-    env.reset(seed=0)
-    total = 0.0
-    reproductions = 0
-    for _ in range(25):
-        batch = env.step(torch.randint(0, 5, SIZE))
-        total += float(batch.reward.sum())
-        reproductions += int(batch.reproduced.sum())
-    assert abs(total - 3.0 * reproductions) < 1e-4
+def test_reward_radius_is_the_only_knob():
+    env = build()
+    assert env.reward_radius == 0
+    pooled = build(reward_radius=3)
+    assert pooled.reward_radius == 3
 
 
 def test_actions_actually_drive_the_simulation():
@@ -179,52 +182,6 @@ def test_unknown_entity_is_rejected():
 
     with pytest.raises(ValueError, match="not in"):
         MultiAgentWorldEnv(size=SIZE, entity_name="Dragon")
-
-
-def test_foraging_reward_is_what_the_individual_ate_at_its_new_cell():
-    """The dense term rewards eating, read at the successor cell because eating
-    happens after the move. It is not net biomass change: that punished the
-    metabolic lever, since burning biomass is exactly what metabolism does.
-    """
-    env = build(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0)
-    env.reset(seed=0)
-
-    total_eaten = 0.0
-    for _ in range(12):
-        batch = env.step(torch.randint(0, 5, SIZE))
-        survived = batch.acted & ~batch.done
-        if not bool(survived.any()):
-            continue
-        eaten = env.entity.last_transition.eaten.reshape(-1)[batch.successor[survived]]
-        assert torch.all(eaten >= 0)
-        assert torch.allclose(batch.reward[survived], eaten, atol=1e-4)
-        total_eaten += float(eaten.sum())
-    assert total_eaten > 0, "over twelve steps somebody should have eaten something"
-
-
-def test_foraging_reward_ignores_what_metabolism_burned():
-    """Burning biomass into energy must not cost foraging reward."""
-    env = build(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0)
-    env.reset(seed=0)
-    batch = env.step(torch.zeros(SIZE, dtype=torch.long))
-    assert torch.all(batch.reward >= 0), "net-change reward went negative when animals burned; eaten cannot"
-
-
-def test_foraging_reward_is_off_by_default():
-    """It is reward shaping, so it must be opt-in."""
-    env = build()
-    assert env.foraging_reward == 0.0
-
-    env.reset(seed=0)
-    survivors = 0
-    total = 0.0
-    for _ in range(8):
-        batch = env.step(torch.randint(0, 5, SIZE))
-        survivors += int((batch.acted & ~batch.done).sum())
-        total += float(batch.reward.sum())
-    # With the default weights, reward is survival plus 10 per reproduction.
-    assert total >= survivors, "default reward should not include a biomass term"
-
 
 
 def test_batch_carries_the_rule_based_action_for_acting_cells():

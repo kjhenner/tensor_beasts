@@ -34,7 +34,7 @@ def make_config(tmp_path, **overrides) -> TrainerConfig:
         seed=0,
         total_world_steps=8,
         segment_steps=4,
-        warmup_steps=2,
+        bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
         eval_interval=0,
         eval_steps=3,
         eval_seeds=1,
@@ -179,10 +179,11 @@ def test_evaluation_scores_both_policies(tmp_path):
     trainer = make_trainer(tmp_path, eval_steps=5, eval_seeds=1)
     summary = trainer.evaluate()
     for policy in ("learned", "rule_based"):
-        assert summary[f"{policy}_total_reward"] >= 0
+        assert summary[f"{policy}_mean_biomass"] > 0
+        assert 0.0 <= summary[f"{policy}_extinct_fraction"] <= 1.0
         assert summary[f"{policy}_mean_population"] > 0
         assert summary[f"{policy}_survived_agent_steps"] >= 0
-    assert "learned_over_rule_based" in summary
+    assert summary["score"] == summary["learned_mean_biomass"]
 
 
 def test_evaluation_does_not_disturb_the_training_world(tmp_path):
@@ -262,31 +263,6 @@ def test_every_architecture_constructs_and_collects(tmp_path):
         assert diagnostics["loss"] == diagnostics["loss"], arch
 
 
-def test_headline_ratio_is_survival_not_shaped_reward():
-    """A sweep once reported a ratio of -0.72. That is impossible for a ratio of
-    survival counts and was the sign that the ratio was dividing shaped
-    rewards, which foraging_reward makes negative. What is optimized may change;
-    what is judged must not."""
-    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
-    from tensor_beasts.rl.ppo import PPOConfig
-
-    # Tiny world for speed; not a valid ecology, only a bookkeeping check.
-    config = TrainerConfig(
-        size=32, arch="linear", warmup_steps=5, total_world_steps=0,
-        eval_interval=0, eval_steps=8, eval_seeds=1, checkpoint_interval=0,
-        foraging_reward=5.0, survival_reward=0.0, reproduction_reward=0.0,
-        device="cpu",
-    )
-    trainer = Trainer(config, PPOConfig())
-    summary = trainer.evaluate()
-
-    baseline = summary["rule_based_survived_agent_steps"]
-    expected = summary["learned_survived_agent_steps"] / baseline
-    assert summary["learned_over_rule_based"] == pytest.approx(expected)
-    assert summary["learned_over_rule_based"] >= 0.0
-
-
-
 def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
     """A near-random start starved a learned predator population to zero within
     200 steps. Distilling the rules must raise held-out agreement well above
@@ -298,13 +274,12 @@ def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
     torch.manual_seed(0)
     trainer = Trainer(
         TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic=True,
-                      warmup_steps=5, segment_steps=16, pretrain_epochs=60, pretrain_grids=32, pretrain_stride=3,
+                      bank_worlds=2, bank_steps=53, bank_warmup=5, bank_stride=3, segment_steps=16, pretrain_epochs=60,
                       total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
         PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3),
     )
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
     step_before = trainer.env.world.step
     rng_before = torch.get_rng_state()
     result = trainer.pretrain(verbose=False)
@@ -329,13 +304,12 @@ def test_pretraining_stops_once_agreement_plateaus(tmp_path):
 
     torch.manual_seed(0)
     trainer = Trainer(
-        TrainerConfig(size=64, arch="linear", warmup_steps=5, segment_steps=8, pretrain_epochs=200,
-                      pretrain_grids=32, pretrain_stride=2, total_world_steps=0, eval_interval=0, checkpoint_interval=0,
+        TrainerConfig(size=64, arch="linear", bank_worlds=2, bank_steps=37, bank_warmup=5, bank_stride=2, segment_steps=8, pretrain_epochs=200,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0,
                       device="cpu", output_dir=str(tmp_path)),
         PPOConfig(epochs=2, minibatch_steps=4, learning_rate=1e-2),
     )
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
     result = trainer.pretrain(verbose=False)
     assert result.get("converged") == 1.0
     assert result["pretrain_epoch"] < 200
@@ -348,7 +322,7 @@ def test_pretraining_off_does_nothing(tmp_path):
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     trainer = Trainer(
-        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
                       total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
         PPOConfig(),
@@ -373,7 +347,7 @@ def test_a_dead_batch_is_reset_and_the_run_reaches_its_budget(tmp_path):
     trainer = Trainer(
         TrainerConfig(
             size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
-            warmup_steps=0, total_world_steps=64, segment_steps=8, eval_interval=0,
+            bank_worlds=2, bank_steps=4, bank_warmup=0, bank_stride=2, total_world_steps=64, segment_steps=8, eval_interval=0,
             checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
             extinction_patience=2,
         ),
@@ -406,7 +380,7 @@ def test_extinction_guard_can_be_disabled(tmp_path):
     trainer = Trainer(
         TrainerConfig(
             size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
-            warmup_steps=0, total_world_steps=24, segment_steps=8, eval_interval=0,
+            bank_worlds=2, bank_steps=4, bank_warmup=0, bank_stride=2, total_world_steps=24, segment_steps=8, eval_interval=0,
             checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
             extinction_patience=0,
         ),
@@ -488,14 +462,14 @@ def test_sparse_evaluation_metrics_are_kept_out_of_the_dense_series():
         {
             "world_steps": 992,
             "population": 1025.0,
-            "learned_over_rule_based": 0.859,
+            "score": 0.859,
             "learned_survived_agent_steps": 32273.0,
             "rule_based_survived_agent_steps": 37572.0,
             "film_typical_steps": 65,
         }
     )
 
-    assert out["eval/learned_over_rule_based"] == 0.859
+    assert out["eval/score"] == 0.859
     assert "eval/learned_survived_agent_steps" in out
     assert "eval/rule_based_survived_agent_steps" in out
     assert out["film/typical_steps"] == 65
@@ -589,9 +563,8 @@ def _slice_hashes(world):
 
 
 def test_an_extinct_world_is_reset_in_place_and_the_others_are_untouched(tmp_path):
-    trainer = make_trainer(tmp_path, worlds=3, warmup_steps=3, extinction_patience=2)
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer = make_trainer(tmp_path, worlds=3, bank_worlds=2, bank_steps=7, bank_warmup=3, bank_stride=2, extinction_patience=2)
+    trainer.start_worlds()
     entity = trainer.env.entity
 
     # Kill world 1 outright: no biomass, no energy, nothing left to act.
@@ -622,7 +595,7 @@ def test_an_extinct_run_now_spends_its_whole_budget(tmp_path):
     """The old guard stopped the run after `extinction_patience` empty
     segments. A world that dies is reset instead and the run continues to
     the last world step."""
-    trainer = make_trainer(tmp_path, worlds=2, warmup_steps=2, extinction_patience=1,
+    trainer = make_trainer(tmp_path, worlds=2, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2, extinction_patience=1,
                            total_world_steps=16, segment_steps=4)
     trainer._init_wandb = lambda: None
     original_collect = trainer.collect
@@ -643,14 +616,41 @@ def test_an_extinct_run_now_spends_its_whole_budget(tmp_path):
     assert "extinct" not in record
 
 
-def test_evaluation_warms_the_worlds_up_under_the_rules_before_scoring(tmp_path):
-    trainer = make_trainer(tmp_path, eval_seeds=2, eval_steps=3, eval_warmup_steps=5)
-    trainer.env.reset(seed=0)
-    trainer.evaluate()
-    env = trainer._eval_env(2)
-    assert env.world.step == 5 + 3, "warmup steps precede the scored steps"
+def test_evaluation_starts_both_policies_from_the_same_banked_states(tmp_path):
+    """The evaluation worlds are a fixed subset of the bank, loaded afresh for
+    each policy, so the comparison is paired and every evaluation of a run
+    scores the same starts. The rules are scored once and reused."""
+    trainer = make_trainer(tmp_path, eval_seeds=2, eval_steps=3)
+    indices = trainer.eval_indices()
+    assert indices == trainer.eval_indices(), "the subset is fixed"
+    assert len(indices) == 2
 
-    plain = make_trainer(tmp_path / "plain", eval_seeds=2, eval_steps=3, eval_warmup_steps=0)
-    plain.env.reset(seed=0)
-    plain.evaluate()
-    assert plain._eval_env(2).world.step == 3
+    loads = []
+    original = trainer.bank.load
+
+    def spy(env, picked):
+        loads.append(list(picked))
+        return original(env, picked)
+
+    trainer.bank.load = spy
+    first = trainer.evaluate()
+    assert loads == [indices, indices], "learned, then the rules, from the same states"
+    second = trainer.evaluate()
+    assert loads == [indices, indices, indices], "the rules are not scored twice"
+    assert first["rule_based_mean_biomass"] == second["rule_based_mean_biomass"]
+    env = trainer._eval_env(2)
+    assert env.world.step == trainer.bank.steps[indices[0]] + 3
+
+
+def test_the_initial_policy_is_saved_before_any_update(tmp_path):
+    """A drifted policy must be comparable with its own start on the same
+    worlds, so the policy RL starts from is written as pretrained.pt."""
+    trainer = make_trainer(tmp_path, total_world_steps=4, segment_steps=4, checkpoint_interval=0)
+    before = {k: v.clone() for k, v in trainer.network.state_dict().items()}
+    trainer.train(verbose=False)
+    path = tmp_path / "pretrained.pt"
+    assert path.exists()
+    payload = torch.load(path, weights_only=False)
+    assert payload["updates"] == 0
+    for key, value in payload["network"].items():
+        assert torch.equal(value, before[key]), key

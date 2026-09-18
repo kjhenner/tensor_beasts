@@ -40,28 +40,37 @@ mapping is one-to-one in practice as well as in intent.
 Reward
 ------
 
-Three terms, all per individual:
+One quantity, with no coefficients: the change in the individual's own stock
+of biomass over the step,
 
-* ``survival_reward`` for each step the individual is still alive afterwards.
-* ``reproduction_reward`` when it divides.
-* ``foraging_reward`` times the biomass it ate this step.
-* Its episode ends when it dies.
+    r_t(i) = eat_t(i) - burn_t(i) - loss_t(i)
 
-The metric this is a surrogate for is the one the project actually cares about,
-total herbivore-steps survived, which is what ``tools/evaluate_policy.py`` reports for
-the rule-based baseline. Survival reward tracks it directly; reproduction reward
-credits an individual for the future population it creates, which survival
-reward alone would attribute entirely to the offspring.
+where ``eat`` is what it ate at its new cell, ``burn`` what its metabolism
+consumed, and ``loss`` the reserve that becomes carrion when it ends the step
+below the survival threshold. Division is neutral: the parent keeps half and
+the offspring carries the other half, so nothing is lost and nothing is paid.
+Summed over every individual this is exactly the species' stock change,
+``B_{t+1} - B_t`` with ``B`` the biomass carried by living individuals, except
+for what newborns eat in their birth step, which nobody is paid for. That
+makes the reward the evaluation metric's own increment (planning/11).
 
-Foraging reward exists because the first two are nearly useless as a learning
-signal on their own. Herbivores survive about 99.4% of steps, so the per-step
-reward is 1.0 with a standard deviation of 0.076: almost all of an individual's
-return is fixed no matter what it does, and the part that responds to its
-choices is buried under that. Reproduction is rarer still, around 0.7% of
-agent-steps. Biomass change, by contrast, responds immediately and directly to
-whether the individual moved somewhere with food. It is off by default, because
-turning it on is reward shaping and changes what is being optimized; what it
-must never change is the *evaluation*, which stays herbivore-steps survived.
+An individual's own outcomes are blind to what its decisions do through the
+shared prey field: the controls in planning/11 found a collapse under which
+every per-individual quantity was unchanged while the world sustained a
+quarter fewer individuals. So the reward is pooled spatially: with ``rho_t``
+the field holding each individual's ``r`` at its successor cell,
+
+    R_t(i) = sum_c K_R(c - c_{t+1}(i)) rho_t(c)
+
+with ``K_R`` a box of radius ``reward_radius``. Radius 0 is the individual
+reward; a radius covering the world pays everyone the species' stock change;
+a few cells pays each individual for its neighbourhood's stock, which scales
+with how many neighbours there are. The radius is the one knob.
+
+Exact for the predator, whose biomass nothing else takes. A herbivore also
+loses biomass to predator bites, which it did not choose and which are not
+recorded per individual, so for the herbivore the identity above does not
+hold.
 """
 
 from dataclasses import dataclass
@@ -105,7 +114,8 @@ class AgentBatch:
         observation: (C, H, W) float32, the field the policy reads.
         acted: (H, W) bool, cells holding an individual that chose an action.
         action: (H, W) int64, the direction each one chose.
-        reward: (H, W) float32.
+        reward: (H, W) float32, the individual's stock change pooled over its
+            neighbourhood; see the module docstring.
         done: (H, W) bool, true where the individual died during this step.
         successor: (H, W) int64, flat index of the cell that individual occupies
             next, for bootstrapping a value from the right place. Meaningless
@@ -168,6 +178,19 @@ def gather_per_world(field: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     return gathered.reshape(grid)
 
 
+def scatter_per_world(values: torch.Tensor, index: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """The inverse of :func:`gather_per_world`: ``values`` at ``mask`` summed
+    into a grid at ``index``, within each world. Entries outside ``mask`` are
+    dropped, and two individuals sharing a cell add rather than overwrite."""
+    grid = index.shape
+    cells = grid[-2] * grid[-1]
+    worlds = index.numel() // cells
+    out = torch.zeros(worlds, cells, dtype=values.dtype, device=values.device)
+    contribution = torch.where(mask, values, torch.zeros_like(values)).reshape(worlds, cells)
+    out.scatter_add_(1, index.reshape(worlds, cells), contribution)
+    return out.reshape(grid)
+
+
 class MultiAgentWorldEnv:
     """A tensor-beasts world exposed as many individuals sharing one policy.
 
@@ -183,12 +206,9 @@ class MultiAgentWorldEnv:
             and the three-species dynamic degenerates, so prefer 512 for
             anything whose result is meant to mean something.
         entity_name: Which entity the policy controls.
-        survival_reward: Reward per step an individual remains alive.
-        reproduction_reward: Reward for dividing.
-        foraging_reward: Reward per unit of biomass eaten this step, read at
-            the individual's own new cell. Dense and strongly
-            action-dependent, unlike the other two. Zero by default because it
-            is reward shaping; see the module docstring.
+        reward_radius: Radius in cells of the box each individual's reward is
+            pooled over, around its new cell. 0 pays each individual its own
+            stock change; see the module docstring.
         device: Torch device for the simulation.
         metabolic: Let the policy set its own metabolic rate, as a continuous
             throttle in [0, 1] mapped onto [basal_rate, max_metabolic_rate].
@@ -200,10 +220,7 @@ class MultiAgentWorldEnv:
         config_path: str = DEFAULT_CONFIG,
         size: Optional[Tuple[int, int]] = None,
         entity_name: str = DEFAULT_ENTITY,
-        survival_reward: float = 1.0,
-        reproduction_reward: float = 10.0,
-        foraging_reward: float = 0.0,
-        offspring_credit: float = 0.0,
+        reward_radius: int = 0,
         worlds: int = 1,
         device: Optional[str] = None,
         metabolic: bool = False,
@@ -211,10 +228,7 @@ class MultiAgentWorldEnv:
     ):
         self.config_path = config_path
         self.entity_name = entity_name
-        self.survival_reward = survival_reward
-        self.reproduction_reward = reproduction_reward
-        self.foraging_reward = foraging_reward
-        self.offspring_credit = offspring_credit
+        self.reward_radius = int(reward_radius)
         self.device = torch.device(device) if device is not None else torch.get_default_device()
         self.metabolic = bool(metabolic)
 
@@ -268,10 +282,7 @@ class MultiAgentWorldEnv:
         env = cls.__new__(cls)
         env.config_path = None
         env.entity_name = entity_name
-        env.survival_reward = 0.0
-        env.reproduction_reward = 0.0
-        env.foraging_reward = 0.0
-        env.offspring_credit = 0.0
+        env.reward_radius = 0
         env.world_config = world.config
         env.size = tuple(world.size)
         env.world = world
@@ -342,6 +353,18 @@ class MultiAgentWorldEnv:
         """
         return self._alive().sum(dim=(-2, -1)).reshape(self.num_worlds).float()
 
+    def stock_per_world(self) -> torch.Tensor:
+        """Biomass carried by living individuals in each world, ``(worlds,)``.
+
+        The quantity the metric integrates and the reward increments
+        (planning/11). Living individuals only: a cell below the survival
+        threshold still holds the reserve of an animal that died this step,
+        and that reserve becomes carrion at the top of the next one.
+        """
+        biomass = self.entity.biomass.data
+        alive = biomass >= self.entity.config.survival_threshold
+        return (biomass * alive).sum(dim=(-2, -1)).reshape(self.num_worlds).float()
+
     # ------------------------------------------------------------------
     # Metabolic throttle
     # ------------------------------------------------------------------
@@ -398,6 +421,31 @@ class MultiAgentWorldEnv:
         names.extend(["self/energy", "self/biomass", "self/gradient_ema", "self/alive"])
         names.extend(f"memory/{k}" for k in range(self.memory_size))
         return names
+
+    def rule_spec(self) -> Dict[str, object]:
+        """What the rule-parametrised actor needs to be the rule at start.
+
+        Everything :class:`~tensor_beasts.rl.networks.RulePolicy` reads from
+        the entity's config, keyed the way the observation channels are named,
+        so the actor can be rebuilt from a checkpoint against any world with
+        the same perception.
+        """
+        config = self.entity.config
+        weights = {}
+        for key, weight in dict(config.navigation_weights).items():
+            label = ":".join(key) if isinstance(key, (tuple, list)) else str(key)
+            weights[label] = float(weight)
+        return {
+            "channel_names": list(self.channel_names),
+            "features": [":".join(key) for key, _ in self._perception()],
+            "navigation_weights": weights,
+            "perceived_scale": float(torch.log1p(torch.tensor(255.0 * config.log_scale))),
+            "gradient_ema_alpha": float(config.gradient_ema_alpha),
+            "basal_rate": float(config.basal_rate),
+            "max_metabolic_rate": float(config.max_metabolic_rate),
+            "metabolic_sensitivity": float(config.metabolic_sensitivity),
+            "survival_threshold": float(config.survival_threshold),
+        }
 
     def _rule_decision(self, observation):
         """The entity's own rule-based policy's full Action from ``observation``.
@@ -544,6 +592,9 @@ class MultiAgentWorldEnv:
         Shared by :meth:`step` and :meth:`rule_based_step` so the learned policy
         and the baseline are scored by exactly the same rules. If these ever
         drift apart the comparison stops meaning anything.
+
+        The reward is each individual's own stock change, pooled over a box of
+        ``reward_radius`` cells around its new cell; see the module docstring.
         """
         acted = transition.acted
         successor = transition.successor.clamp(min=0)
@@ -555,51 +606,38 @@ class MultiAgentWorldEnv:
         biomass_after = gather_per_world(entity.biomass.data, successor)
         alive_after = (biomass_after >= entity.config.survival_threshold) & acted
 
-        reward = (
-            alive_after.float() * self.survival_reward
-            + transition.reproduced.float() * self.reproduction_reward
-        )
+        # What it ate, read at its successor cell since eating happens after
+        # the move; what it burned, at the cell it acted from since metabolism
+        # happens before; and, if it ends the step below the threshold, the
+        # reserve it leaves behind, which the simulation turns into carrion at
+        # the top of the next step.
+        eaten = gather_per_world(transition.eaten, successor)
+        burned = transition.burned
+        loss = torch.where(acted & ~alive_after, biomass_after, torch.zeros_like(biomass_after))
+        own = torch.where(acted, eaten - burned - loss, torch.zeros_like(eaten))
 
-        if self.foraging_reward:
-            # What the individual ATE, read at its successor cell since eating
-            # happens after the move. Net biomass change was the first version
-            # and it punished the metabolic lever: burning biomass into energy
-            # is what metabolism does, so every unit burned cost reward and the
-            # learned throttle collapsed onto the coldest setting.
-            eaten = gather_per_world(transition.eaten, successor)
-            reward = reward + alive_after.float() * eaten * self.foraging_reward
-
-        if self.offspring_credit and transition.offspring is not None:
-            reward = reward + self._offspring_credit(transition, successor, acted)
-
+        reward = self._pool(own, successor, acted)
         return reward, alive_after, successor, acted
 
-    def _offspring_credit(self, transition, successor: torch.Tensor, acted: torch.Tensor) -> torch.Tensor:
-        """Credit an individual with a share of the biomass it endowed its child.
+    def _pool(self, own: torch.Tensor, successor: torch.Tensor, acted: torch.Tensor) -> torch.Tensor:
+        """Each individual's reward summed over its neighbourhood at its new cell.
 
-        Division is a cost under every reward this project has used: it halves
-        the parent's biomass, and a reward in biomass alone is therefore
-        maximized by eating and never dividing. That is the same failure the
-        metabolic lever hit when its reward counted net biomass change. The
-        metric being approximated is not an individual's own mass but its
-        lineage's, so an individual is credited with what it handed on.
-
-        The credit is the offspring's biomass at birth, which is half the
-        parent's, times ``offspring_credit``. First generation only, and the
-        argument for stopping there is variance: crediting a lineage without a
-        generational bound makes an early ancestor's return depend on
-        descendants it never saw, growing without limit in a growing
-        population. One generation captures the investment and stays bounded.
-        The coefficient is the discount: 0 disables the term, and 1.0 values a
-        unit of offspring biomass exactly as a unit of the individual's own.
+        Scatter every individual's own reward to its successor cell, sum that
+        field over a box of ``reward_radius`` cells, and read it back at the
+        successor. Radius 0 is the identity. The box is unnormalised, so a
+        radius covering the world hands everyone the species' total.
         """
-        offspring = transition.offspring
-        divided = transition.reproduced & acted
-        if not bool(divided.any()):
-            return torch.zeros(self.field_shape, dtype=torch.float32, device=self.device)
-        endowed = gather_per_world(self.entity.biomass.data, offspring.clamp(min=0))
-        endowment = torch.where(divided, endowed, torch.zeros_like(endowed))
-        return endowment * float(self.offspring_credit)
+        radius = self.reward_radius
+        if radius <= 0:
+            return own
+        field = scatter_per_world(own, successor, acted)
+        worlds = self.num_worlds
+        kernel = torch.ones(1, 1, 2 * radius + 1, 2 * radius + 1, device=own.device, dtype=own.dtype)
+        pooled = torch.nn.functional.conv2d(
+            field.reshape(worlds, 1, *self.size), kernel, padding=radius
+        ).reshape(self.field_shape)
+        pooled = gather_per_world(pooled, successor)
+        return torch.where(acted, pooled, torch.zeros_like(pooled))
 
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Restart the ecology. Returns (observation, acted mask).

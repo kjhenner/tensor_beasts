@@ -1,4 +1,4 @@
-# PPO on per-individual herbivore survival.
+# PPO on per-individual stock, for the individuals of one species.
 #
 # The two blocks map one-to-one onto TrainerConfig and PPOConfig in
 # tensor_beasts/rl/, so anything you can set in code you can set here, and
@@ -14,41 +14,54 @@ trainer:
   size: 256
   entity: Herbivore
 
-  # survival_reward 1.0 makes the summed reward literally "herbivore-steps
-  # survived", which is the number tools/evaluate_policy.py reports for the baseline.
-  survival_reward: 1.0
-  reproduction_reward: 10.0
-  # Dense biomass-change reward. Off by default: it is reward shaping. Turn it
-  # on if the policy will not move, which is the failure mode survival reward
-  # produces, since herbivores survive about 99.4% of steps and the per-step
-  # reward is therefore nearly constant.
-  foraging_reward: 0.0
+  # The reward is each individual's own stock change, eat minus burn minus
+  # the reserve lost at death, pooled over a box of this radius around its
+  # new cell. 0 is the individual reward. There are no other reward terms;
+  # planning/11 records why.
+  reward_radius: 0
 
+  # rule: the rule with free values (planning/11). linear: a 1x1 convolution.
+  # conv, residual, dilated: convolutional trunks. For rule, arch_kwargs may
+  # name the critic: {critic: conv, hidden_channels: 64, depth: 3} or
+  # {critic: linear}.
   arch: conv
   arch_kwargs: {}
   # Second policy head emitting a continuous metabolic rate, from basal to
   # max_metabolic_rate, still capped by carried biomass. false leaves the rate
-  # to the rules and learns movement only; existing runs reproduce with false.
+  # to the rules and learns movement only.
   metabolic: false
   # Learned memory channels per individual. 0 disables. See planning/04.
   memory_size: 0
-  # Offline distillation of the rule-based policy before RL: pretrain_grids
-  # labelled grids from a rule-based run, fitted for at most pretrain_epochs,
-  # stopping once held-out agreement plateaus. 0 epochs = off.
+  # Offline distillation of the rule-based policy before RL, on the bank's
+  # labelled grids, for at most pretrain_epochs, stopping once held-out
+  # agreement plateaus. 0 epochs = off. The policy RL starts from is saved as
+  # pretrained.pt either way.
   pretrain_epochs: 0
-  pretrain_grids: 128
-  pretrain_stride: 25
   device: auto
   seed: 0
 
   total_world_steps: 20000
   segment_steps: 64
-  # Train on a settled ecology, not on the transient right after seeding.
-  warmup_steps: 100
 
-  eval_interval: 2000
-  eval_steps: 500
-  eval_seeds: 2
+  # The start bank: a rule-based run of bank_worlds worlds for bank_steps
+  # steps, banked every bank_stride steps after bank_warmup. Every world the
+  # run touches (training, extinction resets, evaluation, films) starts from
+  # a bank state, in the settled cycles and out of phase with each other.
+  bank_worlds: 8
+  bank_steps: 3000
+  bank_warmup: 1000
+  bank_stride: 100
+  # Banks are written here under a key made from everything that shapes
+  # them and read back by the next process that asks for the same one;
+  # null builds the bank every time. About 7.4 GB per bank at 512.
+  bank_cache: outputs/bank
+
+  # The metric: mean stock over eval_steps world steps from eval_seeds banked
+  # starts, a fixed seeded subset of the bank. T = 4000 is longer than a
+  # collapse. Two evaluations per run plus the final at this budget.
+  eval_interval: 10000
+  eval_steps: 4000
+  eval_seeds: 8
   eval_deterministic: false
 
   checkpoint_interval: 2000
@@ -86,7 +99,8 @@ ppo:
   target_kl: null
   # Pretraining only: soft distillation toward softmax(rule scores /
   # temperature). 0 = hard argmax. Nothing pulls the policy toward the rules
-  # once RL starts; the record of why is planning/10.
+  # once RL starts; the record of why is planning/10. The rule actor's
+  # sharpness starts at 1 / temperature.
   imitation_temperature: 0.01
   # Backpropagate memory writes through this many steps of the individual's
   # own trajectory. 0 = off (stage 1). See planning/04.

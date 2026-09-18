@@ -82,7 +82,7 @@ def _collect(memory_size, steps=6, size=32):
     torch.manual_seed(0)
     trainer = Trainer(
         TrainerConfig(size=size, arch="conv", arch_kwargs={"hidden_channels": 8}, memory_size=memory_size,
-                      warmup_steps=3, total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu"),
+                      bank_worlds=2, bank_steps=7, bank_warmup=3, bank_stride=2, total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu"),
         PPOConfig(),
     )
     rollout, _ = trainer.collect(steps)

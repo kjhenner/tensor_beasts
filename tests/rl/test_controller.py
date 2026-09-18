@@ -19,7 +19,7 @@ SIZE = 32
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory):
     trainer = Trainer(
-        TrainerConfig(size=SIZE, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+        TrainerConfig(size=SIZE, arch="conv", arch_kwargs={"hidden_channels": 8}, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
                       total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu"),
         PPOConfig(),
     )

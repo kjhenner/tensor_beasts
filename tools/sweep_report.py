@@ -22,15 +22,17 @@ from collections import defaultdict
 from typing import Any, Dict, List
 
 DEFAULT_COLUMNS = [
-    "eval/score_mean_late", "eval/score_last", "eval/score_best", "score_spread",
-    "eval/rule_based_biomass_ema", "eval/learned_mean_population", "eval/learned_reproductions",
+    "eval/score_mean_late", "eval/score_last", "eval/score_best", "eval/score_spread",
+    "eval/learned_extinct_fraction", "eval/rule_based_mean_biomass",
+    "eval/learned_mean_population", "eval/learned_reproductions",
     "world_resets", "argmax_agreement", "approx_kl", "explained_variance",
     "metabolic_head_mean", "metabolic_rule_mean", "metabolic_head_spread", "metabolic_rule_corr",
     "world_steps", "_runtime",
 ]
 SHORT = {
     "eval/score_mean_late": "late", "eval/score_last": "last", "eval/score_best": "best",
-    "score_spread": "spread", "eval/rule_based_biomass_ema": "rules",
+    "eval/score_spread": "spread", "eval/learned_extinct_fraction": "extinct",
+    "eval/rule_based_mean_biomass": "rules",
     "eval/learned_mean_population": "pop", "eval/learned_reproductions": "repro",
     "world_resets": "resets", "argmax_agreement": "agree", "approx_kl": "kl",
     "explained_variance": "ev", "metabolic_head_mean": "m_head", "metabolic_rule_mean": "m_rule",

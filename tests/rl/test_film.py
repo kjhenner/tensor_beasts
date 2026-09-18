@@ -230,14 +230,13 @@ def test_trainer_records_a_film_and_never_raises(tmp_path):
     trainer = Trainer(
         TrainerConfig(
             size=96, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-            warmup_steps=20, total_world_steps=0, segment_steps=8, eval_interval=0,
+            bank_worlds=2, bank_steps=24, bank_warmup=20, bank_stride=2, total_world_steps=0, segment_steps=8, eval_interval=0,
             checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
             film_interval=1, film_steps=60, film_window=24, film_scale=3,
         ),
         PPOConfig(epochs=1, minibatch_steps=2),
     )
-    trainer.env.reset(seed=1)
-    trainer.warmup()
+    trainer.start_worlds()
     result = trainer.record_film()
 
     assert "film_error" not in result, result.get("film_error")

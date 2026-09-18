@@ -207,14 +207,13 @@ def test_the_trainer_collects_and_updates_across_worlds():
     trainer = Trainer(
         TrainerConfig(
             size=64, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-            worlds=worlds, warmup_steps=5, total_world_steps=0, segment_steps=steps,
+            worlds=worlds, bank_worlds=2, bank_steps=9, bank_warmup=5, bank_stride=2, total_world_steps=0, segment_steps=steps,
             eval_interval=0, checkpoint_interval=0, device="cpu",
             output_dir=tempfile.mkdtemp(), wandb=False,
         ),
         PPOConfig(epochs=1, minibatch_steps=2),
     )
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
 
     rollout, _ = trainer.collect(steps)
     assert rollout.observation.shape == (
@@ -240,13 +239,12 @@ def test_one_world_trains_exactly_as_before():
     trainer = Trainer(
         TrainerConfig(
             size=64, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-            warmup_steps=5, total_world_steps=0, segment_steps=steps, eval_interval=0,
+            bank_worlds=2, bank_steps=9, bank_warmup=5, bank_stride=2, total_world_steps=0, segment_steps=steps, eval_interval=0,
             checkpoint_interval=0, device="cpu", output_dir=tempfile.mkdtemp(), wandb=False,
         ),
         PPOConfig(epochs=1, minibatch_steps=2),
     )
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
 
     rollout, _ = trainer.collect(steps)
     assert rollout.observation.shape == (steps, trainer.observation_channels, 64, 64)
@@ -271,7 +269,7 @@ def test_evaluation_scores_each_seed_separately():
     trainer = Trainer(
         TrainerConfig(
             size=96, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-            warmup_steps=10, total_world_steps=0, eval_steps=40, eval_seeds=seeds,
+            bank_worlds=2, bank_steps=14, bank_warmup=10, bank_stride=2, total_world_steps=0, eval_steps=40, eval_seeds=seeds,
             eval_interval=0, checkpoint_interval=0, device="cpu",
             output_dir=tempfile.mkdtemp(), wandb=False,
         ),
@@ -303,7 +301,7 @@ def test_scoring_reports_one_number_per_world():
     trainer = Trainer(
         TrainerConfig(
             size=96, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-            warmup_steps=10, total_world_steps=0, eval_steps=30, eval_seeds=worlds,
+            bank_worlds=2, bank_steps=14, bank_warmup=10, bank_stride=2, total_world_steps=0, eval_steps=30, eval_seeds=worlds,
             eval_interval=0, checkpoint_interval=0, device="cpu",
             output_dir=tempfile.mkdtemp(), wandb=False,
         ),
@@ -314,6 +312,6 @@ def test_scoring_reports_one_number_per_world():
 
     result = trainer._score(env, 30, "rule_based")
 
-    for field in ("biomass_ema", "mean_biomass", "mean_population", "reproductions"):
+    for field in ("mean_biomass", "extinct", "mean_population", "reproductions"):
         values = getattr(result, field)
         assert len(values) == worlds, f"{field} collapsed the batch"

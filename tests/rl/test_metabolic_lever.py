@@ -377,8 +377,7 @@ def test_evaluation_scores_the_throttle_at_the_heads_mean(tmp_path):
     is a bias rather than a variance: with the mean near the rule's 0.08 and
     the old std of 0.6, samples averaged 0.22. Evaluation takes the mean."""
     trainer = make_trainer(tmp_path)
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
     batch = trainer.env.rule_based_step()
     observation = batch.observation.float()
     out = trainer.network.forward_all(observation.unsqueeze(0) if observation.dim() == 3 else observation)
@@ -425,7 +424,7 @@ def make_trainer(tmp_path, ppo=None, **overrides):
     defaults = dict(
         size=SIZE, arch="conv", arch_kwargs={"hidden_channels": 8, "depth": 1},
         metabolic=True, device="cpu", seed=0,
-        total_world_steps=8, segment_steps=4, warmup_steps=2,
+        total_world_steps=8, segment_steps=4, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
         eval_interval=0, eval_steps=3, eval_seeds=1, checkpoint_interval=4,
         output_dir=str(tmp_path),
     )
@@ -453,7 +452,7 @@ def test_two_lever_training_runs_evaluates_and_the_controller_drives_it(tmp_path
     for key in ("metabolic_error", "metabolic_unit_mean", "metabolic_head_mean"):
         assert key in record and record[key] == record[key], key
     summary = trainer.evaluate()
-    assert "learned_over_rule_based" in summary
+    assert "score" in summary
 
     checkpoint = tmp_path / "checkpoint.pt"
     assert checkpoint.exists()

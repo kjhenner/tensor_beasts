@@ -32,14 +32,14 @@ def test_predator_environment_exposes_the_full_contract():
 def test_predator_trains_evaluates_and_checkpoints(tmp_path):
     trainer = Trainer(
         TrainerConfig(size=SIZE[0], entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 8},
-                      metabolic=True, warmup_steps=3, total_world_steps=8, segment_steps=4, eval_interval=0,
+                      metabolic=True, bank_worlds=2, bank_steps=7, bank_warmup=3, bank_stride=2, total_world_steps=8, segment_steps=4, eval_interval=0,
                       eval_steps=4, eval_seeds=1, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
         PPOConfig(epochs=1, minibatch_steps=2),
     )
     trainer.train(verbose=False)
     summary = trainer.evaluate()
-    assert summary["learned_over_rule_based"] >= 0.0
+    assert summary["score"] >= 0.0 and "rule_based_mean_biomass" in summary
     path = trainer.save_checkpoint(tmp_path / "predator.pt")
     payload = torch.load(path, weights_only=False)
     assert payload["trainer_config"]["entity"] == "Predator"

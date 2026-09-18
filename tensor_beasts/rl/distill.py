@@ -8,11 +8,10 @@ the sampler that produces them. It used to run in lockstep with the fit, one
 segment per update and thrown away after two epochs, a leftover of the days
 when imitation and RL shared a loop.
 
-Three pieces:
+The grids come from the start bank (:mod:`tensor_beasts.rl.bank`), which
+records the rule's labelled grid at every state it banks, so the fit is on
+exactly the states training and evaluation start from. Two pieces here:
 
-* :func:`collect_labelled_grids` runs a batched world under the rules and
-  keeps every ``stride``-th step's observation with the rule's own labels,
-  across the cycle phases the run passes through.
 * :func:`augment` applies one of the eight symmetries of the square grid to a
   grid and its labels. The rule is equivariant under them (flip the world
   top to bottom and it swaps up for down), so each stored grid is eight
@@ -74,47 +73,6 @@ class LabelledGrids:
             pick(self.observation), pick(self.acted), pick(self.rule_action),
             pick(self.rule_scores), pick(self.rule_unit), self.channel_names,
         )
-
-
-def collect_labelled_grids(env, grids: int, stride: int, warmup: int) -> LabelledGrids:
-    """Run ``env`` under its rules and keep every ``stride``-th step's grids.
-
-    ``env`` should already be reset. Each step of a batched world yields one
-    grid per world, so ``grids`` is reached after ``grids / worlds`` samples
-    spaced ``stride`` steps apart, following ``warmup`` steps that are not
-    sampled. Everything lands on the CPU as it is taken, as float16 where the
-    network input is float16 anywhere else, so the sampler's memory is one
-    step's batch and not the dataset.
-    """
-    from tensor_beasts.rl.trainer import policy_input
-
-    for _ in range(warmup):
-        env.rule_based_step()
-    fields: Dict[str, List[torch.Tensor]] = {k: [] for k in ("observation", "acted", "rule_action", "rule_scores", "rule_unit")}
-    taken = 0
-    step = 0
-    while taken < grids:
-        batch = env.rule_based_step()
-        step += 1
-        if step % stride:
-            continue
-        worlds = env.num_worlds
-        def per_world(t):
-            # (B, ...) stays; an unbatched (...) gains the world axis.
-            return t if worlds > 1 else t.unsqueeze(0)
-        fields["observation"].append(policy_input(per_world(batch.observation)).to("cpu", torch.float16))
-        fields["acted"].append(per_world(batch.acted).to("cpu"))
-        fields["rule_action"].append(per_world(batch.rule_action).to("cpu", torch.int64))
-        if batch.rule_scores is not None:
-            fields["rule_scores"].append(per_world(batch.rule_scores).to("cpu", torch.float16))
-        if batch.rule_metabolic_unit is not None:
-            fields["rule_unit"].append(per_world(batch.rule_metabolic_unit).to("cpu", torch.float32))
-        taken += worlds
-    cat = lambda name: torch.cat(fields[name])[:grids] if fields[name] else None
-    return LabelledGrids(
-        cat("observation"), cat("acted"), cat("rule_action"), cat("rule_scores"), cat("rule_unit"),
-        list(env.channel_names),
-    )
 
 
 def direction_map(k: int) -> Dict[str, str]:

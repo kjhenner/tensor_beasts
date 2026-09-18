@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Hyperparameter search for the herbivore policy.
 
-Runs many short training runs in parallel and ranks them by the only number
-that matters: the learned policy's return divided by the rule-based policy's
-return, scored on the same seeds.
+Runs many short training runs in parallel and ranks them by the metric, the
+learned policy's mean stock over the evaluation window on banked starts
+(reported in the ``ratio`` column for continuity with old result files).
 
     source venv/bin/activate && python tools/sweep_rl.py --trials 16
     python tools/sweep_rl.py --grid --workers 4
@@ -44,10 +44,7 @@ from tensor_beasts.rl.memory import format_bytes, workers_that_fit
 # picks one per trial, grid search takes the product.
 #
 # These are chosen around what the setting actually needs rather than generic
-# PPO defaults. Notably reproduction_reward is swept widely because the balance
-# between staying alive and dividing is the least-understood knob here, and
-# entropy_coef because per-step survival is about 99.4%, so the reward signal is
-# nearly constant and exploration has to come from somewhere.
+# PPO defaults. The reward has one knob, the pooling radius (planning/11).
 SEARCH_SPACE: Dict[str, List[Any]] = {
     "arch": ["conv", "dilated", "residual"],
     "learning_rate": [1e-4, 3e-4, 1e-3, 3e-3],
@@ -57,8 +54,7 @@ SEARCH_SPACE: Dict[str, List[Any]] = {
     "gamma": [0.95, 0.99, 0.997],
     "gae_lambda": [0.9, 0.95, 0.99],
     "epochs": [2, 4, 8],
-    "reproduction_reward": [0.0, 3.0, 10.0, 30.0],
-    "foraging_reward": [0.0, 0.1, 0.5, 2.0],
+    "reward_radius": [0, 2, 4],
     "segment_steps": [32, 64, 128],
     # Also the memory lever, and capped at 8 for that reason. A fully
     # convolutional policy holds one full-resolution activation per convolution
@@ -76,7 +72,7 @@ GRID_SPACE: Dict[str, List[Any]] = {
     "arch": ["conv", "dilated"],
     "learning_rate": [3e-4, 1e-3],
     "entropy_coef": [0.003, 0.01],
-    "reproduction_reward": [0.0, 10.0],
+    "reward_radius": [0, 2],
 }
 
 TRAINER_KEYS = {
@@ -84,9 +80,7 @@ TRAINER_KEYS = {
     "size",
     "seed",
     "segment_steps",
-    "reproduction_reward",
-    "survival_reward",
-    "foraging_reward",
+    "reward_radius",
     "total_world_steps",
     "normalize_values",
 }
@@ -144,7 +138,7 @@ def run_trial(trial: Trial) -> Dict[str, Any]:
 
         record.update(
             {
-                "ratio": float(summary["learned_over_rule_based"]),
+                "ratio": float(summary["score"]),
                 "learned_return": float(summary["learned_total_reward"]),
                 "rule_based_return": float(summary["rule_based_total_reward"]),
                 "learned_episode_length": float(summary["learned_episode_length"]),

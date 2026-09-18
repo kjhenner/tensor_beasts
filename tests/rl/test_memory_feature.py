@@ -130,7 +130,7 @@ def test_trainer_and_controller_round_trip_with_memory(tmp_path):
 
     trainer = Trainer(
         TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, memory_size=2,
-                      warmup_steps=2, total_world_steps=0, eval_interval=0, checkpoint_interval=0,
+                      bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2, total_world_steps=0, eval_interval=0, checkpoint_interval=0,
                       device="cpu"),
         PPOConfig(),
     )
@@ -162,7 +162,7 @@ def test_evaluation_writes_memory_like_training_does():
 
     trainer = Trainer(
         TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, memory_size=2,
-                      warmup_steps=2, total_world_steps=0, eval_interval=0, eval_steps=6, eval_seeds=1,
+                      bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2, total_world_steps=0, eval_interval=0, eval_steps=6, eval_seeds=1,
                       checkpoint_interval=0, device="cpu"),
         PPOConfig(),
     )
@@ -179,7 +179,7 @@ def test_pinned_metabolic_unit_holds_the_throttle_at_basal():
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     trainer = Trainer(
-        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
                       total_world_steps=0, eval_interval=0, eval_steps=4, eval_seeds=1, checkpoint_interval=0,
                       device="cpu", eval_pin_metabolic=0.0),
         PPOConfig(),
@@ -210,7 +210,7 @@ def test_pinning_works_with_more_than_one_evaluation_seed():
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     trainer = Trainer(
-        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
                       total_world_steps=0, eval_interval=0, eval_steps=4, eval_seeds=2,
                       checkpoint_interval=0, device="cpu", eval_pin_metabolic=0.0),
         PPOConfig(),

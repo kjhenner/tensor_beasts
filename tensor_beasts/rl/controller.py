@@ -15,7 +15,7 @@ import torch
 from tensordict import TensorDict
 
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
-from tensor_beasts.rl.networks import build_network
+from tensor_beasts.rl.networks import RULE_ARCHITECTURE, build_network
 from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD
 from tensor_beasts.rl.trainer import checkpoint_metabolic
 from tensor_beasts.world import World
@@ -82,12 +82,21 @@ class LearnedController:
                 "apply_checkpoint_requirements(config, checkpoint) before building the world."
             )
 
+        arch_kwargs = dict(trainer_config.get("arch_kwargs") or {})
+        if trainer_config["arch"] == RULE_ARCHITECTURE:
+            # The rule with free values is rebuilt from this world's own
+            # rules, exactly as the trainer built it; the checkpoint then
+            # overwrites the values with what training reached.
+            arch_kwargs.setdefault("rule", self.env.rule_spec())
+            arch_kwargs.setdefault(
+                "temperature", (payload.get("ppo_config") or {}).get("imitation_temperature", 0.01)
+            )
         self.network = build_network(
             trainer_config["arch"],
             self.env.observation_channels,
             metabolic=self.metabolic,
             memory_size=self.memory_size,
-            **(trainer_config.get("arch_kwargs") or {}),
+            **arch_kwargs,
         )
         self.network.load_state_dict(payload["network"])
         self.network.to(self.device).eval()

@@ -55,6 +55,12 @@ class TransitionInfo:
     # foraging actually is, as distinct from net biomass change, which also
     # counts what metabolism burned and would punish using the throttle.
     eaten: Optional[torch.Tensor] = None
+    # (H, W) float32, biomass burned by metabolism this step, indexed by the
+    # cell the individual acted from, since metabolism runs before movement.
+    # With ``eaten`` and the reserve lost at death this is what makes the sum
+    # of every individual's stock change equal the species' stock change
+    # exactly (planning/11).
+    burned: Optional[torch.Tensor] = None
 
 
 @register_entity
@@ -462,7 +468,7 @@ class Animal(Entity):
             )
 
         # Step 5: Execute metabolism using the chosen metabolic_rate
-        self._execute_metabolism(metabolic_rate, verbose, positions if verbose else None)
+        burned = self._execute_metabolism(metabolic_rate, verbose, positions if verbose else None)
 
         # Step 6: Execute energy dissipation
         self._execute_dissipation(verbose, positions if verbose else None)
@@ -497,6 +503,7 @@ class Animal(Entity):
         self._eat()
         if self.last_transition is not None and biomass_before_eat is not None:
             self.last_transition.eaten = (biomass.float() - biomass_before_eat.float()).clamp(min=0)
+            self.last_transition.burned = burned.float()
 
         if verbose and positions:
             eaten = biomass - biomass_before_eat
@@ -524,7 +531,7 @@ class Animal(Entity):
         metabolic_rate: torch.Tensor,
         verbose: bool = False,
         positions: Optional[List[Tuple[int, int]]] = None
-    ):
+    ) -> torch.Tensor:
         """
         Execute metabolism: convert biomass to energy.
 
@@ -532,6 +539,9 @@ class Animal(Entity):
             metabolic_rate: (H, W) float - biomass to burn per cell
             verbose: Whether to log metabolism details
             positions: Positions to log (if verbose)
+
+        Returns:
+            (H, W) biomass burned at each cell.
         """
         biomass = self.biomass.data
         energy = self.energy.data
@@ -560,6 +570,7 @@ class Animal(Entity):
                 biomass=biomass,
                 energy=energy
             )
+        return biomass_burned
 
     def _execute_dissipation(
         self,

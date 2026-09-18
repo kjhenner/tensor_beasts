@@ -1,20 +1,27 @@
 #!/usr/bin/env python
-"""Train a shared policy for individual herbivores, and score it against the rules.
+"""Train a shared policy for the individuals of one species, and score it.
 
 The experiment this exists for is one sentence: can a learned policy beat the
-simulation's own rule-based policy at keeping herbivores alive? Training and the
-comparison are the same command, because a training curve on its own does not
-answer that question. Every evaluation prints both numbers.
+simulation's own rule-based policy at sustaining its species? The score is
+the metric of planning/11: the stock of biomass carried by the species' living
+individuals, averaged over a window of eval-steps world steps from a bank of
+warmed start states, with the extinction fraction, the rules' score on the
+same starts and the spread over starts beside it. Training and the comparison
+are the same command, because a training curve on its own does not answer
+that question.
 
-Start with --arch linear. That network is a single 1x1 convolution over the same
-channels the rule-based policy reads, so it can represent the baseline exactly.
-If PPO cannot bring it near the baseline, the learning setup is broken and
-nothing larger is worth running.
+The reward is that metric's own increment, each individual's stock change,
+pooled over a box of --reward-radius cells around it. There are no reward
+coefficients.
+
+Start with --arch rule: the rule with free values, five parameters that begin
+at the rule's own, so a drift reads as a sentence. Then --arch linear, then
+conv, each compared against the rung below on the same starts.
 
 Usage:
     source venv/bin/activate && python train_rl.py
-    python train_rl.py --arch linear --size 256 --steps 20000
-    python train_rl.py --eval-only outputs/rl/checkpoint.pt --size 256
+    python train_rl.py --arch rule --metabolic --entity Predator --size 512
+    python train_rl.py --eval-only outputs/rl/pretrained.pt --eval-deterministic
     python train_rl.py --resume outputs/rl/checkpoint.pt --steps 40000
 
 Sizes below about 256 are not a valid ecology: the predators die out and the
@@ -28,23 +35,12 @@ from typing import Any, Dict, Optional
 
 from omegaconf import OmegaConf
 
+from tensor_beasts.rl.networks import architecture_names
 from tensor_beasts.rl.ppo import PPOConfig
 from tensor_beasts.rl.memory import estimate_training_bytes, format_bytes
 from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
 DEFAULT_CONFIG = "conf/rl/ppo.yaml"
-
-# Reward presets, for --reward-mode. The four reward terms are not independent
-# axes: the offspring credit is denominated in biomass, so under the classic
-# reward, whose scale is about one per step, a credit of fifty per division
-# would swamp everything else. Sweeping the terms separately would spend most
-# of a grid on combinations like that. A mode names each coherent reward once.
-REWARD_MODES = {
-    "classic": dict(survival_reward=1.0, reproduction_reward=10.0, foraging_reward=0.02, offspring_credit=0.0),
-    "biomass": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.0),
-    "biomass-0.5": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=0.5),
-    "biomass-1.0": dict(survival_reward=0.0, reproduction_reward=0.0, foraging_reward=1.0, offspring_credit=1.0),
-}
 
 
 def _boolean(value: str) -> bool:
@@ -67,45 +63,17 @@ def build_parser() -> argparse.ArgumentParser:
     world.add_argument("--sim-config", default=None, help="simulation config YAML")
     world.add_argument("--size", type=int, default=None, help="world side length")
     world.add_argument("--entity", default=None)
-    world.add_argument("--survival-reward", type=float, default=None)
-    world.add_argument("--reproduction-reward", type=float, default=None)
     world.add_argument(
-        "--foraging-reward",
-        type=float,
+        "--reward-radius",
+        type=int,
         default=None,
+        metavar="CELLS",
         help=(
-            "Reward per unit of biomass gained per step. Dense and strongly "
-            # Escaped: argparse runs help text through %-formatting, and a bare
-            # percent sign makes --help raise ValueError instead of printing.
-            "action-dependent, unlike survival, which sits near 99.4%% per step "
-            "and so carries almost no signal. Reward shaping: it changes what is "
-            "optimized, never what is evaluated."
-        ),
-    )
-    world.add_argument(
-        "--reward-mode",
-        default=None,
-        choices=sorted(REWARD_MODES),
-        help=(
-            "Set the whole reward as one unit, so a sweep can cross it with other "
-            "axes. classic: survival 1, reproduction 10, foraging 0.02, the reward "
-            "every result before the lineage work used. biomass: foraging 1.0 and "
-            "nothing else, so biomass is the entire signal. biomass-0.5 and "
-            "biomass-1.0: the same plus that fraction of each offspring's biomass "
-            "credited to its parent. Explicit --survival-reward etc. still win."
-        ),
-    )
-    world.add_argument(
-        "--offspring-credit",
-        type=float,
-        default=None,
-        metavar="FRACTION",
-        help=(
-            "Credit an individual with this fraction of its offspring's biomass "
-            "at birth. Division halves the parent's biomass, so a reward in "
-            "biomass alone is maximised by never dividing; this makes it an "
-            "investment instead. First generation only, so the credit stays "
-            "bounded in a growing population. 0 (default) disables it."
+            "Radius of the box each individual's stock reward is pooled over, "
+            "around its new cell. 0 (default) pays each individual its own stock "
+            "change; a few cells pays it for its neighbourhood's, which is what "
+            "registers the collapse the controls in planning/11 saw. The one "
+            "reward knob; there are no coefficients."
         ),
     )
     world.add_argument(
@@ -138,9 +106,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     model = parser.add_argument_group("model")
     model.add_argument(
-        "--arch", default=None, choices=["linear", "conv", "residual", "dilated"]
+        "--arch", default=None, choices=list(architecture_names()),
+        help=(
+            "rule: the rule with free values, one weight per perceived feature, "
+            "a sharpness and (with --metabolic) a throttle sensitivity, starting "
+            "at the rule's own. linear: a 1x1 convolution, five weights per "
+            "channel. conv, residual, dilated: convolutional trunks."
+        ),
     )
-    model.add_argument("--hidden-channels", type=int, default=None)
+    model.add_argument("--hidden-channels", type=int, default=None,
+                       help="trunk width; for --arch rule, the conv critic's width")
+    model.add_argument("--critic", default=None, choices=["conv", "linear"],
+                       help="--arch rule only: the critic's architecture, chosen separately from the actor's (default conv)")
     model.add_argument(
         "--metabolic",
         # nargs="?" with a const so both spellings work: "--metabolic" as a
@@ -183,8 +160,19 @@ def build_parser() -> argparse.ArgumentParser:
     loop = parser.add_argument_group("loop")
     loop.add_argument("--steps", type=int, default=None, help="total world steps")
     loop.add_argument("--segment-steps", type=int, default=None)
-    loop.add_argument("--warmup-steps", type=int, default=None)
     loop.add_argument("--seed", type=int, default=None)
+    loop.add_argument("--bank-worlds", type=int, default=None,
+                      help="worlds in the rule-based run that fills the start bank (default 8)")
+    loop.add_argument("--bank-steps", type=int, default=None,
+                      help="length of that run in world steps (default 3000)")
+    loop.add_argument("--bank-warmup", type=int, default=None,
+                      help="steps of it before the first state is banked (default 1000)")
+    loop.add_argument("--bank-stride", type=int, default=None,
+                      help="steps between banked states (default 100)")
+    loop.add_argument("--bank-cache", default=None, metavar="DIR",
+                      help="directory banks are cached in, keyed by everything that shapes them (default outputs/bank)")
+    loop.add_argument("--no-bank-cache", action="store_true", default=False,
+                      help="build the bank in this process and write nothing")
     loop.add_argument(
         "--extinction-patience",
         type=int,
@@ -194,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Reset a world whose controlled population has been extinct for this many "
             "consecutive segments (default 3, 0 disables). The simulation has no "
             "immigration, so an extinct world never repopulates; it is replaced by a "
-            "fresh one warmed up under the rules, and the run continues. Resets are "
+            "state drawn from the start bank, and the run continues. Resets are "
             "logged as world_resets."
         ),
     )
@@ -212,13 +200,9 @@ def build_parser() -> argparse.ArgumentParser:
     hyper.add_argument("--gae-lambda", type=float, default=None)
     hyper.add_argument("--target-kl", type=float, default=None)
     hyper.add_argument("--pretrain-epochs", type=int, default=None,
-                       help="ceiling on epochs of offline distillation of the rule-based policy before RL; "
-                            "stops early once held-out agreement plateaus (0 = off). The learner's "
-                            "initialisation, and the bar its results are read against.")
-    hyper.add_argument("--pretrain-grids", type=int, default=None,
-                       help="labelled observation grids sampled from a rule-based run for that distillation (default 128)")
-    hyper.add_argument("--pretrain-stride", type=int, default=None,
-                       help="world steps between sampled grids (default 25)")
+                       help="ceiling on epochs of offline distillation of the rule-based policy before RL, "
+                            "on the bank's labelled grids; stops early once held-out agreement plateaus "
+                            "(0 = off). The learner's initialisation, saved as pretrained.pt either way.")
     hyper.add_argument("--imitation-temperature", type=float, default=None,
                        help="pretraining: softmax temperature over the rule's scores for soft distillation; "
                             "0 = hard argmax (default 0.01)")
@@ -239,11 +223,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     evaluation.add_argument("--eval-interval", type=int, default=None)
-    evaluation.add_argument("--eval-steps", type=int, default=None)
-    evaluation.add_argument("--eval-seeds", type=int, default=None)
-    evaluation.add_argument("--eval-warmup-steps", type=int, default=None,
-                            help="world steps each evaluation world runs under the rules before scoring, "
-                                 "so the score is of the settled ecology rather than the startup transient (default 0)")
+    evaluation.add_argument("--eval-steps", type=int, default=None,
+                            help="the metric's window T in world steps (default 4000, longer than a collapse)")
+    evaluation.add_argument("--eval-seeds", type=int, default=None,
+                            help="evaluation worlds, a fixed seeded subset of the bank (default 8)")
     evaluation.add_argument(
         "--eval-deterministic", action="store_true", default=None,
         help="argmax at evaluation instead of sampling",
@@ -301,29 +284,27 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "config_path": args.sim_config,
         "size": args.size,
         "entity": args.entity,
-        "survival_reward": args.survival_reward,
-        "reproduction_reward": args.reproduction_reward,
-        "foraging_reward": args.foraging_reward,
-        "offspring_credit": args.offspring_credit,
+        "reward_radius": args.reward_radius,
         "worlds": args.worlds,
         "normalize_values": args.normalize_values,
         "arch": args.arch,
         "metabolic": args.metabolic,
         "memory_size": args.memory_size,
         "pretrain_epochs": args.pretrain_epochs,
-        "pretrain_grids": args.pretrain_grids,
-        "pretrain_stride": args.pretrain_stride,
+        "bank_worlds": args.bank_worlds,
+        "bank_steps": args.bank_steps,
+        "bank_warmup": args.bank_warmup,
+        "bank_stride": args.bank_stride,
+        "bank_cache": args.bank_cache,
         "eval_pin_metabolic": args.pin_metabolic,
         "device": args.device,
         "seed": args.seed,
         "extinction_patience": args.extinction_patience,
         "total_world_steps": args.steps,
         "segment_steps": args.segment_steps,
-        "warmup_steps": args.warmup_steps,
         "eval_interval": args.eval_interval,
         "eval_steps": args.eval_steps,
         "eval_seeds": args.eval_seeds,
-        "eval_warmup_steps": args.eval_warmup_steps,
         "eval_deterministic": args.eval_deterministic,
         "film_interval": args.film_interval,
         "film_steps": args.film_steps,
@@ -352,42 +333,58 @@ def apply_overrides(args: argparse.Namespace) -> Dict[str, Any]:
         "recurrent_window": args.recurrent_window,
     }
 
-    if args.reward_mode is not None:
-        trainer.update(REWARD_MODES[args.reward_mode])
     trainer.update({k: v for k, v in trainer_flags.items() if v is not None})
     ppo.update({k: v for k, v in ppo_flags.items() if v is not None})
+    if args.no_bank_cache:
+        trainer["bank_cache"] = None
 
-    # A checkpoint fixes the network's shape. When loading one and the flag was
-    # not given, take the head configuration from the checkpoint rather than
-    # refusing to load it.
+    # A checkpoint fixes the network's shape. When loading one, whatever was
+    # not given on the command line is taken from the checkpoint rather than
+    # from the YAML's defaults, so scoring a checkpoint needs no flags beyond
+    # the path: the architecture and its kwargs, the entity, the memory width
+    # and the metabolic head.
     checkpoint = args.eval_only or args.resume
-    if checkpoint and args.metabolic is None:
+    if checkpoint:
         import torch
 
         from tensor_beasts.rl.trainer import checkpoint_metabolic
 
         payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-        trainer["metabolic"] = checkpoint_metabolic(payload)
+        saved = payload.get("trainer_config") or {}
+        if args.metabolic is None:
+            trainer["metabolic"] = checkpoint_metabolic(payload)
+        if args.arch is None and "arch" in saved:
+            trainer["arch"] = saved["arch"]
+            trainer["arch_kwargs"] = dict(saved.get("arch_kwargs") or {})
+        if args.entity is None and "entity" in saved:
+            trainer["entity"] = saved["entity"]
+        if args.memory_size is None:
+            trainer["memory_size"] = int(payload.get("memory_size", saved.get("memory_size", 0)))
 
+    arch_kwargs = dict(trainer.get("arch_kwargs") or {})
     if args.hidden_channels is not None:
-        arch_kwargs = dict(trainer.get("arch_kwargs") or {})
         if trainer["arch"] == "linear":
             raise SystemExit("--hidden-channels does not apply to the linear architecture")
         arch_kwargs["hidden_channels"] = args.hidden_channels
-        trainer["arch_kwargs"] = arch_kwargs
+    if args.critic is not None:
+        if trainer["arch"] != "rule":
+            raise SystemExit("--critic applies to --arch rule only")
+        arch_kwargs["critic"] = args.critic
+    trainer["arch_kwargs"] = arch_kwargs
 
     return {"trainer": trainer, "ppo": ppo}
 
 
 def print_evaluation(summary: Dict[str, float]) -> None:
-    """The ecology, with smoothed biomass as the headline.
+    """The metric, with the rules as a row beside it rather than a denominator.
 
-    The rule-based policy is reported as one row among the numbers rather than
-    as a denominator: its constants were chosen by hand, so a ratio against it
-    describes those constants as much as the ecology.
+    M_T is the mean stock of biomass carried by living individuals over the
+    evaluation window, from the same banked starts for both policies. The
+    rules' constants were chosen by hand, so a ratio against them would
+    describe those constants as much as the ecology.
     """
     header = (
-        f"{'policy':12} {'biomass':>11} {'mean bio':>11} {'pop':>9} "
+        f"{'policy':12} {'M_T':>11} {'extinct':>8} {'pop':>9} "
         f"{'repro':>8} {'lifespan':>9} {'survived':>12}"
     )
     print(header)
@@ -395,14 +392,19 @@ def print_evaluation(summary: Dict[str, float]) -> None:
     for policy, label in (("learned", "learned"), ("rule_based", "rule-based")):
         print(
             f"{label:12} "
-            f"{summary[f'{policy}_biomass_ema']:11.0f} "
             f"{summary[f'{policy}_mean_biomass']:11.0f} "
+            f"{summary[f'{policy}_extinct_fraction']:8.2f} "
             f"{summary[f'{policy}_mean_population']:9.1f} "
             f"{summary[f'{policy}_reproductions']:8.0f} "
             f"{summary[f'{policy}_episode_length']:9.1f} "
             f"{summary[f'{policy}_survived_agent_steps']:12.0f}"
         )
-    print(f"\nscore (smoothed biomass) = {summary['score']:.0f}")
+    print(f"\nscore (M_T, mean stock over the window) = {summary['score']:.0f}")
+    if "score_spread" in summary:
+        print(
+            f"spread across starts: {summary['score_spread']:.0f} "
+            f"({summary['score_min']:.0f} to {summary['score_max']:.0f})"
+        )
 
 
 def check_device_headroom(trainer, estimate: int) -> None:
@@ -481,11 +483,13 @@ def main(argv: Optional[list] = None) -> int:
         trainer.load_checkpoint(Path(args.eval_only), load_optimizer=False)
         summary = trainer.evaluate()
         print(
-            f"\n{args.eval_only}: {trainer_config.eval_seeds} seeds x "
+            f"\n{args.eval_only}: {trainer_config.eval_seeds} banked starts x "
             f"{trainer_config.eval_steps} world steps"
             f"{' (argmax)' if trainer_config.eval_deterministic else ' (sampled)'}\n"
         )
         print_evaluation(summary)
+        if hasattr(trainer.network, "describe"):
+            print(f"values: {trainer.network.describe()}")
         if trainer_config.film_interval:
             film = trainer.record_film()
             summary.update({k: v for k, v in film.items() if isinstance(v, (int, float, str))})
@@ -514,12 +518,6 @@ def main(argv: Optional[list] = None) -> int:
     if "score" in record:
         print()
         print_evaluation(record)
-        if "score_spread" in record:
-            print(
-                f"spread across {trainer_config.eval_seeds} evaluation seeds: "
-                f"{record['score_spread']:.0f} "
-                f"({record['score_min']:.0f} to {record['score_max']:.0f})"
-            )
     return 0
 
 

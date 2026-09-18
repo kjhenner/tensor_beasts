@@ -14,12 +14,13 @@ the resident llama-server, so a second agent is refused by the trainer's
 memory guard and the sweep records its cells as crashed. That happened on
 the night of 16 September and cost three cells (`overnight2-makeup-*`).
 
-Everything optimises `eval/score_mean_late`: the predator population's total
-carried biomass, exponentially smoothed over the run and averaged over the
-later evaluations. Absolute, in the units the ecology conserves. The rule-based
-policy is still scored and reported alongside, as context and not as a
-denominator. Every trial also reports `score_spread`, `score_min` and
-`score_max` across its evaluation seeds.
+Everything optimises `eval/score_mean_late`: the controlled species' stock
+of biomass, averaged over the evaluation window from banked starts and over
+the later evaluations. Absolute, in the units the ecology conserves. The
+rule-based policy is still scored and reported alongside, as context and not
+as a denominator. Every trial also reports `eval/score_spread`,
+`eval/score_min` and `eval/score_max` across its evaluation starts, and
+`eval/learned_extinct_fraction`.
 
 | Config | Trials | Question | Status |
 |---|---|---|---|
@@ -32,9 +33,14 @@ denominator. Every trial also reports `score_spread`, `score_min` and
 | `done-stageA-worlds` | 2 | Does training across four worlds help? | Done: yes |
 | `done-stage0-release` | 2 | Can the imitation anchor be released? | Done: yes |
 
-The `done-*` configs are records of what ran. Two of their flags,
-`--imitation-target` and `--imitation-floor`, no longer exist: the anchor is
-now a fade over `--imitation-release-updates` RL updates (planning/09).
+Every config here is a record of what ran, and none of them runs unchanged
+now. The anchor flags (`--imitation-*`, `--pretrain-updates`) went with the
+anchor (planning/10), and `--reward-mode`, `--warmup-steps` and
+`--eval-warmup-steps` went with planning/11: the reward is the stock change
+with one knob, `--reward-radius`, and every world starts from the bank
+(`--bank-*`), which replaced both warm-ups. `eval/score_mean_late` is now the
+metric M_T, the mean stock over `--eval-steps` world steps from banked
+starts, and `eval/rule_based_biomass_ema` reads as `eval/rule_based_mean_biomass`.
 
 ## What the first metabolic sweep settled
 
