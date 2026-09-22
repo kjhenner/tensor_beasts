@@ -174,3 +174,19 @@ def test_the_key_follows_the_config_text_and_the_source(tmp_path, monkeypatch):
     config.write_text("a: 1\n")
     monkeypatch.setattr(bank_module, "source_digest", lambda: "edited")
     assert bank_module.bank_key(parts) != key, "and so is the source of the simulation"
+
+
+def test_a_loaded_world_keeps_the_landscape_it_was_banked_on():
+    """The water is rewritten every step from a base pattern and a phase map
+    drawn when the World was made. Both must travel with the state, or a
+    loaded world runs on the host environment's landscape from its second
+    step on, which is what happened before they were TensorDict leaves."""
+    bank = build_bank(make_env, worlds=1, steps=8, warmup=5, stride=1, seed=11)
+    torch.manual_seed(99)  # a host whose own landscape differs from the banked one
+    env = make_env(1)
+    water = ("simpleterrain", "simple_water")
+    assert not torch.equal(env.world.td.get(water), bank.states[0][water])
+    bank.load(env, [0])
+    env.rule_based_step()
+    assert torch.equal(env.world.td.get(water), bank.states[1][water]), \
+        "after one step the water is the banked run's next water, not the host's"

@@ -304,3 +304,57 @@ The reward, step 4, radius 0 against a few cells on the rule actor:
 Radius 0 should reproduce the linear control's near-immobility on the rule
 actor; the pooled arm either lands where the search did or the reward is
 wrong.
+
+## The diagnostic, and the bug it exposed (21 September)
+
+The linear network was pretrained for 200 epochs and its start scored on
+eight banked starts over T = 4,000, sampled and at the argmax, in two
+eval-only processes on the 3090:
+
+| | Sampled | Argmax | Rules |
+|---|---|---|---|
+| M_T | 80,514 | 86,540 | 85,063 |
+| Extinct fraction | 0.00 | 0.00 | 0.00 |
+| Population | 746.6 | 797.8 | 786.8 |
+| Reproductions | 37,615 | 39,795 | 37,661 |
+| Lifespan | 78.3 | 79.3 | 82.5 |
+| Spread across starts (std) | 19,220 | 19,076 | |
+
+**The reading.** The argmax policy scores at the rules' level and the
+sampled one five percent under it. Neither is anywhere near the collapse
+the drifted linear policy showed (half the biomass, a quarter fewer
+individuals), so a shared policy's stochasticity is not load-bearing and
+the sharpness β is not a first-order parameter for persistence. The three
+percent of changed decisions in the drifted policy are the harm. The
+five-percent gap between sampled and argmax is inside the metric's noise:
+with a standard deviation of 19,000 over eight starts the standard error of
+the mean is about 6,800, eight percent of the score. The search accepts any
+strictly higher score with no margin, and so will follow that noise unless
+it evaluates on more starts or demands a margin of a couple of standard
+errors.
+
+**The bug.** The pretraining process's own evaluation scored the rules at
+97,211 on the same eight starts. That gap was traced by reading, not by
+running: the water feature drew its base pattern and phase map at
+initialisation and kept them as plain attributes on the feature object,
+and rewrote the water leaf from them every step. The bank restores
+TensorDict leaves only, so a loaded world kept its banked water for one
+step and then ran on the host environment's own landscape, drawn from
+whatever the global random stream held when that environment was created.
+Every bank load was affected: training starts, extinction resets, the film
+world and evaluation. Within one process the learned and rule-based
+policies shared a landscape, so the paired comparisons above hold; across
+processes nothing was comparable, and no population was ever evaluated on
+the terrain it grew on. The old warm-ups grew each population in place, so
+nothing measured before the bank was affected.
+
+The fix stores both as leaves under the terrain's prefix, drawn in the same
+order, so the values are unchanged: the golden hash over the previous keys
+is identical, and the baseline moves only by the two added keys. A test in
+`tests/rl/test_bank.py` loads a state into a world with a different
+landscape and checks that after one step the water is the banked run's
+next water. The rule score at a small size is now the same whether the
+training environment holds two worlds or eight, and the same from the
+training loop and from `--eval-only`. The numbers in the table were scored
+on a landscape that was not the bank's and should be re-scored, though the
+reading does not depend on that.
