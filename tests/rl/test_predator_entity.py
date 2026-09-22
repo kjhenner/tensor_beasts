@@ -57,8 +57,7 @@ def test_the_learner_observes_the_prey_field_before_the_prey_moves():
     where the prey was.
 
     Measured at 512 this halves hunting success, 1.46% of steps against 2.95%,
-    and drives the population extinct where the rules recover. See
-    planning/04-reinforcement-learning.md.
+    and drives the population extinct where the rules recover.
 
     ``step`` keeps this behaviour, because existing checkpoints and the viewer
     were trained and run against it. ``step_with_policy`` is the fixed path and
@@ -116,7 +115,7 @@ def test_step_with_policy_decides_from_the_same_world_the_entity_sees():
 
     At 512 this is the difference between eating on 1.46% of steps and 2.81%,
     against the baseline's 2.95%, and between going extinct by step 400 and
-    tracking the baseline. See planning/04-reinforcement-learning.md.
+    tracking the baseline.
     """
     import torch
 

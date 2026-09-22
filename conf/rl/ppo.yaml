@@ -16,11 +16,10 @@ trainer:
 
   # The reward is each individual's own stock change, eat minus burn minus
   # the reserve lost at death, pooled over a box of this radius around its
-  # new cell. 0 is the individual reward. There are no other reward terms;
-  # planning/11 records why.
+  # new cell. 0 is the individual reward. There are no other reward terms.
   reward_radius: 0
 
-  # rule: the rule with free values (planning/11). linear: a 1x1 convolution.
+  # rule: the rule with free values. linear: a 1x1 convolution.
   # conv, residual, dilated: convolutional trunks. For rule, arch_kwargs may
   # name the critic: {critic: conv, hidden_channels: 64, depth: 3} or
   # {critic: linear}.
@@ -30,7 +29,7 @@ trainer:
   # max_metabolic_rate, still capped by carried biomass. false leaves the rate
   # to the rules and learns movement only.
   metabolic: false
-  # Learned memory channels per individual. 0 disables. See planning/04.
+  # Learned memory channels per individual. 0 disables.
   memory_size: 0
   # Offline distillation of the rule-based policy before RL, on the bank's
   # labelled grids, for at most pretrain_epochs, stopping once held-out
@@ -99,9 +98,9 @@ ppo:
   target_kl: null
   # Pretraining only: soft distillation toward softmax(rule scores /
   # temperature). 0 = hard argmax. Nothing pulls the policy toward the rules
-  # once RL starts; the record of why is planning/10. The rule actor's
+  # once RL starts; planning/HISTORY.md records why. The rule actor's
   # sharpness starts at 1 / temperature.
   imitation_temperature: 0.01
   # Backpropagate memory writes through this many steps of the individual's
-  # own trajectory. 0 = off (stage 1). See planning/04.
+  # own trajectory. 0 = off.
   recurrent_window: 0

@@ -3,7 +3,7 @@
 
 The experiment this exists for is one sentence: can a learned policy beat the
 simulation's own rule-based policy at sustaining its species? The score is
-the metric of planning/11: the stock of biomass carried by the species' living
+the metric: the stock of biomass carried by the species' living
 individuals, averaged over a window of eval-steps world steps from a bank of
 warmed start states, with the extinction fraction, the rules' score on the
 same starts and the spread over starts beside it. Training and the comparison
@@ -72,7 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Radius of the box each individual's stock reward is pooled over, "
             "around its new cell. 0 (default) pays each individual its own stock "
             "change; a few cells pays it for its neighbourhood's, which is what "
-            "registers the collapse the controls in planning/11 saw. The one "
+            "registers a collapse that leaves each individual's own outcomes unchanged. The one "
             "reward knob; there are no coefficients."
         ),
     )
@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Channels of learned memory each individual writes at one step and "
             "reads at the next, carried with it when it moves and copied into its "
             "offspring. 0 disables (default). Stage 1: the read is learnable, the "
-            "write is a fixed function of the observation; see planning/04."
+            "write is a fixed function of the observation."
         ),
     )
     model.add_argument("--device", default=None, help="auto, cpu, mps or cuda")

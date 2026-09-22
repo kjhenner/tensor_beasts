@@ -12,8 +12,7 @@ How an individual is followed
 
 The simulation has no usable identity. Its ``id`` feature draws from a uint8
 random field, so 256 values are shared among thousands of animals and
-collisions are constant; ``planning/04-reinforcement-learning.md`` records why
-it could not be used. What does work is the same successor map that the
+collisions are constant. What does work is the same successor map that the
 learner's advantage estimation already relies on: ``TransitionInfo.successor``
 gives, for every cell that acted, the flat index of the cell that same
 individual occupies once the step is over. Chaining successors follows one

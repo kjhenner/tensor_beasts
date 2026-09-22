@@ -70,7 +70,7 @@ class TrainerConfig:
             reward is pooled over, around its new cell. 0 pays each individual
             its own stock change. See tensor_beasts/rl/multiagent.py.
         arch: Network name: one of ``tensor_beasts.rl.networks.ARCHITECTURES``
-            or ``"rule"``, the rule with free values (planning/11).
+            or ``"rule"``, the rule with free values.
         arch_kwargs: Extra constructor arguments for that network. For
             ``"rule"``: ``critic`` ("conv" or "linear"), ``hidden_channels``
             and ``depth`` of the conv critic.
@@ -96,7 +96,7 @@ class TrainerConfig:
         eval_interval: World steps between evaluations. 0 disables.
         eval_steps: The metric's window T: world steps each evaluation world
             runs for, scored as the mean stock over the window. At least
-            4,000, longer than a collapse (planning/11).
+            4,000, longer than a collapse.
         eval_seeds: Number of evaluation worlds, a fixed seeded subset of the
             bank. The learned and rule-based policies are scored from the
             same states.
@@ -123,7 +123,6 @@ class TrainerConfig:
     # Measured at 512 on a 3090: four worlds cost 5% more wall-clock than one,
     # 13.1 ms a step against 12.5, because the simulation is launch-bound. The
     # card saturates between four and eight. 1 reproduces every earlier run.
-    # See planning/07-batched-worlds.md.
     worlds: int = 1
 
     arch: str = "conv"
@@ -164,7 +163,7 @@ class TrainerConfig:
     # steps after the first thousand: 160 states from the settled cycles, out
     # of phase with each other. A fresh world spends its first several
     # hundred steps in a startup transient, and everything scored inside it
-    # was a score of the transient (planning/10).
+    # was a score of the transient.
     bank_worlds: int = 8
     bank_steps: int = 3_000
     bank_warmup: int = 1_000
@@ -358,7 +357,7 @@ class EpisodeTracker:
         # (worlds, H * W) rather than a flat (H * W,): successor indices are per
         # world, so a single flat buffer would scatter one world's survivors
         # into another world's cells. At one world this is (1, H * W) and the
-        # arithmetic is unchanged. See planning/07-batched-worlds.md.
+        # arithmetic is unchanged.
         self.cells = size[-2] * size[-1]
         self.worlds = 1
         for extent in size[:-2]:
@@ -420,7 +419,7 @@ class EpisodeTracker:
 class EvalResult:
     """What one scored run of a policy produced.
 
-    The headline is ``mean_biomass``: the metric M_T of planning/11, the
+    The headline is ``mean_biomass``: the metric, the
     stock of biomass carried by the controlled species' living individuals,
     averaged over the T steps of the window, from a banked start. Extinction
     is absorbing, so a world that dies contributes zeros for the rest of the
@@ -1323,7 +1322,7 @@ class Trainer:
         population: twice, a learned predator took its population from 486 to
         zero within 200 steps at 512. And it turned out to matter more than
         that. Frozen after pretraining, the policy carried 1.8 times the
-        rules' biomass on the settled ecology (planning/10), so what
+        rules' biomass on the settled ecology (planning/HISTORY.md), so what
         pretraining reaches is the bar every RL result is read against.
 
         The training world is untouched, and the global RNG is restored, so

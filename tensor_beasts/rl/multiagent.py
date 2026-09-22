@@ -52,10 +52,10 @@ the offspring carries the other half, so nothing is lost and nothing is paid.
 Summed over every individual this is exactly the species' stock change,
 ``B_{t+1} - B_t`` with ``B`` the biomass carried by living individuals, except
 for what newborns eat in their birth step, which nobody is paid for. That
-makes the reward the evaluation metric's own increment (planning/11).
+makes the reward the evaluation metric's own increment.
 
 An individual's own outcomes are blind to what its decisions do through the
-shared prey field: the controls in planning/11 found a collapse under which
+shared prey field: a control run (planning/STATE.md) found a collapse under which
 every per-individual quantity was unchanged while the world sustained a
 quarter fewer individuals. So the reward is pooled spatially: with ``rho_t``
 the field holding each individual's ``r`` at its successor cell,
@@ -169,7 +169,7 @@ def gather_per_world(field: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
     would read world 0's cells for every world, and produce entirely plausible
     numbers while doing it. Reshaping to ``(worlds, H * W)`` and gathering along
     the last axis keeps each world to itself, and at one world is exactly the
-    old arithmetic. See planning/07-batched-worlds.md.
+    old arithmetic.
     """
     grid = index.shape
     cells = grid[-2] * grid[-1]
@@ -356,8 +356,8 @@ class MultiAgentWorldEnv:
     def stock_per_world(self) -> torch.Tensor:
         """Biomass carried by living individuals in each world, ``(worlds,)``.
 
-        The quantity the metric integrates and the reward increments
-        (planning/11). Living individuals only: a cell below the survival
+        The quantity the metric integrates and the reward increments.
+        Living individuals only: a cell below the survival
         threshold still holds the reserve of an animal that died this step,
         and that reserve becomes carrion at the top of the next one.
         """

@@ -59,7 +59,7 @@ class TransitionInfo:
     # cell the individual acted from, since metabolism runs before movement.
     # With ``eaten`` and the reserve lost at death this is what makes the sum
     # of every individual's stock change equal the species' stock change
-    # exactly (planning/11).
+    # exactly.
     burned: Optional[torch.Tensor] = None
 
 
@@ -709,7 +709,7 @@ class Animal(Entity):
         # reshaping to (..., H * W). The alternative, offsetting world b by
         # b * H * W, would make a bare `.reshape(-1)` in a consumer appear to
         # work while silently gathering across worlds, which is the failure
-        # this whole refactor has to avoid. See planning/07-batched-worlds.md.
+        # the batch dimension has to avoid.
         flat = torch.arange(height * width, device=did_move.device).reshape(height, width)
         flat = flat.expand_as(did_move)
 

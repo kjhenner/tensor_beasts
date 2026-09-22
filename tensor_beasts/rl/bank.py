@@ -3,7 +3,7 @@
 Every world a run touches starts from a state drawn from here: the training
 worlds, the world that replaces an extinct one, and the evaluation worlds,
 which use a fixed seeded subset so every evaluation in a run, and every run
-with the same seed, scores on the same starts (planning/11). It replaced two
+with the same seed, scores on the same starts. It replaced two
 warm-ups, one before training and one before each evaluation, that each ran
 a fresh world through its startup transient under the rules.
 

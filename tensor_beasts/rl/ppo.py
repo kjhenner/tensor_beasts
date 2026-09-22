@@ -39,7 +39,7 @@ gradient so the log shows how far the policy has drifted from the rules
 (``conformance``, ``argmax_agreement``, ``metabolic_error``), and nothing
 pulls it back. An anchor that kept pulling during RL, in three versions,
 was what kept every predator run alive and what hid that RL was degrading
-the policy (planning/10). It is gone rather than tuned.
+the policy (planning/HISTORY.md). It was removed rather than tuned.
 
 Slotting in other algorithms
 ----------------------------
@@ -82,7 +82,7 @@ MAX_LOG_STD = 1.0
 # throttle units, so a tenth of the basal-to-max range costs half a nat.
 # Fixed rather than the policy's own learned std: under the learned std the
 # pull on the mean scaled as 1/std^2 while the same term shrank the std, so
-# the fit strengthened itself until the throttle was pinned (planning/09).
+# the fit strengthened itself until the throttle was pinned.
 # The policy's std is exploration only, set by its initialisation and PPO.
 METABOLIC_ANCHOR_STD = 0.1
 
@@ -305,7 +305,7 @@ class PPOConfig:
     imitation_temperature: float = 0.01
     # Recurrent training of the memory write. Zero is off: the memory read at
     # each step is the stored one and the write is a fixed function of the
-    # observation (stage 1 of planning/04). Positive N replays each segment in
+    # observation. Positive N replays each segment in
     # time order, feeds every step's recomputed write to the next step's read
     # through the successor map, and backpropagates through windows of N
     # steps, detaching at window boundaries. That is what lets the gradient at

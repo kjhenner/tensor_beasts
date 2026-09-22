@@ -10,7 +10,7 @@ ecology's chaos held out of the way.
 Worlds in a batch must not influence each other. The dangerous failures here are
 silent: a shared random field correlates their plant germination, a flat index
 without a per-world stride reads a neighbour's cells, and a global reduction
-couples their totals. None of those crash. See planning/07-batched-worlds.md.
+couples their totals. None of those crash.
 """
 
 import pytest

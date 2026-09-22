@@ -13,7 +13,7 @@ scores settings directly with the metric M_T, the mean stock over a window of
 with the extinction fraction and the spread over starts beside it, and the
 rules' own score once. No reward, no critic, no credit assignment. The result
 is the best rule the ecology admits, and the standard every reward-based
-learner on the same actor has to reach (planning/11, step 3).
+learner on the same actor has to reach.
 
 The search is a coordinate sweep. Each round visits every value in turn,
 tries it at each of --factors times its current setting (a value at zero is

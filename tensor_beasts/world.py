@@ -23,7 +23,7 @@ class World:
         # batch to ``size`` would silently make those sample the batch axis.
         # An empty ``batch_shape`` must stay bit-identical to an unbatched
         # world; that is what the golden hashes check and what makes this
-        # reviewable. See planning/07-batched-worlds.md.
+        # reviewable.
         batch = getattr(config, "batch", None)
         self.batch_shape: Tuple[int, ...] = () if not batch else (int(batch),)
         self.config = config

@@ -94,7 +94,7 @@ class ActorCritic(nn.Module):
             # where the rule sits near 0.08, and the clamp to [0, 1] turned
             # that noise into a bias: samples averaged 0.22, a quarter more
             # burn than the rule, for as long as it took the std to anneal,
-            # which was the whole run (planning/09).
+            # which was the whole run.
             self.metabolic_log_std = nn.Parameter(torch.full((1,), -3.0))
         else:
             self.metabolic_head = None
@@ -237,7 +237,7 @@ class RulePolicy(nn.Module):
     navigation weights. The one thing the rule does that this does not is
     clamp the combined score at zero before the argmax, which only matters
     where every direction is repulsive; the linear control never had it
-    either. See planning/11.
+    either.
 
     The critic is separate, and its depth is chosen separately: ``critic`` is
     ``"conv"`` (a small trunk with a value head) or ``"linear"`` (a 1x1
