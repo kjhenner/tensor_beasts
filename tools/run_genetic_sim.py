@@ -3,7 +3,7 @@
 Run simulation with genetic algorithm and monitor evolution.
 
 Usage:
-    source venv/bin/activate && python run_genetic_sim.py
+    source venv/bin/activate && python tools/run_genetic_sim.py
 """
 
 import torch

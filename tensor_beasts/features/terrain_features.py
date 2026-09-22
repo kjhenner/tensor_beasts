@@ -295,8 +295,14 @@ class SimpleWater(Feature):
         except (IndexError, RuntimeError):
             # Fallback to uniform random if perlin fails
             self.data = torch.rand(self.shape, dtype=self.dtype)
-        # Store base pattern for oscillator modulation
-        self._base_pattern = self.data.clone()
+        # The base pattern and the phase map below are state: the update
+        # rewrites the water from them every step. They are kept in the
+        # TensorDict, under this feature's prefix, so that a snapshot of the
+        # world carries them and a restored world runs on the landscape its
+        # populations grew on. As plain attributes they were drawn afresh in
+        # every World, and a state loaded from tensor_beasts/rl/bank.py kept
+        # its banked water for exactly one step.
+        self.td.set(self._base_key, self.data.clone())
 
         # Generate phase map at larger scale for oscillator correlation
         # Phase map determines how each location responds to the oscillator
@@ -315,7 +321,15 @@ class SimpleWater(Feature):
         ).reshape(*leading, *spatial)
         # Normalize to [-1, 1] so mid values = 0 (no effect)
         phase_min, phase_max = phase_noise.min(), phase_noise.max()
-        self._phase_map = ((phase_noise - phase_min) / (phase_max - phase_min + 1e-8) - 0.5) * 2.0
+        self.td.set(self._phase_key, ((phase_noise - phase_min) / (phase_max - phase_min + 1e-8) - 0.5) * 2.0)
+
+    @property
+    def _base_key(self):
+        return (*self.key[:-1], f"{self.name}_base")
+
+    @property
+    def _phase_key(self):
+        return (*self.key[:-1], f"{self.name}_phase")
 
     def update(self, step: int):
         if self.config.oscillator_key is not None:
@@ -324,8 +338,8 @@ class SimpleWater(Feature):
             # - Where phase_map > 0: positive correlation with oscillator
             # - Where phase_map < 0: negative correlation (anti-phase)
             # - Where phase_map = 0: no effect
-            modulation = oscillator_value * self.config.oscillator_amplitude * self._phase_map
-            self.data = torch.clamp(self._base_pattern + modulation, 0.0, 1.0)
+            modulation = oscillator_value * self.config.oscillator_amplitude * self.td.get(self._phase_key)
+            self.data = torch.clamp(self.td.get(self._base_key) + modulation, 0.0, 1.0)
 
 
 @register_feature

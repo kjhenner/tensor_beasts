@@ -1,4 +1,4 @@
-# PPO on per-individual herbivore survival.
+# PPO on per-individual stock, for the individuals of one species.
 #
 # The two blocks map one-to-one onto TrainerConfig and PPOConfig in
 # tensor_beasts/rl/, so anything you can set in code you can set here, and
@@ -14,46 +14,68 @@ trainer:
   size: 256
   entity: Herbivore
 
-  # survival_reward 1.0 makes the summed reward literally "herbivore-steps
-  # survived", which is the number evaluate_policy.py reports for the baseline.
-  survival_reward: 1.0
-  reproduction_reward: 10.0
-  # Dense biomass-change reward. Off by default: it is reward shaping. Turn it
-  # on if the policy will not move, which is the failure mode survival reward
-  # produces, since herbivores survive about 99.4% of steps and the per-step
-  # reward is therefore nearly constant.
-  foraging_reward: 0.0
+  # The reward is each individual's own stock change, eat minus burn minus
+  # the reserve lost at death, pooled over a box of this radius around its
+  # new cell. 0 is the individual reward. There are no other reward terms.
+  reward_radius: 0
 
+  # rule: the rule with free values. linear: a 1x1 convolution.
+  # conv, residual, dilated: convolutional trunks. For rule, arch_kwargs may
+  # name the critic: {critic: conv, hidden_channels: 64, depth: 3} or
+  # {critic: linear}.
   arch: conv
   arch_kwargs: {}
-  # Second policy head over this many discrete metabolic levels, from basal to
-  # max_metabolic_rate, still capped by carried biomass. 0 leaves the rate to
-  # the rules and learns movement only; existing runs reproduce with 0.
-  metabolic_levels: 0
-  # Learned memory channels per individual. 0 disables. See planning/04.
+  # Second policy head emitting a continuous metabolic rate, from basal to
+  # max_metabolic_rate, still capped by carried biomass. false leaves the rate
+  # to the rules and learns movement only.
+  metabolic: false
+  # Learned memory channels per individual. 0 disables.
   memory_size: 0
-  # Supervised updates on rule-based rollouts before RL. 0 = off.
-  pretrain_updates: 0
+  # Offline distillation of the rule-based policy before RL, on the bank's
+  # labelled grids, for at most pretrain_epochs, stopping once held-out
+  # agreement plateaus. 0 epochs = off. The policy RL starts from is saved as
+  # pretrained.pt either way.
+  pretrain_epochs: 0
   device: auto
   seed: 0
 
   total_world_steps: 20000
   segment_steps: 64
-  # Train on a settled ecology, not on the transient right after seeding.
-  warmup_steps: 100
 
-  eval_interval: 2000
-  eval_steps: 500
-  eval_seeds: 2
+  # The start bank: a rule-based run of bank_worlds worlds for bank_steps
+  # steps, banked every bank_stride steps after bank_warmup. Every world the
+  # run touches (training, extinction resets, evaluation, films) starts from
+  # a bank state, in the settled cycles and out of phase with each other.
+  bank_worlds: 8
+  bank_steps: 3000
+  bank_warmup: 1000
+  bank_stride: 100
+  # Banks are written here under a key made from everything that shapes
+  # them and read back by the next process that asks for the same one;
+  # null builds the bank every time. About 7.4 GB per bank at 512.
+  bank_cache: outputs/bank
+
+  # The metric: mean stock over eval_steps world steps from eval_seeds banked
+  # starts, a fixed seeded subset of the bank. T = 4000 is longer than a
+  # collapse. Two evaluations per run plus the final at this budget.
+  eval_interval: 10000
+  eval_steps: 4000
+  eval_seeds: 8
   eval_deterministic: false
 
   checkpoint_interval: 2000
   output_dir: outputs/rl
   log_name: train_log.jsonl
 
-  wandb: false
+  # On by default: a run that is not in W&B is a run nobody looks at again.
+  # --quiet does not turn this off; set wandb: false here, or pass --wandb-host
+  # null, if a run should stay local. The JSONL log is written either way.
+  wandb: true
   wandb_project: tensor-beasts-rl
-  # Local W&B server. Null defers to WANDB_BASE_URL, then wandb.ai.
+  # Defaults to whatever base_url the user's own ~/.config/wandb/settings gives,
+  # because that is the host their API key is stored against; this value is the
+  # fallback when they have no setting. Null defers to WANDB_BASE_URL, then
+  # wandb.ai. See resolve_wandb_host in tensor_beasts/rl/trainer.py.
   wandb_host: http://localhost:8080
 
 ppo:
@@ -62,7 +84,9 @@ ppo:
   # Null disables value clipping. Worth trying here because returns drift with
   # the population, which is exactly the case value clipping is meant for.
   value_clip_range: null
-  entropy_coef: 0.01
+  # Zero: thousands of sampled individuals explore already, and entropy rose on
+  # its own in every run that collapsed.
+  entropy_coef: 0.0
   value_coef: 0.5
   epochs: 4
   minibatch_steps: 16
@@ -72,22 +96,11 @@ ppo:
   normalize_advantage: true
   # Null disables the early stop. Set to ~0.02 if updates start diverging.
   target_kl: null
-  # Imitation of the rule-based policy, cross-faded out as agreement rises.
-  # Weight each update = imitation_coef * max(0, 1 - conformance / target).
-  # Off by default so the plain-PPO result stays reproducible; 1.0 is a
-  # sensible strength when turning it on.
-  imitation_coef: 0.0
-  # Below the ~0.9 practical ceiling; the rule's decisions are knife-edge.
-  imitation_target_conformance: 0.8
-  # Soft distillation toward softmax(rule scores / temperature). 0 = hard argmax.
+  # Pretraining only: soft distillation toward softmax(rule scores /
+  # temperature). 0 = hard argmax. Nothing pulls the policy toward the rules
+  # once RL starts; planning/HISTORY.md records why. The rule actor's
+  # sharpness starts at 1 / temperature.
   imitation_temperature: 0.01
-  # Minimum anchor weight as a fraction of imitation_coef. 0 releases fully at
-  # the target, which was seen to oscillate; 0.2 keeps a permanent light pull.
-  imitation_floor: 0.0
-  # Metabolic anchor weight relative to the direction anchor. The rule rests
-  # 90% of the time, so 1.0 teaches the throttle to stay cold; 0 lets the
-  # reward decide it.
-  metabolic_imitation_scale: 1.0
   # Backpropagate memory writes through this many steps of the individual's
-  # own trajectory. 0 = off (stage 1). See planning/04.
+  # own trajectory. 0 = off.
   recurrent_window: 0

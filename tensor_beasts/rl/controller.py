@@ -15,7 +15,9 @@ import torch
 from tensordict import TensorDict
 
 from tensor_beasts.rl.multiagent import MultiAgentWorldEnv
-from tensor_beasts.rl.networks import build_network
+from tensor_beasts.rl.networks import RULE_ARCHITECTURE, build_network
+from tensor_beasts.rl.ppo import MAX_LOG_STD, MIN_LOG_STD
+from tensor_beasts.rl.trainer import checkpoint_metabolic
 from tensor_beasts.world import World
 
 NUM_ACTIONS = 5
@@ -54,15 +56,14 @@ class LearnedController:
         self.entity_name = entity_name or trainer_config.get("entity", "Herbivore")
         self.deterministic = deterministic
 
-        # Recorded explicitly by newer checkpoints; older ones predate the
-        # metabolic head and mean zero.
-        self.num_metabolic_levels = int(
-            payload.get("num_metabolic_levels", trainer_config.get("metabolic_levels", 0))
-        )
+        # Recorded explicitly by newer checkpoints. Ones from the discrete
+        # design recorded a level count instead, where any positive count meant
+        # the head was there; older ones predate the head entirely.
+        self.metabolic = checkpoint_metabolic(payload)
         self.memory_size = int(payload.get("memory_size", trainer_config.get("memory_size", 0)))
 
         self.env = MultiAgentWorldEnv.attach(
-            world, self.entity_name, num_metabolic_levels=self.num_metabolic_levels
+            world, self.entity_name, metabolic=self.metabolic
         )
         self.device = device or self.env.device
 
@@ -81,12 +82,21 @@ class LearnedController:
                 "apply_checkpoint_requirements(config, checkpoint) before building the world."
             )
 
+        arch_kwargs = dict(trainer_config.get("arch_kwargs") or {})
+        if trainer_config["arch"] == RULE_ARCHITECTURE:
+            # The rule with free values is rebuilt from this world's own
+            # rules, exactly as the trainer built it; the checkpoint then
+            # overwrites the values with what training reached.
+            arch_kwargs.setdefault("rule", self.env.rule_spec())
+            arch_kwargs.setdefault(
+                "temperature", (payload.get("ppo_config") or {}).get("imitation_temperature", 0.01)
+            )
         self.network = build_network(
             trainer_config["arch"],
             self.env.observation_channels,
-            num_metabolic_levels=self.num_metabolic_levels,
+            metabolic=self.metabolic,
             memory_size=self.memory_size,
-            **(trainer_config.get("arch_kwargs") or {}),
+            **arch_kwargs,
         )
         self.network.load_state_dict(payload["network"])
         self.network.to(self.device).eval()
@@ -101,24 +111,40 @@ class LearnedController:
         flat = torch.log_softmax(logits, dim=1).permute(0, 2, 3, 1).reshape(-1, logits.shape[1])
         return torch.multinomial(flat.exp(), 1).reshape(*self.env.size)
 
+    def _sample_metabolic(self, mean: torch.Tensor, log_std: torch.Tensor) -> torch.Tensor:
+        """One continuous throttle per cell in [0, 1], as ``(H, W)``.
+
+        The metabolic policy is a Gaussian around the head's mean, so
+        deterministic mode is the mean itself and sampling draws around it. The
+        draw is clamped to the unit interval before the environment maps it
+        onto [basal, max].
+        """
+        mean = mean.squeeze(0)
+        if self.deterministic:
+            return mean
+        std = log_std.clamp(MIN_LOG_STD, MAX_LOG_STD).exp()
+        return (mean + std * torch.randn_like(mean)).clamp(0.0, 1.0)
+
     @torch.no_grad()
     def action(self) -> TensorDict:
         """The action for every cell, as the TensorDict World.update expects.
 
         Direction-only checkpoints map the entity to a bare (H, W) direction
         tensor. Two-lever checkpoints map it to a nested TensorDict with
-        ``direction`` and ``metabolic_rate``; the level chosen by the network
-        is turned into a rate here, and the simulation applies the biomass cap.
+        ``direction`` and ``metabolic_rate``; the unit the network emits is
+        turned into a rate here, and the simulation applies the biomass cap.
         """
         observation = self.env._build_observation().to(self.device)
         out = self.network.forward_all(observation.unsqueeze(0))
         direction = self._sample(out["logits"]).to(self.env.device)
-        if "metabolic_logits" not in out and "memory" not in out:
+        if "metabolic_mean" not in out and "memory" not in out:
             return TensorDict({self.entity_name: direction}, batch_size=[])
         fields = {"direction": direction}
-        if "metabolic_logits" in out:
-            level = self._sample(out["metabolic_logits"]).to(self.env.device)
-            fields["metabolic_rate"] = self.env.metabolic_level_to_rate(level)
+        if "metabolic_mean" in out:
+            unit = self._sample_metabolic(
+                out["metabolic_mean"], out["metabolic_log_std"]
+            ).to(self.env.device)
+            fields["metabolic_rate"] = self.env.metabolic_unit_to_rate(unit)
         if "memory" in out:
             # Network layout (K, H, W) to the feature's (H, W, K).
             fields["memory"] = out["memory"].squeeze(0).permute(1, 2, 0).to(self.env.device)
@@ -128,8 +154,8 @@ class LearnedController:
         steps = f", trained for {self.trained_world_steps} world steps" if self.trained_world_steps else ""
         mode = "deterministic" if self.deterministic else "sampled"
         levers = (
-            f", movement + {self.num_metabolic_levels}-level metabolism"
-            if self.num_metabolic_levels
+            ", movement + continuous metabolism"
+            if self.metabolic
             else ", movement only"
         )
         return f"learned {self.arch} policy on {self.entity_name} ({mode}{levers}{steps})"

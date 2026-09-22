@@ -18,20 +18,28 @@ entropy bonus, which is defined at every cell whether or not anybody is standing
 there; masking it is what keeps the entropy number interpretable as
 "entropy of a real agent's action distribution".
 
-Two levers, one anchor
-----------------------
+Two levers
+----------
 
 When the network carries a metabolic head (see
 :class:`~tensor_beasts.rl.networks.ActorCritic`) the per-cell policy is the
-product of two independent categoricals, one over directions and one over
-metabolic levels. The joint log-probability is the sum of the two, the entropy
-bonus is the sum of the two entropies, and the clipped ratio is taken over the
+product of a categorical over directions and a Gaussian over a continuous
+throttle. The joint log-probability is the sum of the two, the entropy bonus
+is the sum of the two entropies, and the clipped ratio is taken over the
 joint, so ``rollout.log_prob`` must hold the joint log-prob at collection
-time. The imitation anchor gains a second term, hard cross-entropy of the
-metabolic level toward the rule's own level on the same observation, weighted
-by the *same* cross-fade weight as the direction term: there is one anchor
-with two levers, and it releases as a whole when direction conformance
-reaches the target.
+time.
+
+The rule-based policy and the learner
+-------------------------------------
+
+The rules are the learner's initialisation and its yardstick, nothing more.
+:func:`rule_distillation` and :func:`throttle_distillation` are the losses
+pretraining fits both heads with; during RL the same functions run without
+gradient so the log shows how far the policy has drifted from the rules
+(``conformance``, ``argmax_agreement``, ``metabolic_error``), and nothing
+pulls it back. An anchor that kept pulling during RL, in three versions,
+was what kept every predator run alive and what hid that RL was degrading
+the policy (planning/HISTORY.md). It was removed rather than tuned.
 
 Slotting in other algorithms
 ----------------------------
@@ -50,6 +58,8 @@ here are deliberately free functions for the same reason.
 from dataclasses import dataclass, asdict, field
 from typing import Dict, Iterator, Optional, Protocol, Tuple, List
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -59,6 +69,22 @@ from tensor_beasts.rl.recurrent import propagate_memory
 from tensor_beasts.rl.rollout import Rollout
 
 NUM_ACTIONS = 5
+
+
+# Bounds on the metabolic head's learned log standard deviation. The floor stops
+# the Gaussian collapsing to a delta, which makes its log-probability explode
+# and the PPO ratio with it; the ceiling stops it widening to cover the whole
+# range, which is the other degenerate solution and costs nothing to rule out.
+MIN_LOG_STD = -4.0
+MAX_LOG_STD = 1.0
+
+# The scale pretraining judges throttle disagreement at, in normalised
+# throttle units, so a tenth of the basal-to-max range costs half a nat.
+# Fixed rather than the policy's own learned std: under the learned std the
+# pull on the mean scaled as 1/std^2 while the same term shrank the std, so
+# the fit strengthened itself until the throttle was pinned.
+# The policy's std is exploration only, set by its initialisation and PPO.
+METABOLIC_ANCHOR_STD = 0.1
 
 
 def iter_minibatches_with_value(
@@ -79,27 +105,43 @@ def iter_minibatches_with_value(
 
     Yields:
         (observation, acted, action, log_prob, value, advantage, ret, rule_action,
-        rule_scores, metabolic_action, rule_metabolic_level), the last four None
+        rule_scores, metabolic_unit, rule_metabolic_unit), the last four None
         if the rollout does not carry them.
     """
     if shuffle:
         order = torch.randperm(rollout.steps, generator=generator)
     else:
         order = torch.arange(rollout.steps)
+
+    # With several worlds a stored field is (T, B, ..., H, W), and a convolution
+    # wants one batch axis. Time and worlds are folded together here, at the
+    # minibatch boundary, so every loss downstream keeps seeing exactly the
+    # (batch, ..., H, W) it always did. Folding is correct because the losses
+    # are per cell and masked by `acted`: a timestep and a world are both just
+    # independent samples once the advantages have been computed, and those were
+    # computed per world, before this.
+    worlds = rollout.observation.shape[1] if rollout.observation.dim() == 5 else 0
+
+    def fold(tensor):
+        """(T, B, ..., H, W) -> (T * B, ..., H, W); unchanged without worlds."""
+        if tensor is None or not worlds:
+            return tensor
+        return tensor.reshape(tensor.shape[0] * worlds, *tensor.shape[2:])
+
     for start in range(0, rollout.steps, minibatch_steps):
         index = order[start : start + minibatch_steps]
         yield (
-            rollout.observation[index].float(),
-            rollout.acted[index],
-            rollout.action[index],
-            rollout.log_prob[index],
-            rollout.value[index],
-            rollout.advantage[index],
-            rollout.ret[index],
-            rollout.rule_action[index] if rollout.rule_action is not None else None,
-            rollout.rule_scores[index].float() if rollout.rule_scores is not None else None,
-            rollout.metabolic_action[index] if rollout.metabolic_action is not None else None,
-            rollout.rule_metabolic_level[index] if rollout.rule_metabolic_level is not None else None,
+            fold(rollout.observation[index].float()),
+            fold(rollout.acted[index]),
+            fold(rollout.action[index]),
+            fold(rollout.log_prob[index]),
+            fold(rollout.value[index]),
+            fold(rollout.advantage[index]),
+            fold(rollout.ret[index]),
+            fold(rollout.rule_action[index]) if rollout.rule_action is not None else None,
+            fold(rollout.rule_scores[index].float()) if rollout.rule_scores is not None else None,
+            fold(rollout.metabolic_unit[index]) if rollout.metabolic_unit is not None else None,
+            fold(rollout.rule_metabolic_unit[index]) if rollout.rule_metabolic_unit is not None else None,
         )
 
 
@@ -114,6 +156,97 @@ def masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     if count == 0:
         return (values * 0.0).sum()
     return (values * mask).sum() / count
+
+
+def rule_distillation(
+    log_probs: torch.Tensor,
+    rule_action: torch.Tensor,
+    rule_scores: Optional[torch.Tensor],
+    temperature: float,
+    mask: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """How far a direction policy is from the rule, as a loss and two readings.
+
+    Args:
+        log_probs: (B, 5, H, W) log-probabilities over directions.
+        rule_action: (B, H, W) the rule's direction.
+        rule_scores: (B, 5, H, W) the rule's per-direction scores, or None.
+        temperature: Softmax temperature over the scores. Positive with
+            scores present is soft distillation toward softmax(scores / T);
+            otherwise hard cross-entropy to the rule's direction.
+        mask: (B, H, W) acting cells.
+
+    Returns:
+        (loss, conformance, argmax_agreement), each a scalar tensor. Loss is
+        the masked mean KL (soft) or negative log-likelihood (hard).
+        Conformance is progress from a uniform policy (0) to an exact match
+        (1) under the soft target, or argmax agreement under the hard one.
+
+    Soft, because the rule's decisions are knife-edge: its absolute score
+    gaps have a median near 0.01, so hard argmax imitation spends its
+    gradient on coin-flips. At a temperature of that order a typical
+    decision is a mild preference, a clear one is sharp, and a near-tie is
+    near-uniform and costs nothing to disagree with.
+    """
+    with torch.no_grad():
+        argmax_agreement = masked_mean((log_probs.argmax(dim=1) == rule_action).float(), mask)
+    if rule_scores is not None and temperature > 0.0:
+        target = F.softmax(rule_scores / temperature, dim=1)
+        kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
+        loss = masked_mean(kl, mask)
+        with torch.no_grad():
+            # Progress from a uniform policy toward an exact match. The raw
+            # Bhattacharyya overlap with a diffuse target is already about
+            # 0.77 for a uniform policy, so it is rescaled: uniform sits at 0,
+            # an exact match at 1, comparable with argmax agreement.
+            overlap = (target * log_probs.exp()).sqrt().sum(dim=1)
+            uniform_overlap = (target / NUM_ACTIONS).sqrt().sum(dim=1)
+            progress = (overlap - uniform_overlap) / (1.0 - uniform_overlap).clamp(min=1e-6)
+            conformance = masked_mean(progress.clamp(-1.0, 1.0), mask)
+    else:
+        rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
+        loss = -masked_mean(rule_log_prob, mask)
+        conformance = argmax_agreement
+    return loss, conformance, argmax_agreement
+
+
+def throttle_distillation(
+    mean: torch.Tensor, rule_unit: torch.Tensor, mask: torch.Tensor
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """How far a throttle head's mean is from the rule's throttle.
+
+    Returns (loss, error): the masked Gaussian negative log-likelihood of the
+    rule's unit around the mean at METABOLIC_ANCHOR_STD, up to a constant,
+    and the masked mean absolute distance in normalised units, so 0.1 is a
+    tenth of the range from basal to maximum. Fits the mean only; the
+    policy's std is exploration and is not the rule's to set.
+    """
+    rule_unit = rule_unit.float()
+    loss = masked_mean(0.5 * ((rule_unit - mean) / METABOLIC_ANCHOR_STD) ** 2, mask)
+    with torch.no_grad():
+        error = masked_mean((mean - rule_unit).abs(), mask)
+    return loss, error
+
+
+def masked_std(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Population standard deviation of ``values`` over the True entries of ``mask``."""
+    mean = masked_mean(values, mask)
+    return masked_mean((values - mean) ** 2, mask).clamp(min=0.0).sqrt()
+
+
+def masked_corr(a: torch.Tensor, b: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Pearson correlation of ``a`` and ``b`` over the True entries of ``mask``.
+
+    Zero when either side is constant, which is the honest reading: a flat
+    throttle is not correlated with anything.
+    """
+    a_std = masked_std(a, mask)
+    b_std = masked_std(b, mask)
+    if float(a_std) <= 1e-6 or float(b_std) <= 1e-6:
+        return torch.zeros((), device=a.device)
+    a_centred = a - masked_mean(a, mask)
+    b_centred = b - masked_mean(b, mask)
+    return masked_mean(a_centred * b_centred, mask) / (a_std * b_std)
 
 
 def explained_variance(value: torch.Tensor, ret: torch.Tensor, mask: torch.Tensor) -> float:
@@ -162,48 +295,17 @@ class PPOConfig:
     learning_rate: float = 3e-4
     clip_range: float = 0.2
     value_clip_range: Optional[float] = None
-    entropy_coef: float = 0.01
-    # Imitation of the simulation's rule-based policy, cross-faded out as the
-    # learned policy comes to agree with it. The weight applied each update is
-    #     imitation_coef * max(0, 1 - conformance / imitation_target_conformance)
-    # where conformance is the fraction of acting cells whose most likely
-    # action matched the rule-based action during the previous update. So it
-    # starts at full strength, anchoring a random policy to the baseline, and
-    # reaches zero once agreement hits the target, leaving only the real
-    # rewards. Zero disables it.
-    imitation_coef: float = 0.0
-    # 0.8, not higher: the rule's decisions are knife-edge (see multiagent.py),
-    # so roughly 0.9 argmax agreement is the practical ceiling and a target
-    # above it would keep the anchor engaged forever.
-    imitation_target_conformance: float = 0.8
-    # Soft distillation. When the rollout carries the rule's per-action scores,
-    # the imitation target is softmax(scores / temperature) and the loss is the
-    # KL from that target to the policy. The temperature sets what counts as a
-    # confident rule decision: the rule's absolute score gaps have a median
-    # near 0.01, so 0.01 makes a typical decision a mild preference and a
-    # clear one sharp, while a near-tie becomes near-uniform and costs nothing
-    # to disagree with. That is the point: the rules are knife-edge, and hard
-    # argmax imitation spends its gradient on coin-flips. Set to 0 to fall back
-    # to hard imitation of the argmax.
+    # Zero: thousands of sampled individuals explore already, and in the runs
+    # that collapsed the direction entropy rose on its own as the policy
+    # diffused. A bonus for that is a bonus for the failure.
+    entropy_coef: float = 0.0
+    # Pretraining only: the temperature of the soft target softmax(rule scores
+    # / T) the direction head is distilled toward. See rule_distillation for
+    # why it is soft and why 0.01. Zero falls back to hard imitation.
     imitation_temperature: float = 0.01
-    # Floor on the cross-fade, as a fraction of imitation_coef. With a floor of
-    # zero the anchor releases fully once conformance reaches the target, and
-    # the first soft-distillation run showed what happens next: the RL gradient
-    # immediately pulls the policy away from the rules, conformance falls, the
-    # anchor re-engages, and the two oscillate for the rest of training. A
-    # small permanent pull keeps the policy in the neighbourhood the rules
-    # already know is good while leaving RL free to improve on it. Zero
-    # preserves the earlier behaviour exactly.
-    imitation_floor: float = 0.0
-    # Multiplier on the metabolic-level imitation term relative to the
-    # direction term. The rule burns at basal 90% of the time and never uses
-    # the top levels, so anchoring the throttle to it teaches "rest", and the
-    # first two-lever run collapsed onto the coldest level. Zero anchors
-    # direction only and lets the reward decide the throttle.
-    metabolic_imitation_scale: float = 1.0
     # Recurrent training of the memory write. Zero is off: the memory read at
     # each step is the stored one and the write is a fixed function of the
-    # observation (stage 1 of planning/04). Positive N replays each segment in
+    # observation. Positive N replays each segment in
     # time order, feeds every step's recomputed write to the next step's read
     # through the successor map, and backpropagates through windows of N
     # steps, detaching at window boundaries. That is what lets the gradient at
@@ -271,17 +373,6 @@ class PPO:
         # global clipping leaves the policy with a thousandth of its intended
         # step. See tensor_beasts/rl/normalization.py for the measurement.
         self.value_normalizer = value_normalizer or ValueNormalizer(enabled=False)
-        # Agreement with the rule-based policy measured during the last update.
-        # Starts at zero so the first update imitates at full strength.
-        self.conformance = 0.0
-
-    def imitation_weight(self) -> float:
-        """Current cross-fade weight on the imitation term. See PPOConfig."""
-        config = self.config
-        if config.imitation_coef <= 0.0:
-            return 0.0
-        remaining = 1.0 - self.conformance / max(config.imitation_target_conformance, 1e-8)
-        return config.imitation_coef * max(config.imitation_floor, remaining)
 
     # ------------------------------------------------------------------
     # Evaluation of a batch of grids under the current policy
@@ -291,14 +382,14 @@ class PPO:
         network: nn.Module,
         observation: torch.Tensor,
         action: torch.Tensor,
-        metabolic_action: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
     ):
         """One forward pass, every per-cell quantity the losses need.
 
         Returns a dict with ``logits``, ``log_probs`` (direction, (B,5,H,W)),
         ``log_prob`` (joint, (B,H,W)), ``entropy`` (joint), ``value``, and when
-        the network has a metabolic head also ``metabolic_logits``,
-        ``metabolic_log_probs`` and ``metabolic_log_prob``.
+        the network has a metabolic head also ``metabolic_mean``,
+        ``metabolic_log_std``, ``metabolic_log_prob`` and ``metabolic_entropy``.
 
         Written by hand rather than through ``torch.distributions.Categorical``
         because that would need a permute to put the action axis last on a
@@ -324,20 +415,32 @@ class PPO:
             "value": value,
         }
         if has_head:
-            if metabolic_action is None:
+            if metabolic_unit is None:
                 raise ValueError(
                     "The network has a metabolic head but the rollout carries no "
-                    "metabolic_action. Build the environment with the same "
-                    "num_metabolic_levels as the network."
+                    "metabolic_unit. Build the environment with metabolic=True, "
+                    "as the network was."
                 )
-            metabolic_log_probs = F.log_softmax(out["metabolic_logits"], dim=1)
-            metabolic_log_prob = metabolic_log_probs.gather(1, metabolic_action.unsqueeze(1)).squeeze(1)
-            metabolic_entropy = -(metabolic_log_probs.exp() * metabolic_log_probs).sum(dim=1)
+            # The throttle is a continuous rate, so its policy is a Gaussian
+            # over the normalised unit rather than a categorical over bins.
+            # Discrete levels were the earlier design and were a modelling
+            # error: they threw away resolution and made "how many bins" a
+            # parameter that says nothing about the ecology.
+            mean = out["metabolic_mean"]
+            log_std = out["metabolic_log_std"].clamp(MIN_LOG_STD, MAX_LOG_STD)
+            std = log_std.exp()
+            metabolic_log_prob = (
+                -0.5 * ((metabolic_unit - mean) / std) ** 2
+                - log_std
+                - 0.5 * math.log(2 * math.pi)
+            )
+            # Differential entropy of a Gaussian, one scalar broadcast per cell.
+            metabolic_entropy = (log_std + 0.5 * math.log(2 * math.pi * math.e)).expand_as(mean)
             # Independent heads: the joint log-prob and entropy are sums.
             result["log_prob"] = log_prob + metabolic_log_prob
             result["entropy"] = entropy + metabolic_entropy
-            result["metabolic_logits"] = out["metabolic_logits"]
-            result["metabolic_log_probs"] = metabolic_log_probs
+            result["metabolic_mean"] = mean
+            result["metabolic_log_std"] = log_std
             result["metabolic_log_prob"] = metabolic_log_prob
             result["metabolic_entropy"] = metabolic_entropy
         if "memory" in out:
@@ -349,14 +452,14 @@ class PPO:
         network: nn.Module,
         observation: torch.Tensor,
         action: torch.Tensor,
-        metabolic_action: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
     ):
         """Return (log_prob, entropy, value), each grid shaped ``(B, H, W)``.
 
         With a metabolic head on the network, ``log_prob`` and ``entropy`` are
         the joint quantities over both levers; see the module docstring.
         """
-        heads = PPO._heads(network, observation, action, metabolic_action)
+        heads = PPO._heads(network, observation, action, metabolic_unit)
         return heads["log_prob"], heads["entropy"], heads["value"]
 
     # ------------------------------------------------------------------
@@ -374,13 +477,13 @@ class PPO:
         ret: torch.Tensor,
         rule_action: Optional[torch.Tensor] = None,
         rule_scores: Optional[torch.Tensor] = None,
-        metabolic_action: Optional[torch.Tensor] = None,
-        rule_metabolic_level: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
+        rule_metabolic_unit: Optional[torch.Tensor] = None,
         heads: Optional[dict] = None,
     ):
         config = self.config
         if heads is None:
-            heads = self._heads(network, observation, action, metabolic_action)
+            heads = self._heads(network, observation, action, metabolic_unit)
         logits, value = heads["logits"], heads["value"]
         log_probs = heads["log_probs"]
         # Joint over both levers when the network has a metabolic head; the
@@ -415,68 +518,48 @@ class PPO:
         entropy_mean = masked_mean(entropy, mask)
         loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy_mean
 
-        # Imitation of the rule-based policy: cross-entropy to its action,
-        # weighted by the cross-fade. Conformance is measured whether or not
-        # the term is active, so the log shows how far from the rules the
-        # policy has drifted even when nothing is pulling it back.
-        imitation_loss = torch.zeros((), device=loss.device)
+        # Distance from the rules, logged and nothing else: how far the
+        # policy has drifted from its initialisation, and whether its throttle
+        # runs hot or cold and varies across the field at all.
         conformance = float("nan")
         argmax_agreement = float("nan")
-        soft = rule_scores is not None and config.imitation_temperature > 0.0
-        if soft:
-            # Distill toward the rule's scoring regime rather than its outcome.
-            target = F.softmax(rule_scores / config.imitation_temperature, dim=1)
-            kl = (target * (torch.log(target + 1e-12) - log_probs)).sum(dim=1)
-            imitation_loss = masked_mean(kl, mask)
-            with torch.no_grad():
-                # Conformance to the scoring regime, as progress from a uniform
-                # policy toward an exact match. The raw Bhattacharyya coefficient
-                # between the policy and the target is 1 at an exact match, but
-                # because the targets are themselves diffuse a uniform policy
-                # already scores about 0.77 against them; a cross-fade keyed on
-                # the raw value let go of the anchor within two updates while
-                # argmax agreement was still at chance. Rescaling so that the
-                # uniform policy sits at 0 and an exact match at 1 makes the
-                # target comparable to the hard-imitation scale it replaced.
-                overlap = (target * log_probs.exp()).sqrt().sum(dim=1)
-                uniform_overlap = (target / NUM_ACTIONS).sqrt().sum(dim=1)
-                progress = (overlap - uniform_overlap) / (1.0 - uniform_overlap).clamp(min=1e-6)
-                conformance = float(masked_mean(progress.clamp(-1.0, 1.0), mask))
-        elif rule_action is not None:
-            rule_log_prob = log_probs.gather(1, rule_action.unsqueeze(1)).squeeze(1)
-            imitation_loss = -masked_mean(rule_log_prob, mask)
-            with torch.no_grad():
-                conformance = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
         if rule_action is not None:
             with torch.no_grad():
-                argmax_agreement = float(masked_mean((logits.argmax(dim=1) == rule_action).float(), mask))
-        # The metabolic lever's anchor: hard cross-entropy toward the level the
-        # rule would have chosen, under the same cross-fade weight. Agreement
-        # and the mean chosen level are logged whether or not the term is
-        # active, so the log shows whether the learner runs hot or cold.
-        metabolic_imitation_loss = torch.zeros((), device=loss.device)
-        metabolic_agreement = float("nan")
-        metabolic_level_mean = float("nan")
+                _, conformance_t, agreement_t = rule_distillation(
+                    log_probs, rule_action, rule_scores, config.imitation_temperature, mask
+                )
+                conformance = float(conformance_t)
+                argmax_agreement = float(agreement_t)
+        metabolic_error = float("nan")
+        metabolic_unit_mean = float("nan")
+        metabolic_head_mean = float("nan")
+        metabolic_head_spread = float("nan")
+        metabolic_rule_mean = float("nan")
+        metabolic_rule_corr = float("nan")
         metabolic_entropy = float("nan")
-        if "metabolic_log_probs" in heads:
-            metabolic_log_probs = heads["metabolic_log_probs"]
+        metabolic_std = float("nan")
+        if "metabolic_mean" in heads:
+            mean = heads["metabolic_mean"]
             with torch.no_grad():
-                metabolic_level_mean = float(masked_mean(metabolic_action.float(), mask))
+                metabolic_unit_mean = float(masked_mean(metabolic_unit.float(), mask))
                 metabolic_entropy = float(masked_mean(heads["metabolic_entropy"], mask))
-            if rule_metabolic_level is not None:
-                rule_level_log_prob = metabolic_log_probs.gather(
-                    1, rule_metabolic_level.unsqueeze(1)
-                ).squeeze(1)
-                metabolic_imitation_loss = -masked_mean(rule_level_log_prob, mask)
-                with torch.no_grad():
-                    metabolic_agreement = float(
-                        masked_mean((metabolic_log_probs.argmax(dim=1) == rule_metabolic_level).float(), mask)
-                    )
-
-        if soft or rule_action is not None:
-            weight = self.imitation_weight()
-            if weight > 0.0:
-                loss = loss + weight * (imitation_loss + config.metabolic_imitation_scale * metabolic_imitation_loss)
+                metabolic_std = float(heads["metabolic_log_std"].exp())
+                # The head's mean, as distinct from the sampled unit: with a
+                # wide Gaussian clamped to [0, 1] the two differ by a lot, and
+                # it was the sampled one that ran hot in the first sweep.
+                metabolic_head_mean = float(masked_mean(mean, mask))
+                # How much the throttle varies across acting individuals. A
+                # throttle that has learned nothing is flat; one that moves
+                # with the hunt has spread.
+                metabolic_head_spread = float(masked_std(mean, mask))
+                if rule_metabolic_unit is not None:
+                    rule_unit = rule_metabolic_unit.float()
+                    _, error_t = throttle_distillation(mean, rule_unit, mask)
+                    metabolic_error = float(error_t)
+                    metabolic_rule_mean = float(masked_mean(rule_unit, mask))
+                    # Does the policy sprint where the rule would? Zero says
+                    # the policy's variation, if any, is not the rule's.
+                    metabolic_rule_corr = float(masked_corr(mean, rule_unit, mask))
 
         with torch.no_grad():
             # Schulman's k3 estimator: low variance and always non-negative.
@@ -494,14 +577,20 @@ class PPO:
             "approx_kl": float(approx_kl),
             "clip_fraction": float(clip_fraction),
             "ratio_max_deviation": float(ratio_deviation),
-            "imitation_loss": float(imitation_loss.detach()),
-            "imitation_weight": self.imitation_weight(),
             "conformance": conformance,
             "argmax_agreement": argmax_agreement,
-            "metabolic_imitation_loss": float(metabolic_imitation_loss.detach()),
-            "metabolic_agreement": metabolic_agreement,
-            "metabolic_level_mean": metabolic_level_mean,
+            # Mean absolute error between the policy's throttle and the
+            # rule's, in normalised units, so 0.1 is a tenth of the range from
+            # basal to maximum. Replaces an argmax agreement, which a
+            # continuous action has no equivalent of.
+            "metabolic_error": metabolic_error,
+            "metabolic_unit_mean": metabolic_unit_mean,
+            "metabolic_head_mean": metabolic_head_mean,
+            "metabolic_head_spread": metabolic_head_spread,
+            "metabolic_rule_mean": metabolic_rule_mean,
+            "metabolic_rule_corr": metabolic_rule_corr,
             "metabolic_entropy": metabolic_entropy,
+            "metabolic_std": metabolic_std,
         }
         return loss, diagnostics
 
@@ -583,9 +672,6 @@ class PPO:
                     break
 
         result = accumulator.mean()
-        measured = result.get("conformance", float("nan"))
-        if measured == measured:  # not NaN: the rollout carried rule actions
-            self.conformance = measured
         result["explained_variance"] = explained_variance(
             rollout.value, rollout.ret, rollout.acted
         )
@@ -630,8 +716,8 @@ class PPO:
         accumulator = _Accumulator()
         # Gradient norms arrive once per window, not once per step. Feeding them
         # into the same accumulator added the window's whole weight to the
-        # shared denominator and halved every other diagnostic, including the
-        # conformance that drives the anchor's cross-fade. They get their own.
+        # shared denominator and halved every other diagnostic. They get
+        # their own.
         gradient_accumulator = _Accumulator()
         epochs_run = 0
         write_magnitudes: List[float] = []
@@ -654,7 +740,7 @@ class PPO:
 
                 acted = rollout.acted[t : t + 1]
                 agent_steps = float(acted.sum())
-                heads = self._heads(network, observation, rollout.action[t : t + 1], part(rollout.metabolic_action, t))
+                heads = self._heads(network, observation, rollout.action[t : t + 1], part(rollout.metabolic_unit, t))
                 write = heads["memory"][0]
                 write_magnitudes.append(float(write.detach().abs().mean()))
                 read_prev = propagate_memory(
@@ -667,7 +753,7 @@ class PPO:
                         rollout.log_prob[t : t + 1], rollout.value[t : t + 1],
                         rollout.advantage[t : t + 1], rollout.ret[t : t + 1],
                         part(rollout.rule_action, t), part(rollout.rule_scores, t),
-                        part(rollout.metabolic_action, t), part(rollout.rule_metabolic_level, t),
+                        part(rollout.metabolic_unit, t), part(rollout.rule_metabolic_unit, t),
                         heads=heads,
                     )
                     # Weight each step by its agent-steps so a window's loss is the
@@ -696,9 +782,6 @@ class PPO:
 
         result = accumulator.mean()
         result.update(gradient_accumulator.mean())
-        measured = result.get("conformance", float("nan"))
-        if measured == measured:
-            self.conformance = measured
         result["explained_variance"] = explained_variance(rollout.value, rollout.ret, rollout.acted)
         result["epochs_run"] = float(epochs_run)
         result["agent_steps"] = float(rollout.num_agent_steps)

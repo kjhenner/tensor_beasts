@@ -180,3 +180,58 @@ def test_last_value_is_recorded_for_boundary_bootstrapping():
     compute_gae(rollout, last_value, normalize=False)
     assert rollout.last_value is not None
     assert torch.equal(rollout.last_value, last_value)
+
+
+def test_batched_gae_keeps_each_world_to_itself():
+    """A batch of worlds must give exactly the per-world answers.
+
+    The advantage recursion gathers by successor index, and those indices are
+    per world: cell (h, w) is h * width + w in every world. Flattening a
+    (B, H, W) buffer with `.reshape(-1)` and indexing it with per-world indices
+    would quietly bootstrap world 2's individuals from world 0's values. The
+    numbers stay plausible, which is what makes it dangerous.
+
+    The worlds here differ in reward, value and successor map. Identical worlds
+    would pass a coupled implementation, so they would prove nothing.
+    """
+    import types
+
+    import torch
+
+    from tensor_beasts.rl.rollout import compute_gae
+
+    steps, height, width, worlds = 4, 3, 3, 2
+    generator = torch.Generator().manual_seed(0)
+    shape = (steps, worlds, height, width)
+
+    def rollout_like(**fields):
+        return types.SimpleNamespace(
+            steps=steps, advantage=None, ret=None, last_value=None, **fields
+        )
+
+    batched = rollout_like(
+        reward=torch.rand(shape, generator=generator),
+        value=torch.rand(shape, generator=generator),
+        done=torch.zeros(shape, dtype=torch.bool),
+        acted=torch.ones(shape, dtype=torch.bool),
+        successor=torch.randint(0, height * width, shape, generator=generator),
+    )
+    last_value = torch.rand(worlds, height, width, generator=torch.Generator().manual_seed(7))
+
+    together = compute_gae(batched, last_value, gamma=0.99, gae_lambda=0.95, normalize=False)
+    advantage = together.advantage.clone()
+
+    for index in range(worlds):
+        alone = rollout_like(
+            reward=batched.reward[:, index],
+            value=batched.value[:, index],
+            done=batched.done[:, index],
+            acted=batched.acted[:, index],
+            successor=batched.successor[:, index],
+        )
+        separately = compute_gae(
+            alone, last_value[index], gamma=0.99, gae_lambda=0.95, normalize=False
+        )
+        assert torch.allclose(advantage[:, index], separately.advantage, atol=1e-6), (
+            f"world {index} differs when batched, so the worlds are coupled"
+        )

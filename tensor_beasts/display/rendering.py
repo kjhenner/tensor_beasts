@@ -104,7 +104,6 @@ def cross_section(source, config: DictConfig):
     mask = (mask_ref >= base_height.unsqueeze(0).expand(screen_height, -1)).bool()
     level_color = background_color.unsqueeze(0).unsqueeze(0).repeat(screen_height, screen_width, 1)
     output = torch.where(mask.unsqueeze(-1), level_color, output)
-    print(output.shape)
 
     return output
 

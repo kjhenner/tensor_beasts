@@ -14,6 +14,18 @@ from tensor_beasts.snapshot import WorldSnapshot
 class World:
     def __init__(self, config: DictConfig):
         self.size: Tuple[int, ...] = tuple(config.size)
+        # Leading dimensions every feature carries in front of ``size``: ``()``
+        # for one world, ``(B,)`` for B independent ones simulated together.
+        #
+        # Deliberately separate from ``size`` rather than folded into it.
+        # ``size[0]`` and ``size[1]`` are read as height and width in a dozen
+        # places, from animal and plant seeding to the viewer, and prepending a
+        # batch to ``size`` would silently make those sample the batch axis.
+        # An empty ``batch_shape`` must stay bit-identical to an unbatched
+        # world; that is what the golden hashes check and what makes this
+        # reviewable.
+        batch = getattr(config, "batch", None)
+        self.batch_shape: Tuple[int, ...] = () if not batch else (int(batch),)
         self.config = config
         self.td = TensorDict({}, batch_size=[])
         self.entity_dict: Dict[str, Entity] = {}
@@ -45,11 +57,25 @@ class World:
                         self.shared_features_dict[shared_name] = feature_class(
                             self.td,
                             is_parent=True,
-                            shape_prefix=self.size,
+                            shape_prefix=self.feature_shape,
                             key_prefix=("shared_features",)
                         )
 
         self.step = 0
+
+    @property
+    def feature_shape(self) -> Tuple[int, ...]:
+        """The leading shape every grid feature is allocated at.
+
+        ``(H, W)`` for one world, ``(B, H, W)`` for a batched one. Features
+        append their own trailing dimensions to this.
+        """
+        return self.batch_shape + self.size
+
+    @property
+    def num_worlds(self) -> int:
+        """How many independent worlds this one holds. 1 when unbatched."""
+        return self.batch_shape[0] if self.batch_shape else 1
 
     def _init_shared_feature_registry(self, config: DictConfig):
         """
@@ -182,14 +208,40 @@ class World:
         self.initialize()
         self.step = 0
 
-    def update(self, action_td: Optional[TensorDict] = None):
-        """Update all entities in dependency order."""
-        self.td.set("random", torch.randint(0, 256, self.size, dtype=torch.uint8))
+    def update(self, action_td: Optional[TensorDict] = None, action_fns: Optional[dict] = None):
+        """Update all entities in dependency order.
+
+        Args:
+            action_td: External action overrides, keyed by entity name, decided
+                before this step began.
+            action_fns: External actions supplied lazily, keyed by entity name.
+                Each is called with no arguments immediately before that entity
+                updates, and must return what ``action_td`` would have held.
+
+        ``action_fns`` exists because *when* an action is decided changes what
+        it can be decided from. Entities update in dependency order, and each
+        builds its observation inside its own update, so a predator's own
+        policy sees the prey field after the herbivores have moved this step.
+        An action passed in ``action_td`` was necessarily chosen before any
+        entity moved, which handed a learned predator a prey field one move out
+        of date and halved its hunting success. A callback is evaluated at the
+        same point in the step the entity's own policy would run, so a learned
+        policy and the rule-based one it is compared against see the same world.
+        """
+        # One independent draw per world. Sized from feature_shape rather than
+        # size: a single (H, W) field broadcast across a batch would give every
+        # world the same randomness, correlating plant germination and the ids
+        # offspring draw from it. Worlds that share their noise are not
+        # independent worlds, which is the entire point of batching them.
+        self.td.set("random", torch.randint(0, 256, self.feature_shape, dtype=torch.uint8))
 
         # Update entities (includes emission for SharedFeatures)
         for entity_name in self._entity_order:
             entity = self.entity_dict[entity_name]
-            entity.update(action=action_td.get(entity_name, None) if action_td is not None else None)
+            action = action_td.get(entity_name, None) if action_td is not None else None
+            if action_fns is not None and entity_name in action_fns:
+                action = action_fns[entity_name]()
+            entity.update(action=action)
 
         # Run shared diffusion on parent SharedFeatures (batched across all slices)
         for shared_feature in self.shared_features_dict.values():

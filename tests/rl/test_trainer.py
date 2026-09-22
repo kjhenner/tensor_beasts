@@ -34,7 +34,7 @@ def make_config(tmp_path, **overrides) -> TrainerConfig:
         seed=0,
         total_world_steps=8,
         segment_steps=4,
-        warmup_steps=2,
+        bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
         eval_interval=0,
         eval_steps=3,
         eval_seeds=1,
@@ -179,10 +179,11 @@ def test_evaluation_scores_both_policies(tmp_path):
     trainer = make_trainer(tmp_path, eval_steps=5, eval_seeds=1)
     summary = trainer.evaluate()
     for policy in ("learned", "rule_based"):
-        assert summary[f"{policy}_total_reward"] >= 0
+        assert summary[f"{policy}_mean_biomass"] > 0
+        assert 0.0 <= summary[f"{policy}_extinct_fraction"] <= 1.0
         assert summary[f"{policy}_mean_population"] > 0
         assert summary[f"{policy}_survived_agent_steps"] >= 0
-    assert "learned_over_rule_based" in summary
+    assert summary["score"] == summary["learned_mean_biomass"]
 
 
 def test_evaluation_does_not_disturb_the_training_world(tmp_path):
@@ -262,53 +263,58 @@ def test_every_architecture_constructs_and_collects(tmp_path):
         assert diagnostics["loss"] == diagnostics["loss"], arch
 
 
-def test_headline_ratio_is_survival_not_shaped_reward():
-    """A sweep once reported a ratio of -0.72. That is impossible for a ratio of
-    survival counts and was the sign that the ratio was dividing shaped
-    rewards, which foraging_reward makes negative. What is optimized may change;
-    what is judged must not."""
-    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
-    from tensor_beasts.rl.ppo import PPOConfig
-
-    # Tiny world for speed; not a valid ecology, only a bookkeeping check.
-    config = TrainerConfig(
-        size=32, arch="linear", warmup_steps=5, total_world_steps=0,
-        eval_interval=0, eval_steps=8, eval_seeds=1, checkpoint_interval=0,
-        foraging_reward=5.0, survival_reward=0.0, reproduction_reward=0.0,
-        device="cpu",
-    )
-    trainer = Trainer(config, PPOConfig())
-    summary = trainer.evaluate()
-
-    baseline = summary["rule_based_survived_agent_steps"]
-    expected = summary["learned_survived_agent_steps"] / baseline
-    assert summary["learned_over_rule_based"] == pytest.approx(expected)
-    assert summary["learned_over_rule_based"] >= 0.0
-
-
-
-def test_pretraining_moves_the_policy_toward_the_rules_and_seeds_the_anchor(tmp_path):
+def test_pretraining_moves_the_policy_toward_the_rules(tmp_path):
     """A near-random start starved a learned predator population to zero within
-    200 steps. Pretraining on rule-based rollouts must raise agreement with the
-    rule well above chance and hand that agreement to the anchor's cross-fade.
-    Tiny world for speed; this checks plumbing, not the ecology."""
+    200 steps. Distilling the rules must raise held-out agreement well above
+    chance, fit the throttle, and leave the training world and the RNG stream
+    exactly where they were. Tiny world for speed; plumbing, not ecology."""
     from tensor_beasts.rl.ppo import PPOConfig
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     torch.manual_seed(0)
     trainer = Trainer(
-        TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic_levels=4,
-                      warmup_steps=5, segment_steps=16, pretrain_updates=6, total_world_steps=0,
-                      eval_interval=0, checkpoint_interval=0, device="cpu", output_dir=str(tmp_path)),
-        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3, imitation_coef=1.0),
+        TrainerConfig(size=96, arch="conv", arch_kwargs={"hidden_channels": 16}, metabolic=True,
+                      bank_worlds=2, bank_steps=53, bank_warmup=5, bank_stride=3, segment_steps=16, pretrain_epochs=60,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
+                      output_dir=str(tmp_path)),
+        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=3e-3),
     )
-    trainer.env.reset(seed=0)
-    trainer.warmup()
+    trainer.start_worlds()
+    step_before = trainer.env.world.step
+    rng_before = torch.get_rng_state()
     result = trainer.pretrain(verbose=False)
     assert result["argmax_agreement"] > 0.5, f"agreement after pretraining {result['argmax_agreement']:.3f}"
-    assert result["metabolic_agreement"] > 0.5
-    assert trainer.algorithm.conformance == pytest.approx(result["argmax_agreement"])
-    assert trainer.world_steps == 6 * 16
+    # The throttle is continuous, so it is scored by how far the policy's
+    # mean sits from the rule's own throttle. A fifth of the basal-to-max
+    # range is loose, and deliberately: this checks that the fit pulls.
+    assert result["metabolic_error"] < 0.2
+    assert result["pretrain_epoch"] <= 60
+    assert trainer.env.world.step == step_before, "the training world is not stepped by pretraining"
+    assert trainer.world_steps == 0
+    assert torch.equal(torch.get_rng_state(), rng_before)
+
+
+def test_pretraining_stops_once_agreement_plateaus(tmp_path):
+    """pretrain_epochs is a ceiling. A linear network starts as the rule and
+    has little left to fit, so it must stop well short of a generous ceiling
+    and hold the rule's agreement."""
+    from tensor_beasts.rl.distill import WINDOW
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    torch.manual_seed(0)
+    trainer = Trainer(
+        TrainerConfig(size=64, arch="linear", bank_worlds=2, bank_steps=37, bank_warmup=5, bank_stride=2, segment_steps=8, pretrain_epochs=200,
+                      total_world_steps=0, eval_interval=0, checkpoint_interval=0,
+                      device="cpu", output_dir=str(tmp_path)),
+        PPOConfig(epochs=2, minibatch_steps=4, learning_rate=1e-2),
+    )
+    trainer.start_worlds()
+    result = trainer.pretrain(verbose=False)
+    assert result.get("converged") == 1.0
+    assert result["pretrain_epoch"] < 200
+    assert result["pretrain_epoch"] >= 2 * WINDOW
+    assert result["argmax_agreement"] > 0.9, "the linear network starts as the rule and stays there"
 
 
 def test_pretraining_off_does_nothing(tmp_path):
@@ -316,7 +322,7 @@ def test_pretraining_off_does_nothing(tmp_path):
     from tensor_beasts.rl.trainer import Trainer, TrainerConfig
 
     trainer = Trainer(
-        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, warmup_steps=2,
+        TrainerConfig(size=32, arch="conv", arch_kwargs={"hidden_channels": 8}, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2,
                       total_world_steps=0, eval_interval=0, checkpoint_interval=0, device="cpu",
                       output_dir=str(tmp_path)),
         PPOConfig(),
@@ -325,3 +331,326 @@ def test_pretraining_off_does_nothing(tmp_path):
     assert trainer.pretrain(verbose=False) == {}
     after = trainer.network.state_dict()
     assert all(torch.equal(before[k], after[k]) for k in before)
+
+
+def test_a_dead_batch_is_reset_and_the_run_reaches_its_budget(tmp_path):
+    """An extinct world produces no gradient. The run used to stop there,
+    which treated one world's fate as the run's verdict and punished exactly
+    the runs that met a bust early. The world is reset instead: a predator run
+    once trained for 6,000 world steps after its last predator died, reporting
+    NaN for every diagnostic, and now it trains on a fresh ecology."""
+    import torch
+
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(
+            size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
+            bank_worlds=2, bank_steps=4, bank_warmup=0, bank_stride=2, total_world_steps=64, segment_steps=8, eval_interval=0,
+            checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
+            extinction_patience=2,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    # Kill every predator after the first segment, which is what a collapsing
+    # policy eventually does. train() resets the world itself, so the kill has
+    # to land inside the loop. This is the unbatched path; the batched one is
+    # covered below.
+    original_collect = trainer.collect
+
+    def collect_then_kill(steps):
+        rollout, stats = original_collect(steps)
+        trainer.env.entity.biomass.data.zero_()
+        trainer.env.entity.energy.data.zero_()
+        return rollout, stats
+
+    trainer.collect = collect_then_kill
+    record = trainer.train(verbose=False)
+
+    assert trainer.world_steps == trainer.config.total_world_steps
+    assert record["world_resets"] >= 1
+    assert "extinct" not in record
+
+
+def test_extinction_guard_can_be_disabled(tmp_path):
+    from tensor_beasts.rl.ppo import PPOConfig
+    from tensor_beasts.rl.trainer import Trainer, TrainerConfig
+
+    trainer = Trainer(
+        TrainerConfig(
+            size=32, entity="Predator", arch="conv", arch_kwargs={"hidden_channels": 4},
+            bank_worlds=2, bank_steps=4, bank_warmup=0, bank_stride=2, total_world_steps=24, segment_steps=8, eval_interval=0,
+            checkpoint_interval=0, device="cpu", output_dir=str(tmp_path),
+            extinction_patience=0,
+        ),
+        PPOConfig(epochs=1, minibatch_steps=2),
+    )
+    trainer.env.reset(seed=0)
+    trainer.env.entity.biomass.data.zero_()
+
+    record = trainer.train(verbose=False)
+
+    assert "extinct" not in record
+    assert trainer.world_steps == 24
+
+
+def test_wandb_host_defers_to_the_user_s_own_server(tmp_path, monkeypatch):
+    """The default must not override the host the user's API key is stored for.
+
+    wandb looks its credential up by exact host string, so a key stored for
+    "0.0.0.0:8080" is not found when the base URL says "localhost:8080" even
+    though both reach the same server; it then fails with "No API key
+    configured", which does not mention the host at all. This project defaulted
+    to localhost while the local server was set up as 0.0.0.0, so --wandb could
+    not log to it.
+    """
+    from tensor_beasts.rl.trainer import DEFAULT_WANDB_HOST, resolve_wandb_host
+
+    home = tmp_path / "home"
+    (home / ".config" / "wandb").mkdir(parents=True)
+    (home / ".config" / "wandb" / "settings").write_text(
+        "[default]\nbase_url = http://0.0.0.0:8080\n"
+    )
+    monkeypatch.setenv("HOME", str(home))
+
+    # The project default gives way to what the user configured.
+    assert resolve_wandb_host(DEFAULT_WANDB_HOST) == "http://0.0.0.0:8080"
+    # An explicit choice still wins.
+    assert resolve_wandb_host("http://elsewhere:9999") == "http://elsewhere:9999"
+
+
+def test_wandb_host_survives_a_missing_settings_file(tmp_path, monkeypatch):
+    from tensor_beasts.rl.trainer import DEFAULT_WANDB_HOST, resolve_wandb_host
+
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    assert resolve_wandb_host(DEFAULT_WANDB_HOST) == DEFAULT_WANDB_HOST
+    assert resolve_wandb_host(None) is None
+
+
+def test_a_metric_keeps_one_name_across_phases():
+    """Pretraining and training must report shared metrics under one name.
+
+    Prefixing one phase and not the other produces two half-empty charts for a
+    single quantity: one that stops when pretraining ends and one that starts
+    there, which reads as a broken run rather than as two phases.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    pretrain = wandb_record(
+        {"phase": "pretrain", "world_steps": 960, "population": 1186.0, "argmax_agreement": 0.93}
+    )
+    training = wandb_record({"world_steps": 992, "population": 1025.0, "argmax_agreement": 0.77})
+
+    assert "population" in pretrain and "population" in training
+    assert "argmax_agreement" in pretrain and "argmax_agreement" in training
+    assert not any(k.startswith("pretrain/") for k in pretrain)
+    # The phase survives as a metric, so a chart can still be split on it.
+    assert pretrain["phase"] == 0 and "phase" not in training
+
+
+def test_sparse_evaluation_metrics_are_kept_out_of_the_dense_series():
+    """Evaluation runs every few thousand steps; per-segment metrics every 32.
+
+    Mixed together, a metric with two values across 150 rows is drawn as a line
+    with enormous gaps, and the space between two distant points is filled in
+    as though the value held there.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    out = wandb_record(
+        {
+            "world_steps": 992,
+            "population": 1025.0,
+            "score": 0.859,
+            "learned_survived_agent_steps": 32273.0,
+            "rule_based_survived_agent_steps": 37572.0,
+            "film_typical_steps": 65,
+        }
+    )
+
+    assert out["eval/score"] == 0.859
+    assert "eval/learned_survived_agent_steps" in out
+    assert "eval/rule_based_survived_agent_steps" in out
+    assert out["film/typical_steps"] == 65
+    # The dense metric stays where it was.
+    assert out["population"] == 1025.0
+
+
+def test_unmeasured_and_non_numeric_values_are_not_logged_as_metrics():
+    """A direction-only run reports the metabolic metrics as NaN on every row.
+
+    Logged, they are three charts that are empty for the whole run. The
+    checkpoint path is a string and belongs nowhere on a chart.
+    """
+    from tensor_beasts.rl.trainer import wandb_record
+
+    out = wandb_record(
+        {
+            "world_steps": 1024,
+            "entropy": 0.58,
+            "metabolic_error": float("nan"),
+            "metabolic_unit_mean": float("nan"),
+            "checkpoint": "outputs/rl/checkpoint.pt",
+        }
+    )
+
+    assert out == {"world_steps": 1024, "entropy": 0.58}
+
+
+def test_auto_and_bare_cuda_pick_the_device_with_the_most_free_memory(monkeypatch):
+    """A CUDA index is not a stable name for a physical card.
+
+    "cuda" without an index means cuda:0, and which card that is depends on
+    CUDA_DEVICE_ORDER: PCI_BUS_ID, which is what nvidia-smi prints, orders by
+    bus address, while CUDA's own default of FASTEST_FIRST puts the fastest
+    card first. On a mixed machine the two disagree, so a run that asks for
+    "cuda" can land on whichever card happens to be index zero. A sweep agent
+    inheriting no CUDA_VISIBLE_DEVICES did exactly that, landed on an 11 GB card
+    that other processes had already filled, and died in pretraining.
+    """
+    import torch
+
+    from tensor_beasts.rl import trainer as trainer_module
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    # Device 1 is the roomy one, as on the machine this was found on.
+    free = {0: 100 * 2**20, 1: 20 * 2**30}
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda i: (free[i], 24 * 2**30))
+
+    assert trainer_module.resolve_device("auto") == torch.device("cuda:1")
+    assert trainer_module.resolve_device("cuda") == torch.device("cuda:1")
+    # An explicit index is the caller naming a card, and is obeyed.
+    assert trainer_module.resolve_device("cuda:0") == torch.device("cuda:0")
+    assert trainer_module.resolve_device("cpu") == torch.device("cpu")
+
+
+def test_device_selection_survives_a_card_that_cannot_be_queried(monkeypatch):
+    import torch
+
+    from tensor_beasts.rl import trainer as trainer_module
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    def flaky(index):
+        if index == 0:
+            raise RuntimeError("device 0 is not responding")
+        return (8 * 2**30, 24 * 2**30)
+
+    monkeypatch.setattr(torch.cuda, "mem_get_info", flaky)
+    assert trainer_module.resolve_device("auto") == torch.device("cuda:1")
+
+
+# ----------------------------------------------------------------------
+# Extinction is a world event, not the run's verdict
+# ----------------------------------------------------------------------
+def _slice_hashes(world):
+    """One hash per world of every batched leaf, so untouched worlds can be
+    shown untouched to the bit."""
+    import hashlib
+    worlds = world.num_worlds
+    digests = [hashlib.sha256() for _ in range(worlds)]
+    for key in sorted(world.td.keys(True, True), key=str):
+        value = world.td.get(key)
+        if value.dim() == 0 or value.shape[0] != worlds:
+            continue
+        for index in range(worlds):
+            digests[index].update(str(key).encode())
+            digests[index].update(value[index].detach().cpu().contiguous().numpy().tobytes())
+    return [d.hexdigest() for d in digests]
+
+
+def test_an_extinct_world_is_reset_in_place_and_the_others_are_untouched(tmp_path):
+    trainer = make_trainer(tmp_path, worlds=3, bank_worlds=2, bank_steps=7, bank_warmup=3, bank_stride=2, extinction_patience=2)
+    trainer.start_worlds()
+    entity = trainer.env.entity
+
+    # Kill world 1 outright: no biomass, no energy, nothing left to act.
+    entity.biomass.data[1].zero_()
+    entity.energy.data[1].zero_()
+    before = _slice_hashes(trainer.env.world)
+    rng_before = torch.get_rng_state()
+    assert float(trainer.env.population_per_world()[1]) == 0
+
+    assert trainer.reset_extinct_worlds() == 0, "one empty segment is inside the patience"
+    assert trainer.reset_extinct_worlds() == 1, "the second is not"
+    assert trainer.world_resets == 1
+
+    after = _slice_hashes(trainer.env.world)
+    assert after[0] == before[0] and after[2] == before[2], "the living worlds are bit-identical"
+    assert after[1] != before[1]
+    assert float(trainer.env.population_per_world()[1]) > 0, "the reset world is populated"
+    assert torch.equal(torch.get_rng_state(), rng_before), "the training RNG stream is untouched"
+    assert trainer.reset_extinct_worlds() == 0, "a repopulated world is not reset again"
+
+    # And the batch keeps stepping: a collect over the reset world must work.
+    rollout, stats = trainer.collect(2)
+    assert stats["population_min_world"] > 0
+    assert rollout.observation.shape[1] == 3
+
+
+def test_an_extinct_run_now_spends_its_whole_budget(tmp_path):
+    """The old guard stopped the run after `extinction_patience` empty
+    segments. A world that dies is reset instead and the run continues to
+    the last world step."""
+    trainer = make_trainer(tmp_path, worlds=2, bank_worlds=2, bank_steps=6, bank_warmup=2, bank_stride=2, extinction_patience=1,
+                           total_world_steps=16, segment_steps=4)
+    trainer._init_wandb = lambda: None
+    original_collect = trainer.collect
+    killed = {"done": False}
+
+    def collect_then_kill(steps):
+        rollout, stats = original_collect(steps)
+        if not killed["done"]:
+            trainer.env.entity.biomass.data[0].zero_()
+            trainer.env.entity.energy.data[0].zero_()
+            killed["done"] = True
+        return rollout, stats
+
+    trainer.collect = collect_then_kill
+    record = trainer.train(verbose=False)
+    assert trainer.world_steps == 16, "the run reached its budget"
+    assert record["world_resets"] >= 1
+    assert "extinct" not in record
+
+
+def test_evaluation_starts_both_policies_from_the_same_banked_states(tmp_path):
+    """The evaluation worlds are a fixed subset of the bank, loaded afresh for
+    each policy, so the comparison is paired and every evaluation of a run
+    scores the same starts. The rules are scored once and reused."""
+    trainer = make_trainer(tmp_path, eval_seeds=2, eval_steps=3)
+    indices = trainer.eval_indices()
+    assert indices == trainer.eval_indices(), "the subset is fixed"
+    assert len(indices) == 2
+
+    loads = []
+    original = trainer.bank.load
+
+    def spy(env, picked):
+        loads.append(list(picked))
+        return original(env, picked)
+
+    trainer.bank.load = spy
+    first = trainer.evaluate()
+    assert loads == [indices, indices], "learned, then the rules, from the same states"
+    second = trainer.evaluate()
+    assert loads == [indices, indices, indices], "the rules are not scored twice"
+    assert first["rule_based_mean_biomass"] == second["rule_based_mean_biomass"]
+    env = trainer._eval_env(2)
+    assert env.world.step == trainer.bank.steps[indices[0]] + 3
+
+
+def test_the_initial_policy_is_saved_before_any_update(tmp_path):
+    """A drifted policy must be comparable with its own start on the same
+    worlds, so the policy RL starts from is written as pretrained.pt."""
+    trainer = make_trainer(tmp_path, total_world_steps=4, segment_steps=4, checkpoint_interval=0)
+    before = {k: v.clone() for k, v in trainer.network.state_dict().items()}
+    trainer.train(verbose=False)
+    path = tmp_path / "pretrained.pt"
+    assert path.exists()
+    payload = torch.load(path, weights_only=False)
+    assert payload["updates"] == 0
+    for key, value in payload["network"].items():
+        assert torch.equal(value, before[key]), key

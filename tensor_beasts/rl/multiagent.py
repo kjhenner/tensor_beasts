@@ -40,28 +40,37 @@ mapping is one-to-one in practice as well as in intent.
 Reward
 ------
 
-Three terms, all per individual:
+One quantity, with no coefficients: the change in the individual's own stock
+of biomass over the step,
 
-* ``survival_reward`` for each step the individual is still alive afterwards.
-* ``reproduction_reward`` when it divides.
-* ``foraging_reward`` times the biomass it ate this step.
-* Its episode ends when it dies.
+    r_t(i) = eat_t(i) - burn_t(i) - loss_t(i)
 
-The metric this is a surrogate for is the one the project actually cares about,
-total herbivore-steps survived, which is what ``evaluate_policy.py`` reports for
-the rule-based baseline. Survival reward tracks it directly; reproduction reward
-credits an individual for the future population it creates, which survival
-reward alone would attribute entirely to the offspring.
+where ``eat`` is what it ate at its new cell, ``burn`` what its metabolism
+consumed, and ``loss`` the reserve that becomes carrion when it ends the step
+below the survival threshold. Division is neutral: the parent keeps half and
+the offspring carries the other half, so nothing is lost and nothing is paid.
+Summed over every individual this is exactly the species' stock change,
+``B_{t+1} - B_t`` with ``B`` the biomass carried by living individuals, except
+for what newborns eat in their birth step, which nobody is paid for. That
+makes the reward the evaluation metric's own increment.
 
-Foraging reward exists because the first two are nearly useless as a learning
-signal on their own. Herbivores survive about 99.4% of steps, so the per-step
-reward is 1.0 with a standard deviation of 0.076: almost all of an individual's
-return is fixed no matter what it does, and the part that responds to its
-choices is buried under that. Reproduction is rarer still, around 0.7% of
-agent-steps. Biomass change, by contrast, responds immediately and directly to
-whether the individual moved somewhere with food. It is off by default, because
-turning it on is reward shaping and changes what is being optimized; what it
-must never change is the *evaluation*, which stays herbivore-steps survived.
+An individual's own outcomes are blind to what its decisions do through the
+shared prey field: a control run (planning/STATE.md) found a collapse under which
+every per-individual quantity was unchanged while the world sustained a
+quarter fewer individuals. So the reward is pooled spatially: with ``rho_t``
+the field holding each individual's ``r`` at its successor cell,
+
+    R_t(i) = sum_c K_R(c - c_{t+1}(i)) rho_t(c)
+
+with ``K_R`` a box of radius ``reward_radius``. Radius 0 is the individual
+reward; a radius covering the world pays everyone the species' stock change;
+a few cells pays each individual for its neighbourhood's stock, which scales
+with how many neighbours there are. The radius is the one knob.
+
+Exact for the predator, whose biomass nothing else takes. A herbivore also
+loses biomass to predator bites, which it did not choose and which are not
+recorded per individual, so for the herbivore the identity above does not
+hold.
 """
 
 from dataclasses import dataclass
@@ -105,7 +114,8 @@ class AgentBatch:
         observation: (C, H, W) float32, the field the policy reads.
         acted: (H, W) bool, cells holding an individual that chose an action.
         action: (H, W) int64, the direction each one chose.
-        reward: (H, W) float32.
+        reward: (H, W) float32, the individual's stock change pooled over its
+            neighbourhood; see the module docstring.
         done: (H, W) bool, true where the individual died during this step.
         successor: (H, W) int64, flat index of the cell that individual occupies
             next, for bootstrapping a value from the right place. Meaningless
@@ -133,46 +143,52 @@ class AgentBatch:
     # and a soft target turns a near-tie into a near-uniform distribution that
     # costs nothing to disagree with.
     rule_scores: Optional[torch.Tensor] = None
-    # (H, W) int64: the metabolic level each individual chose, when the
-    # environment was built with ``num_metabolic_levels`` and the caller sent
-    # one. None otherwise, meaning the rule-based policy set the throttle.
-    metabolic_action: Optional[torch.Tensor] = None
-    # (H, W) int64: the rule-based policy's own metabolic rate on this same
-    # observation, mapped to the nearest level. The anchor target for the
-    # metabolic lever, as ``rule_action`` is for the direction. None when the
-    # environment has no metabolic levels.
-    rule_metabolic_level: Optional[torch.Tensor] = None
+    # (H, W) float32 in [0, 1]: the normalised throttle each individual chose,
+    # when the environment was built with ``metabolic`` and the caller sent one.
+    # None otherwise, meaning the rule-based policy set the throttle. 0 is the
+    # basal rate and 1 the configured maximum; the environment maps it onto the
+    # rate through :meth:`MultiAgentWorldEnv.metabolic_unit_to_rate`.
+    metabolic_unit: Optional[torch.Tensor] = None
+    # (H, W) float32 in [0, 1]: the rule-based policy's own metabolic rate on
+    # this same observation, expressed in those same units. The anchor target
+    # for the metabolic lever, as ``rule_action`` is for the direction. None
+    # when the environment has no metabolic head.
+    rule_metabolic_unit: Optional[torch.Tensor] = None
 
     @property
     def num_agents(self) -> int:
         return int(self.acted.sum())
 
 
-def metabolic_level_rates(basal_rate: float, max_rate: float, num_levels: int) -> torch.Tensor:
-    """Rate for each discrete metabolic level, ``(num_levels,)`` float32.
+def gather_per_world(field: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """``field`` read at ``index``, where both are grids and ``index`` is per world.
 
-    Level ``i`` maps to ``basal + i / (L - 1) * (max - basal)``: level 0 is
-    resting, the top level is the configured ceiling, evenly spaced between.
-    The biomass cap is applied afterwards by the simulation, not here, so a
-    starving individual that picks the top level still burns only what it can.
+    The simulation's successor and offspring maps hold a flat cell index within
+    one world: cell (h, w) is ``h * width + w`` in every world. Flattening a
+    batched ``(B, H, W)`` field with ``reshape(-1)`` and indexing it with those
+    would read world 0's cells for every world, and produce entirely plausible
+    numbers while doing it. Reshaping to ``(worlds, H * W)`` and gathering along
+    the last axis keeps each world to itself, and at one world is exactly the
+    old arithmetic.
     """
-    if num_levels < 2:
-        raise ValueError(f"num_metabolic_levels must be at least 2, got {num_levels}")
-    fraction = torch.arange(num_levels, dtype=torch.float32) / (num_levels - 1)
-    return float(basal_rate) + fraction * (float(max_rate) - float(basal_rate))
+    grid = index.shape
+    cells = grid[-2] * grid[-1]
+    worlds = index.numel() // cells
+    gathered = field.reshape(worlds, cells).gather(1, index.reshape(worlds, cells))
+    return gathered.reshape(grid)
 
 
-def rate_to_metabolic_level(rate: torch.Tensor, level_rates: torch.Tensor) -> torch.Tensor:
-    """Nearest level to each rate, ``rate.shape`` int64.
-
-    Argmin over the absolute distance rather than rounding, so a rate exactly
-    halfway between two levels resolves to the lower one deterministically
-    instead of depending on round-half-even.
-    """
-    level_rates = level_rates.to(rate.device)
-    shape = (level_rates.numel(),) + (1,) * rate.dim()
-    distance = (rate.float().unsqueeze(0) - level_rates.reshape(shape)).abs()
-    return distance.argmin(dim=0)
+def scatter_per_world(values: torch.Tensor, index: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """The inverse of :func:`gather_per_world`: ``values`` at ``mask`` summed
+    into a grid at ``index``, within each world. Entries outside ``mask`` are
+    dropped, and two individuals sharing a cell add rather than overwrite."""
+    grid = index.shape
+    cells = grid[-2] * grid[-1]
+    worlds = index.numel() // cells
+    out = torch.zeros(worlds, cells, dtype=values.dtype, device=values.device)
+    contribution = torch.where(mask, values, torch.zeros_like(values)).reshape(worlds, cells)
+    out.scatter_add_(1, index.reshape(worlds, cells), contribution)
+    return out.reshape(grid)
 
 
 class MultiAgentWorldEnv:
@@ -190,16 +206,13 @@ class MultiAgentWorldEnv:
             and the three-species dynamic degenerates, so prefer 512 for
             anything whose result is meant to mean something.
         entity_name: Which entity the policy controls.
-        survival_reward: Reward per step an individual remains alive.
-        reproduction_reward: Reward for dividing.
-        foraging_reward: Reward per unit of biomass eaten this step, read at
-            the individual's own new cell. Dense and strongly
-            action-dependent, unlike the other two. Zero by default because it
-            is reward shaping; see the module docstring.
+        reward_radius: Radius in cells of the box each individual's reward is
+            pooled over, around its new cell. 0 pays each individual its own
+            stock change; see the module docstring.
         device: Torch device for the simulation.
-        num_metabolic_levels: Number of discrete metabolic levels the policy
-            may choose from, or 0 to leave the throttle to the rule-based
-            policy. See :func:`metabolic_level_rates` for the mapping.
+        metabolic: Let the policy set its own metabolic rate, as a continuous
+            throttle in [0, 1] mapped onto [basal_rate, max_metabolic_rate].
+            False leaves the throttle to the rule-based policy.
     """
 
     def __init__(
@@ -207,24 +220,23 @@ class MultiAgentWorldEnv:
         config_path: str = DEFAULT_CONFIG,
         size: Optional[Tuple[int, int]] = None,
         entity_name: str = DEFAULT_ENTITY,
-        survival_reward: float = 1.0,
-        reproduction_reward: float = 10.0,
-        foraging_reward: float = 0.0,
+        reward_radius: int = 0,
+        worlds: int = 1,
         device: Optional[str] = None,
-        num_metabolic_levels: int = 0,
+        metabolic: bool = False,
         memory_size: int = 0,
     ):
         self.config_path = config_path
         self.entity_name = entity_name
-        self.survival_reward = survival_reward
-        self.reproduction_reward = reproduction_reward
-        self.foraging_reward = foraging_reward
+        self.reward_radius = int(reward_radius)
         self.device = torch.device(device) if device is not None else torch.get_default_device()
-        self.num_metabolic_levels = int(num_metabolic_levels)
+        self.metabolic = bool(metabolic)
 
         config = load_config(config_path)
         if size is not None:
             config.world.size = list(size)
+        if worlds and worlds > 1:
+            config.world.batch = int(worlds)
         self.world_config = config.world
         self.size: Tuple[int, int] = tuple(config.world.size)
 
@@ -245,18 +257,20 @@ class MultiAgentWorldEnv:
 
         self._flat_index = torch.arange(
             self.size[0] * self.size[1], device=self.device
-        ).reshape(*self.size)
+        ).reshape(*self.size).expand(self.field_shape)
 
-        self.observation_channels = self._build_observation().shape[0]
+        # Indexed from the end: shape[0] is the batch axis on a batched world, so
+        # reading it there would size the network with B input channels.
+        self.observation_channels = self._build_observation().shape[-3]
         self.channel_names = self._channel_names()
-        self._level_rates = self._build_level_rates()
+        self._metabolic_range = self._metabolic_bounds()
 
     @classmethod
     def attach(
         cls,
         world: World,
         entity_name: str = DEFAULT_ENTITY,
-        num_metabolic_levels: int = 0,
+        metabolic: bool = False,
     ) -> "MultiAgentWorldEnv":
         """Wrap an already-built World, for driving it with a learned policy.
 
@@ -268,9 +282,7 @@ class MultiAgentWorldEnv:
         env = cls.__new__(cls)
         env.config_path = None
         env.entity_name = entity_name
-        env.survival_reward = 0.0
-        env.reproduction_reward = 0.0
-        env.foraging_reward = 0.0
+        env.reward_radius = 0
         env.world_config = world.config
         env.size = tuple(world.size)
         env.world = world
@@ -280,18 +292,43 @@ class MultiAgentWorldEnv:
             )
         env.device = world.entity_dict[entity_name].biomass.data.device
         env._flat_index = torch.arange(env.size[0] * env.size[1], device=env.device).reshape(*env.size)
-        env.num_metabolic_levels = int(num_metabolic_levels)
-        env.observation_channels = env._build_observation().shape[0]
+        env.metabolic = bool(metabolic)
+        env.observation_channels = env._build_observation().shape[-3]
         env.channel_names = env._channel_names()
-        env._level_rates = env._build_level_rates()
+        env._metabolic_range = env._metabolic_bounds()
         return env
 
     # ------------------------------------------------------------------
     # Entity access
     # ------------------------------------------------------------------
+    def _memory_field(self, memory: torch.Tensor) -> torch.Tensor:
+        """Network memory ``(K, H, W)`` or ``(B, K, H, W)`` to the feature's layout.
+
+        The feature stores memory with its channel axis trailing, ``(H, W, K)``
+        or ``(B, H, W, K)``, so the channel axis moves to the end rather than
+        being permuted by fixed positions.
+        """
+        memory = memory.reshape(*self.world.batch_shape, self.memory_size, *self.size)
+        return memory.movedim(-3, -1).to(self.device)
+
     @property
     def entity(self):
         return self.world.entity_dict[self.entity_name]
+
+    @property
+    def field_shape(self) -> Tuple[int, ...]:
+        """Shape of one per-cell field: ``(H, W)``, or ``(B, H, W)`` batched.
+
+        Every action, reward and mask the learner exchanges with the simulation
+        has this shape. ``self.size`` stays the spatial extent so that code
+        reading height and width keeps working.
+        """
+        return self.world.batch_shape + self.size
+
+    @property
+    def num_worlds(self) -> int:
+        """Independent worlds stepped together. 1 when unbatched."""
+        return self.world.num_worlds
 
     @property
     def memory_size(self) -> int:
@@ -303,39 +340,68 @@ class MultiAgentWorldEnv:
         return entity.biomass.data >= entity.config.survival_threshold
 
     def population(self) -> int:
+        """Living individuals across every world. See population_per_world."""
         return int(self._alive().sum())
 
+    def population_per_world(self) -> torch.Tensor:
+        """Living individuals in each world, ``(worlds,)``.
+
+        Evaluation needs this rather than the total: each world is its own
+        seed, and summing them before they are reported hides the spread
+        between seeds, which is the quantity every claim here is hedged
+        against.
+        """
+        return self._alive().sum(dim=(-2, -1)).reshape(self.num_worlds).float()
+
+    def stock_per_world(self) -> torch.Tensor:
+        """Biomass carried by living individuals in each world, ``(worlds,)``.
+
+        The quantity the metric integrates and the reward increments.
+        Living individuals only: a cell below the survival
+        threshold still holds the reserve of an animal that died this step,
+        and that reserve becomes carrion at the top of the next one.
+        """
+        biomass = self.entity.biomass.data
+        alive = biomass >= self.entity.config.survival_threshold
+        return (biomass * alive).sum(dim=(-2, -1)).reshape(self.num_worlds).float()
+
     # ------------------------------------------------------------------
-    # Metabolic levels
+    # Metabolic throttle
     # ------------------------------------------------------------------
-    def _build_level_rates(self) -> Optional[torch.Tensor]:
-        if self.num_metabolic_levels <= 0:
+    def _metabolic_bounds(self) -> Optional[Tuple[float, float]]:
+        """``(basal, max)`` rate for the controlled entity, or None when off."""
+        if not self.metabolic:
             return None
         config = self.entity.config
-        return metabolic_level_rates(
-            config.basal_rate, config.max_metabolic_rate, self.num_metabolic_levels
-        ).to(self.device)
+        return float(config.basal_rate), float(config.max_metabolic_rate)
 
     @property
-    def metabolic_level_rates(self) -> Optional[torch.Tensor]:
-        """``(num_metabolic_levels,)`` rate per level, or None when off."""
-        return self._level_rates
+    def metabolic_range(self) -> Optional[Tuple[float, float]]:
+        return self._metabolic_range
 
-    def metabolic_level_to_rate(self, level: torch.Tensor) -> torch.Tensor:
-        """Map chosen levels (H, W) int64 to the desired rate (H, W) float32.
+    def metabolic_unit_to_rate(self, unit: torch.Tensor) -> torch.Tensor:
+        """Map a normalised throttle in [0, 1] to a rate, ``field_shape`` float32.
 
-        This is the rate *before* the simulation's biomass cap.
+        The rate is continuous, because it is a continuous quantity: an
+        individual burns some amount of biomass, not one of four settings. This
+        is the rate *before* the simulation's biomass cap, which the entity
+        applies afterwards, so a starving animal that asks for the maximum still
+        burns only what it carries.
         """
-        if self._level_rates is None:
-            raise ValueError("This environment was built without metabolic levels.")
-        level = level.reshape(*self.size).to(device=self.device, dtype=torch.long)
-        return self._level_rates[level.clamp(0, self.num_metabolic_levels - 1)]
+        if self._metabolic_range is None:
+            raise ValueError("This environment was built without a metabolic head.")
+        basal, top = self._metabolic_range
+        unit = unit.reshape(self.field_shape).to(device=self.device, dtype=torch.float32)
+        return basal + unit.clamp(0.0, 1.0) * (top - basal)
 
-    def metabolic_rate_to_level(self, rate: torch.Tensor) -> torch.Tensor:
-        """Nearest level to each rate. Used to discretize the rule's throttle."""
-        if self._level_rates is None:
-            raise ValueError("This environment was built without metabolic levels.")
-        return rate_to_metabolic_level(rate, self._level_rates)
+    def metabolic_rate_to_unit(self, rate: torch.Tensor) -> torch.Tensor:
+        """The inverse: a rate to [0, 1]. Used to express the rule's throttle
+        as an anchor target in the same units the policy emits."""
+        if self._metabolic_range is None:
+            raise ValueError("This environment was built without a metabolic head.")
+        basal, top = self._metabolic_range
+        span = max(top - basal, 1e-6)
+        return ((rate.float() - basal) / span).clamp(0.0, 1.0)
 
     # ------------------------------------------------------------------
     # Observation
@@ -356,6 +422,31 @@ class MultiAgentWorldEnv:
         names.extend(f"memory/{k}" for k in range(self.memory_size))
         return names
 
+    def rule_spec(self) -> Dict[str, object]:
+        """What the rule-parametrised actor needs to be the rule at start.
+
+        Everything :class:`~tensor_beasts.rl.networks.RulePolicy` reads from
+        the entity's config, keyed the way the observation channels are named,
+        so the actor can be rebuilt from a checkpoint against any world with
+        the same perception.
+        """
+        config = self.entity.config
+        weights = {}
+        for key, weight in dict(config.navigation_weights).items():
+            label = ":".join(key) if isinstance(key, (tuple, list)) else str(key)
+            weights[label] = float(weight)
+        return {
+            "channel_names": list(self.channel_names),
+            "features": [":".join(key) for key, _ in self._perception()],
+            "navigation_weights": weights,
+            "perceived_scale": float(torch.log1p(torch.tensor(255.0 * config.log_scale))),
+            "gradient_ema_alpha": float(config.gradient_ema_alpha),
+            "basal_rate": float(config.basal_rate),
+            "max_metabolic_rate": float(config.max_metabolic_rate),
+            "metabolic_sensitivity": float(config.metabolic_sensitivity),
+            "survival_threshold": float(config.survival_threshold),
+        }
+
     def _rule_decision(self, observation):
         """The entity's own rule-based policy's full Action from ``observation``.
 
@@ -371,11 +462,11 @@ class MultiAgentWorldEnv:
         """What the entity's own rule-based policy would do from ``observation``."""
         return self._rule_decision(observation).move_direction.to(torch.long)
 
-    def _rule_metabolic_level(self, decision) -> Optional[torch.Tensor]:
-        """The rule's metabolic rate as the nearest discrete level, or None."""
-        if self._level_rates is None:
+    def _rule_metabolic_unit(self, decision) -> Optional[torch.Tensor]:
+        """The rule's metabolic rate as a normalised throttle in [0, 1], or None."""
+        if not self.metabolic:
             return None
-        return self.metabolic_rate_to_level(decision.metabolic_rate)
+        return self.metabolic_rate_to_unit(decision.metabolic_rate)
 
     def _rule_scores(self, observation) -> torch.Tensor:
         """The rule-based policy's per-action scores, (5, H, W).
@@ -389,6 +480,9 @@ class MultiAgentWorldEnv:
         for key, weight in weights.items():
             if key not in observation.directional:
                 continue
+            # The action axis is built leading, as get_directional_values
+            # produces it, then moved to -3 so the scores line up with the
+            # policy's logits: (5, H, W) unbatched, (B, 5, H, W) batched.
             part = torch.cat(
                 [
                     (observation.current[key].float() * weight).unsqueeze(0),
@@ -397,8 +491,8 @@ class MultiAgentWorldEnv:
             )
             combined = part if combined is None else combined + part
         if combined is None:
-            return torch.zeros(NUM_ACTIONS, *self.size, device=self.device)
-        return combined.clamp(min=0)
+            return torch.zeros(*self.world.batch_shape, NUM_ACTIONS, *self.size, device=self.device)
+        return combined.clamp(min=0).movedim(0, -3)
 
     def _build_observation(self) -> torch.Tensor:
         """Stack the individual's local view into a (C, H, W) field."""
@@ -483,7 +577,11 @@ class MultiAgentWorldEnv:
             memory = entity.memory.data
             channels.extend(memory[..., k].float() for k in range(self.memory_size))
 
-        return torch.stack(channels, dim=0), observation
+        # Stacked at -3, the channel axis a convolution expects, rather than at
+        # 0. Each channel is (H, W) unbatched and (B, H, W) batched, so dim=0
+        # would give (C, B, H, W) and hand the network the batch as its
+        # channels. At one world the two are identical.
+        return torch.stack(channels, dim=-3), observation
 
     # ------------------------------------------------------------------
     # Interaction
@@ -494,32 +592,52 @@ class MultiAgentWorldEnv:
         Shared by :meth:`step` and :meth:`rule_based_step` so the learned policy
         and the baseline are scored by exactly the same rules. If these ever
         drift apart the comparison stops meaning anything.
+
+        The reward is each individual's own stock change, pooled over a box of
+        ``reward_radius`` cells around its new cell; see the module docstring.
         """
         acted = transition.acted
         successor = transition.successor.clamp(min=0)
 
         entity = self.entity
-        biomass_flat = entity.biomass.data.reshape(-1)
         # An individual is alive afterwards if the cell it moved into holds
         # enough biomass to survive. Same predicate the simulation applies at
         # the top of the next step.
-        alive_after = (biomass_flat[successor] >= entity.config.survival_threshold) & acted
+        biomass_after = gather_per_world(entity.biomass.data, successor)
+        alive_after = (biomass_after >= entity.config.survival_threshold) & acted
 
-        reward = (
-            alive_after.float() * self.survival_reward
-            + transition.reproduced.float() * self.reproduction_reward
-        )
+        # What it ate, read at its successor cell since eating happens after
+        # the move; what it burned, at the cell it acted from since metabolism
+        # happens before; and, if it ends the step below the threshold, the
+        # reserve it leaves behind, which the simulation turns into carrion at
+        # the top of the next step.
+        eaten = gather_per_world(transition.eaten, successor)
+        burned = transition.burned
+        loss = torch.where(acted & ~alive_after, biomass_after, torch.zeros_like(biomass_after))
+        own = torch.where(acted, eaten - burned - loss, torch.zeros_like(eaten))
 
-        if self.foraging_reward:
-            # What the individual ATE, read at its successor cell since eating
-            # happens after the move. Net biomass change was the first version
-            # and it punished the metabolic lever: burning biomass into energy
-            # is what metabolism does, so every unit burned cost reward and the
-            # learned throttle collapsed onto the coldest setting.
-            eaten = transition.eaten.reshape(-1)[successor].reshape(*self.size)
-            reward = reward + alive_after.float() * eaten * self.foraging_reward
-
+        reward = self._pool(own, successor, acted)
         return reward, alive_after, successor, acted
+
+    def _pool(self, own: torch.Tensor, successor: torch.Tensor, acted: torch.Tensor) -> torch.Tensor:
+        """Each individual's reward summed over its neighbourhood at its new cell.
+
+        Scatter every individual's own reward to its successor cell, sum that
+        field over a box of ``reward_radius`` cells, and read it back at the
+        successor. Radius 0 is the identity. The box is unnormalised, so a
+        radius covering the world hands everyone the species' total.
+        """
+        radius = self.reward_radius
+        if radius <= 0:
+            return own
+        field = scatter_per_world(own, successor, acted)
+        worlds = self.num_worlds
+        kernel = torch.ones(1, 1, 2 * radius + 1, 2 * radius + 1, device=own.device, dtype=own.dtype)
+        pooled = torch.nn.functional.conv2d(
+            field.reshape(worlds, 1, *self.size), kernel, padding=radius
+        ).reshape(self.field_shape)
+        pooled = gather_per_world(pooled, successor)
+        return torch.where(acted, pooled, torch.zeros_like(pooled))
 
     def reset(self, seed: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """Restart the ecology. Returns (observation, acted mask).
@@ -535,7 +653,7 @@ class MultiAgentWorldEnv:
     def step(
         self,
         action: torch.Tensor,
-        metabolic_action: Optional[torch.Tensor] = None,
+        metabolic_unit: Optional[torch.Tensor] = None,
         memory: Optional[torch.Tensor] = None,
     ) -> AgentBatch:
         """Advance one simulation step under a per-cell direction field.
@@ -545,36 +663,37 @@ class MultiAgentWorldEnv:
                 are ignored by the simulation.
             memory: Optional (K, H, W) float32 in [-1, 1], the memory each
                 individual writes for its next step. None leaves memory as is.
-            metabolic_action: Optional (H, W) int64 in [0, num_metabolic_levels).
-                Mapped to a rate through :meth:`metabolic_level_to_rate` and
-                sent to the simulation, which clamps it to what the individual's
-                biomass allows. None leaves the throttle to the rule-based
-                policy, which is what a direction-only learner wants.
+            metabolic_unit: Optional (H, W) float32 in [0, 1], the normalised
+                throttle. Mapped to a rate through
+                :meth:`metabolic_unit_to_rate` and sent to the simulation,
+                which clamps it to what the individual's biomass allows. None
+                leaves the throttle to the rule-based policy, which is what a
+                direction-only learner wants.
 
         Returns:
             An :class:`AgentBatch` whose ``observation`` is the state *before*
             the step, matching the actions that were taken from it.
         """
-        action = action.reshape(*self.size).to(device=self.device, dtype=torch.long)
+        action = action.reshape(self.field_shape).to(device=self.device, dtype=torch.long)
         observation, raw = self._observe()
         decision = self._rule_decision(raw)
         rule_action = decision.move_direction.to(torch.long)
         rule_scores = self._rule_scores(raw)
-        rule_metabolic_level = self._rule_metabolic_level(decision)
+        rule_metabolic_unit = self._rule_metabolic_unit(decision)
         biomass_before = self.entity.biomass.data.clone()
 
-        if metabolic_action is None and memory is None:
+        if metabolic_unit is None and memory is None:
             entity_action = action
         else:
             fields = {"direction": action}
-            if metabolic_action is not None:
-                metabolic_action = metabolic_action.reshape(*self.size).to(
-                    device=self.device, dtype=torch.long
+            if metabolic_unit is not None:
+                metabolic_unit = metabolic_unit.reshape(self.field_shape).to(
+                    device=self.device, dtype=torch.float32
                 )
-                fields["metabolic_rate"] = self.metabolic_level_to_rate(metabolic_action)
+                fields["metabolic_rate"] = self.metabolic_unit_to_rate(metabolic_unit)
             if memory is not None:
                 # Network layout is (K, H, W); the feature is (H, W, K).
-                fields["memory"] = memory.reshape(self.memory_size, *self.size).permute(1, 2, 0).to(self.device)
+                fields["memory"] = self._memory_field(memory)
             entity_action = TensorDict(fields, batch_size=[])
         self.world.update(TensorDict({self.entity_name: entity_action}, batch_size=[]))
 
@@ -598,9 +717,83 @@ class MultiAgentWorldEnv:
             reproduced=transition.reproduced,
             rule_action=rule_action,
             rule_scores=rule_scores,
-            metabolic_action=metabolic_action,
-            rule_metabolic_level=rule_metabolic_level,
+            metabolic_unit=metabolic_unit,
+            rule_metabolic_unit=rule_metabolic_unit,
         )
+
+    def step_with_policy(self, decide) -> AgentBatch:
+        """Advance one step, asking ``decide`` for the action at the right moment.
+
+        :meth:`step` takes an action chosen before the world updated at all.
+        Entities update in dependency order and each builds its observation
+        inside its own update, so the rule-based predator sees the prey field
+        *after* the herbivores have moved this step while a learner using
+        :meth:`step` saw it before. Measured at 512 that halved the learned
+        predator's hunting success, 1.46% of steps against 2.95%, and drove the
+        population extinct where the rules recover, purely from the timing.
+
+        ``decide`` is called with this environment's observation at the instant
+        the controlled entity updates, and returns
+        ``(direction, metabolic_unit, memory)``, any of which may be None. The
+        comparison against the rules is then like for like.
+
+        Args:
+            decide: Callable taking the ``(C, H, W)`` observation and returning
+                ``(direction, metabolic_unit, memory)``.
+        """
+        captured: Dict[str, object] = {}
+
+        def build_action():
+            observation, raw = self._observe()
+            captured["observation"] = observation
+            decision = self._rule_decision(raw)
+            captured["rule_action"] = decision.move_direction.to(torch.long)
+            captured["rule_scores"] = self._rule_scores(raw)
+            captured["rule_metabolic_unit"] = self._rule_metabolic_unit(decision)
+
+            direction, metabolic_unit, memory = decide(observation)
+            captured["action"] = direction
+            captured["metabolic_unit"] = metabolic_unit
+            return self._entity_action(direction, metabolic_unit, memory)
+
+        biomass_before = self.entity.biomass.data.clone()
+        self.world.update(action_fns={self.entity_name: build_action})
+
+        transition = self.entity.last_transition
+        if transition is None:
+            raise RuntimeError(
+                f"{self.entity_name} recorded no transition. track_transitions "
+                "should have been enabled by this environment's constructor."
+            )
+        reward, alive_after, successor, acted = self._reward(transition, biomass_before)
+        return AgentBatch(
+            observation=captured["observation"],
+            acted=acted,
+            action=captured["action"].reshape(self.field_shape).to(self.device, torch.long),
+            reward=reward,
+            done=acted & ~alive_after,
+            successor=successor,
+            reproduced=transition.reproduced,
+            rule_action=captured["rule_action"],
+            rule_scores=captured["rule_scores"],
+            metabolic_unit=captured["metabolic_unit"],
+            rule_metabolic_unit=captured["rule_metabolic_unit"],
+        )
+
+    def _entity_action(self, action, metabolic_unit, memory):
+        """The TensorDict or bare tensor ``Animal.update`` expects."""
+        action = action.reshape(self.field_shape).to(device=self.device, dtype=torch.long)
+        if metabolic_unit is None and memory is None:
+            return action
+        fields = {"direction": action}
+        if metabolic_unit is not None:
+            metabolic_unit = metabolic_unit.reshape(self.field_shape).to(
+                device=self.device, dtype=torch.float32
+            )
+            fields["metabolic_rate"] = self.metabolic_unit_to_rate(metabolic_unit)
+        if memory is not None:
+            fields["memory"] = self._memory_field(memory)
+        return TensorDict(fields, batch_size=[])
 
     def rule_based_step(self) -> AgentBatch:
         """Advance one step using the simulation's own policy.
@@ -613,7 +806,7 @@ class MultiAgentWorldEnv:
         decision = self._rule_decision(raw)
         rule_action = decision.move_direction.to(torch.long)
         rule_scores = self._rule_scores(raw)
-        rule_metabolic_level = self._rule_metabolic_level(decision)
+        rule_metabolic_unit = self._rule_metabolic_unit(decision)
         biomass_before = self.entity.biomass.data.clone()
         self.world.update()
 
@@ -626,14 +819,14 @@ class MultiAgentWorldEnv:
         return AgentBatch(
             observation=observation,
             acted=acted,
-            action=torch.zeros(self.size, dtype=torch.long, device=self.device),
+            action=torch.zeros(self.field_shape, dtype=torch.long, device=self.device),
             reward=reward,
             done=acted & ~alive_after,
             successor=successor,
             reproduced=transition.reproduced,
             rule_action=rule_action,
             rule_scores=rule_scores,
-            rule_metabolic_level=rule_metabolic_level,
+            rule_metabolic_unit=rule_metabolic_unit,
         )
 
     def stats(self) -> Dict[str, float]:

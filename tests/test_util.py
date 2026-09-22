@@ -416,8 +416,7 @@ def test_apply_kernels():
     assert torch.allclose(ein_result, conv_result)
 
 
-def test_flow_gradient():
-    torch.set_default_device('mps')
+def test_flow_gradient(default_device):
     input = torch.ones(128, 256, dtype=torch.float32)
     elevation = torch.ones_like(input, dtype=torch.float32) * torch.linspace(
         0,
@@ -445,8 +444,7 @@ def test_flow_gradient():
 
 
 
-def test_flow():
-    torch.set_default_device('mps')
+def test_flow(default_device):
     input = torch.ones(8, 8, dtype=torch.float32)
     elevation = torch.ones_like(input, dtype=torch.float32) * torch.linspace(
         0,

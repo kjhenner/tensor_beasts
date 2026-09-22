@@ -458,6 +458,31 @@ def gradient(h, x, y):
 
 
 def perlin_noise(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
+    """Perlin noise of shape ``size``, which may carry leading batch dimensions.
+
+    The generator itself is two-dimensional: it builds a meshgrid over
+    ``size[0]`` by ``size[1]``. Given a batched ``(B, H, W)`` it used to read B
+    and H as the grid and return the wrong shape, and its one caller wrapped
+    that in ``except (IndexError, RuntimeError)`` and silently fell back to
+    uniform random, so a batched world quietly lost its terrain. Leading
+    dimensions are now peeled off and each world gets an INDEPENDENT field,
+    which is the point: worlds that share their terrain are not independent
+    worlds.
+    """
+    if len(size) > 2:
+        leading, spatial = tuple(size[:-2]), tuple(size[-2:])
+        count = 1
+        for extent in leading:
+            count *= extent
+        fields = [
+            _perlin_noise_2d(spatial, res, octaves, persistence, lacunarity)
+            for _ in range(count)
+        ]
+        return torch.stack(fields).reshape(*leading, *spatial)
+    return _perlin_noise_2d(tuple(size), res, octaves, persistence, lacunarity)
+
+
+def _perlin_noise_2d(size, res, octaves=4, persistence=0.5, lacunarity=2.0):
     # Run on CPU to avoid MPS advanced indexing race conditions, then move to target device
     target_device = torch.get_default_device()
     run_on_cpu = target_device is not None and target_device.type == 'mps'

@@ -17,14 +17,21 @@ def get_direction_masks(
 ) -> Dict[int, torch.Tensor]:
     # If we get batched directions, we need to squeeze the batch dimension.
     #
-    # PHASE 1 NOTE: this is the one spot that CANNOT be made rank-agnostic. It
-    # dispatches on rank to strip the RL agent's leading singleton batch, so a
-    # real (B, H, W) world batch is indistinguishable from it. Adding the batch
-    # dimension will require the RL path to hand over directions already shaped
-    # like the world instead of being normalized here. Left alone on purpose:
-    # only the agent_action path in move() ever supplies a 3D tensor.
-    if len(directions.shape) == 3:
-        directions = directions.squeeze(0)
+    # Phase 1 left a rank dispatch here that stripped the RL agent's leading
+    # singleton batch, and noted it was the one spot that could not be made
+    # rank-agnostic: a real (B, H, W) world batch is indistinguishable from a
+    # singleton one, so squeezing would silently eat a genuine batch axis at
+    # B = 1, which is exactly the shape the RL path sends.
+    #
+    # The note also named the fix, and this is it: callers hand over directions
+    # already shaped like the field they act on. The squeeze is gone, so a
+    # mismatch is now a broadcast error rather than a silent rank change.
+    if directions.shape != entity_energy.shape:
+        raise ValueError(
+            f"direction field {tuple(directions.shape)} does not match the entity's "
+            f"{tuple(entity_energy.shape)}. Reshape it before calling move(); a "
+            "rank dispatch here cannot tell a batch of worlds from a singleton."
+        )
 
     # Base condition: has energy and (if provided) passes move_mask
     can_move = entity_energy > 0
@@ -194,9 +201,17 @@ def perform_move(
     # After this operation, each origin position where an offspring will be left will be adjusted by corresponding
     # feature functions
     for feature, fn in [(entity_energy, divide_fn_offspring)] + list(zip(carried_features_offspring or [], carried_feature_fns_offspring or [])):
+        # The offspring's share of energy is taken from the same post-cost
+        # energy the parent's share was, so a division costs exactly one move.
+        # It used to be taken from the pre-cost energy, and a reproducing
+        # animal paid half the cost of a plain move.
+        if move_cost is not None and feature is entity_energy:
+            source = (feature - move_cost).clamp(min=0)
+        else:
+            source = feature
         feature[:] = torch.where(
             offspring_mask,
-            fn(feature),
+            fn(source),
             feature
         )
 
