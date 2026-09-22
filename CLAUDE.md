@@ -30,11 +30,11 @@ venv/bin/python <script.py>
 - `train_rl.py` at the root is the entry point for training and evaluation.
 - `tools/` the command-line tools, run from the repository root because they
   load configs by relative path. See `tools/README.md`.
-- `conf/` simulation and RL configs; `conf/sweeps/` the W&B sweep configs.
-- `planning/` the design record, numbered in order. It is written so the
-  reasoning survives, including the parts that turned out to be wrong, and
-  several documents contain corrections of their own earlier claims. Read the
-  relevant one before changing anything it covers.
+- `conf/` simulation and RL configs.
+- `planning/STATE.md` describes what the code does and what the last session
+  intended next; `planning/HISTORY.md` lists what was tried and which results
+  are void. Neither records a settled decision. Read both before changing
+  anything they cover, and rewrite `STATE.md` when the state changes.
 - `outputs/` and `wandb/` are gitignored run artifacts.
 
 ## Before claiming a change is behaviour-preserving
