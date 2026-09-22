@@ -16,16 +16,13 @@ was tried before, and which earlier results are void, is in
 
 ## Setup
 
-Everything assumes a virtualenv at `venv/`. With
-[Poetry](https://python-poetry.org/docs/), `poetry install` from the
-repository root. Or with pip:
+Everything assumes a virtualenv at `venv/`, with the dependencies declared in
+`pyproject.toml`. Torch is installed first so the CUDA build can be chosen:
 
 ```bash
 python3 -m venv venv
 venv/bin/pip install torch --index-url https://download.pytorch.org/whl/cu126  # or /cpu
-venv/bin/pip install numpy pydantic omegaconf tensordict pytest tqdm rich \
-    matplotlib imageio imageio-ffmpeg pygame PyOpenGL wandb
-venv/bin/pip install -e . --no-deps
+venv/bin/pip install -e .
 ```
 
 ## Running the simulation
